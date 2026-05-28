@@ -44,7 +44,7 @@ DOCKER_USER="${DOCKER_USER:-$DEFAULT_DOCKER_USER}"
 DOCKER_DIR="${DOCKER_DIR:-/home/${DOCKER_USER}/docker}"
 COMPOSE_DIR="${COMPOSE_DIR:-${DOCKER_DIR}/compose}"
 ENV_FILE="${ENV_FILE:-${DOCKER_DIR}/.env}"
-GITHUB_RAW_BASE="${GITHUB_RAW_BASE:-https://raw.githubusercontent.com/Orik999/mySetup/main/docker}"
+GITHUB_RAW_BASE="${GITHUB_RAW_BASE:-https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main/docker}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 
@@ -104,8 +104,8 @@ function header_info() {
 echo -e "${BL}
 ██████╗  ██████╗ ███████╗████████╗      ██████╗ ██████╗ ██████╗ ███████╗
 ██╔══██╗██╔═══██╗██╔════╝╚══██╔══╝     ██╔════╝██╔═══██╗██╔══██╗██╔════╝
-██████╔╝██║   ██║███████╗   ██║        ██║     ██║   ██║██████╔╝█████╗  
-██╔═══╝ ██║   ██║╚════██║   ██║        ██║     ██║   ██║██╔══██╗██╔══╝  
+██████╔╝██║   ██║███████╗   ██║        ██║     ██║   ██║██████╔╝█████╗
+██╔═══╝ ██║   ██║╚════██║   ██║        ██║     ██║   ██║██╔══██╗██╔══╝
 ██║     ╚██████╔╝███████║   ██║        ╚██████╗╚██████╔╝██║  ██║███████╗
 ╚═╝      ╚═════╝ ╚══════╝   ╚═╝         ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝
 ${CL}"
@@ -526,6 +526,387 @@ function run_landing_module() {
     msg_ok "Landing deployed to ${DOCKER_DIR}/appdata/landing"
 
     return 0
+}
+
+# =========================================================
+# Admin Dashboard module
+# =========================================================
+function detect_admin_dashboard_state() {
+        section "ADMIN DASHBOARD DETECTION"
+        local compose_file="${DOCKER_DIR}/compose/admin-dashboard/compose.yaml"
+        if [ -f "$compose_file" ]; then
+                detail_line "Runtime compose" "$compose_file"
+                echo "installed"
+                return 0
+        fi
+        # detect containers
+        if docker ps --format '{{.Names}}' | grep -q '^admin-'; then
+                echo "installed"
+                return 0
+        fi
+        echo "missing"
+        return 0
+}
+
+function prompt_admin_dashboard_selection() {
+        section "ADMIN DASHBOARD"
+        echo "Select the admin dashboard to deploy:"
+        echo "  1) Homepage (default - lightweight links)"
+        echo "  2) Glance"
+        echo "  3) Homarr"
+        echo "  4) Dashy"
+        echo "  5) Skip"
+        local choice
+        choice="$(read_menu_choice "Choose dashboard" "1")"
+        echo "$choice"
+}
+
+function prepare_admin_dashboard_dirs() {
+        mkdir -p "${DOCKER_DIR}/compose/admin-dashboard"
+        mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/config"
+        mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/homarr"
+        mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/dashy"
+        chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/admin-dashboard" 2>/dev/null || true
+}
+
+function generate_admin_links_config() {
+        local sel="$1"
+        local cfgdir="${DOCKER_DIR}/appdata/admin-dashboard/config"
+        mkdir -p "$cfgdir"
+        case "$sel" in
+                                1)
+                                                mkdir -p "${cfgdir}/homepage"
+                                                # Homepage minimal config files
+                                                                                                cat > "${cfgdir}/homepage/services.yaml" <<EOF
+services:
+  - group: "Public / Customer"
+    items:
+      - name: "Landing Page"
+        href: "https://${LANDING_HOST}"
+  - group: "Identity / Admin"
+    items:
+      - name: "Authentik Admin"
+        href: "https://${AUTHENTIK_HOST}/if/admin/"
+  - group: "Admin Tools"
+    items:
+      - name: "Traefik"
+        href: "https://${TRAEFIK_HOST}"
+      - name: "Admin UI"
+        href: "https://${ADMIN_UI_HOST}"
+      - name: "n8n"
+        href: "https://${N8N_HOST}"
+      - name: "Files"
+        href: "https://${FILEBROWSER_HOST}"
+      - name: "VS Code"
+        href: "https://${VSCODE_HOST}"
+EOF
+
+                                                cat > "${cfgdir}/homepage/settings.yaml" <<EOF
+title: "Admin Links"
+theme: "default"
+EOF
+
+                                                cat > "${cfgdir}/homepage/bookmarks.yaml" <<EOF
+bookmarks:
+  - title: "Circl8 App"
+    href: "https://${POSTIZ_HOST}"
+EOF
+
+                                                # widgets.yaml left minimal for user customization
+                                                cat > "${cfgdir}/homepage/widgets.yaml" <<EOF
+widgets: []
+EOF
+                        ;;
+                                2)
+                                                # Glance minimal page configuration
+                                                                                                cat > "${cfgdir}/glance.yml" <<EOF
+pages:
+  - title: "Admin"
+    columns:
+      - widgets:
+          - type: "links"
+            title: "Important Links"
+            items:
+              - title: "Landing Page"
+                url: "https://${LANDING_HOST}"
+              - title: "Circl8 App"
+                url: "https://${POSTIZ_HOST}"
+              - title: "Authentik"
+                url: "https://${AUTHENTIK_HOST}"
+EOF
+                        ;;
+                3)
+                    # Homarr: do not invent static links config; ensure appdata exists
+                    mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/homarr"
+                    ;;
+                4)
+                                                mkdir -p "${cfgdir}/dashy"
+                                                                                                cat > "${cfgdir}/dashy/conf.yml" <<EOF
+pageInfo:
+  title: "Admin Dashboard"
+sections:
+  - title: "Links"
+    items:
+      - title: "Landing Page"
+        type: "link"
+        url: "https://${LANDING_HOST}"
+      - title: "Circl8 App"
+        type: "link"
+        url: "https://${POSTIZ_HOST}"
+      - title: "Authentik"
+        type: "link"
+        url: "https://${AUTHENTIK_HOST}"
+EOF
+                        ;;
+        esac
+}
+
+function render_admin_compose() {
+        local sel="$1"
+        local template=""
+        case "$sel" in
+                1) template="${SCRIPT_DIR}/docker/16-[1]-homepage-compose.yml" ;;
+                2) template="${SCRIPT_DIR}/docker/16-[2]-glance-compose.yml" ;;
+                3) template="${SCRIPT_DIR}/docker/16-[3]-homarr-compose.yml" ;;
+                4) template="${SCRIPT_DIR}/docker/16-[4]-dashy-compose.yml" ;;
+                *) return 1 ;;
+        esac
+    local out_compose="${DOCKER_DIR}/compose/admin-dashboard/compose.yaml"
+    mkdir -p "${DOCKER_DIR}/compose/admin-dashboard"
+
+    # Prefer local template when available
+    if [ -f "$template" ]; then
+        envsubst < "$template" > "$out_compose"
+        return 0
+    fi
+
+    # Fallback: attempt to download raw template from GitHub
+    local filename
+    filename="$(basename "$template")"
+    # URL-encode square brackets for raw GitHub URL (replace [ -> %5B, ] -> %5D)
+    local raw_filename
+    raw_filename="${filename//\[/%5B}"
+    raw_filename="${raw_filename//\]/%5D}"
+    local raw_url
+    raw_url="https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main/docker/${raw_filename}"
+
+    local tmpf
+    tmpf="$(mktemp)"
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -fsSL -g "$raw_url" -o "$tmpf"; then
+            rm -f "$tmpf"
+            msg_error "Failed to download template from $raw_url"
+            return 1
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if ! wget -qO "$tmpf" "$raw_url"; then
+            rm -f "$tmpf"
+            msg_error "Failed to download template from $raw_url"
+            return 1
+        fi
+    else
+        msg_error "Neither curl nor wget available to fetch remote template"
+        return 1
+    fi
+
+    envsubst < "$tmpf" > "$out_compose"
+    rm -f "$tmpf"
+    return 0
+}
+
+
+function show_admin_dashboard_ready() {
+    local sel_name="$1"
+    local will_generate_homarr_key="$2"
+    echo "Admin Dashboard Summary"
+    echo "-----------------------"
+    echo "Selected: $sel_name"
+    echo "Host: ${ADMIN_DASHBOARD_HOST}"
+    echo "Runtime compose: ${DOCKER_DIR}/compose/admin-dashboard/compose.yaml"
+    echo "Appdata path: ${DOCKER_DIR}/appdata/admin-dashboard"
+    echo ""
+    echo "Planned link/config files:"
+    case "$sel_name" in
+        Homepage)
+            echo " - ${DOCKER_DIR}/appdata/admin-dashboard/config/homepage/ (bookmarks/widgets)"
+            ;;
+        Glance)
+            echo " - ${DOCKER_DIR}/appdata/admin-dashboard/config/glance.yml"
+            ;;
+        Homarr)
+            echo " - ${DOCKER_DIR}/appdata/admin-dashboard/homarr/ (persistent appdata)"
+            if [ "$will_generate_homarr_key" = "yes" ]; then
+                echo " - A Homarr secret key will be generated and stored at ${DOCKER_DIR}/appdata/admin-dashboard/homarr/secret.key"
+            else
+                echo " - Existing Homarr secret.key will be reused if present"
+            fi
+            ;;
+        Dashy)
+            echo " - ${DOCKER_DIR}/appdata/admin-dashboard/config/dashy/conf.yml"
+            ;;
+    esac
+    echo ""
+    echo "Dashboard links that will be configured:"
+    echo " - Landing Page: https://${LANDING_HOST}"
+    echo " - Circl8 App: https://${POSTIZ_HOST}"
+    echo " - Authentik User Portal: https://${AUTHENTIK_HOST}"
+    echo " - Authentik Admin: https://${AUTHENTIK_HOST}/if/admin/"
+    echo " - Traefik: https://${TRAEFIK_HOST}"
+    echo " - Admin UI: https://${ADMIN_UI_HOST}"
+    echo " - n8n: https://${N8N_HOST}"
+    echo " - Files: https://${FILEBROWSER_HOST}"
+    echo " - VS Code: https://${VSCODE_HOST}"
+    echo ""
+    read -r -p "Proceed with these changes? (y/N): " yn
+    case "$yn" in
+        [Yy]*) return 0 ;;
+        *) msg_skip "User aborted admin dashboard action"; return 1 ;;
+    esac
+}
+
+function validate_admin_compose() {
+        docker compose -f "${DOCKER_DIR}/compose/admin-dashboard/compose.yaml" config >/dev/null 2>&1
+}
+
+function deploy_admin_compose() {
+        docker compose -f "${DOCKER_DIR}/compose/admin-dashboard/compose.yaml" up -d
+}
+
+function verify_admin_dashboard() {
+        # check if any admin-* container running
+        if ! docker ps --format '{{.Names}}' | grep -q '^admin-'; then
+                msg_warn "No admin dashboard container running"
+                return 1
+        fi
+        # check HTTP route
+        if curl -fsSI "https://${ADMIN_DASHBOARD_HOST}" >/dev/null 2>&1; then
+                # If response 200 without redirect, still ok only if protected middleware applied
+                return 0
+        else
+                msg_warn "Admin dashboard route not responding at https://${ADMIN_DASHBOARD_HOST}"
+                return 1
+        fi
+}
+
+function run_admin_dashboard_module() {
+        section "ADMIN DASHBOARD MODULE"
+
+        # Load .env-backed variables assumed already by load_env_file
+        : "${ADMIN_DASHBOARD_HOST:=}"
+        if [ -z "$ADMIN_DASHBOARD_HOST" ]; then
+                ADMIN_DASHBOARD_HOST="admin.${DOMAIN}"
+        fi
+
+        local state
+        state="$(detect_admin_dashboard_state)"
+
+        local choice
+        choice="$(prompt_admin_dashboard_selection)"
+        if [ "$choice" == "5" ] || [ "$choice" == "skip" ]; then
+            msg_skip "Admin dashboard: skipped by user"
+            return 0
+        fi
+
+        prepare_admin_dashboard_dirs
+
+        # Map choice number to human name
+        local sel_name
+        case "$choice" in
+            1) sel_name="Homepage" ;;
+            2) sel_name="Glance" ;;
+            3) sel_name="Homarr" ;;
+            4) sel_name="Dashy" ;;
+            *) sel_name="Unknown" ;;
+        esac
+
+        # If compose already exists, ask user what to do
+        local compose_file="${DOCKER_DIR}/compose/admin-dashboard/compose.yaml"
+        if [ -f "$compose_file" ]; then
+            echo "An admin dashboard compose already exists at $compose_file"
+            echo "Options: [s]kip, [r]ecreate (backup then overwrite), [o]verwrite (no backup)"
+            read -r -p "Choose action (s/r/o) [s]: " act
+            act="${act:-s}"
+            case "$act" in
+                s|S)
+                    msg_skip "User chose to skip admin dashboard changes"
+                    return 0
+                    ;;
+                r|R)
+                    # backup existing appdata if present
+                    if [ -d "${DOCKER_DIR}/appdata/admin-dashboard" ]; then
+                        local ts
+                        ts="$(date +%Y%m%d-%H%M%S)"
+                        mkdir -p "${DOCKER_DIR}/backups"
+                        local bfile="${DOCKER_DIR}/backups/admin-dashboard-${ts}.tar.gz"
+                        tar -czf "$bfile" -C "${DOCKER_DIR}" "appdata/admin-dashboard" || true
+                        msg_ok "Backed up existing appdata to $bfile"
+                    fi
+                    ;;
+                o|O)
+                    ;;
+                *) msg_skip "Invalid choice, skipping"; return 0 ;;
+            esac
+        fi
+
+        # Homarr secret handling
+        local will_gen_homarr_key="no"
+        if [ "$choice" == "3" ]; then
+            local homarr_dir="${DOCKER_DIR}/appdata/admin-dashboard/homarr"
+            mkdir -p "$homarr_dir"
+            local keyfile="$homarr_dir/secret.key"
+            if [ ! -f "$keyfile" ]; then
+                # generate strong secret
+                if command -v openssl >/dev/null 2>&1; then
+                    HOMARR_SECRET_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+                else
+                    HOMARR_SECRET_ENCRYPTION_KEY="$(head -c 32 /dev/urandom | base64)"
+                fi
+                umask 077
+                printf "%s" "$HOMARR_SECRET_ENCRYPTION_KEY" > "$keyfile"
+                chmod 600 "$keyfile" || true
+                will_gen_homarr_key="yes"
+            else
+                # reuse silently
+                HOMARR_SECRET_ENCRYPTION_KEY="$(cat "$keyfile")"
+            fi
+            # export for envsubst
+            export HOMARR_SECRET_ENCRYPTION_KEY
+        fi
+
+        # generate config files for chosen dashboard
+        generate_admin_links_config "$choice"
+
+        # Show summary and confirm
+        if ! show_admin_dashboard_ready "$sel_name" "$will_gen_homarr_key"; then
+            return 1
+        fi
+
+        if ! render_admin_compose "$choice"; then
+            msg_error "Failed to render admin dashboard compose"
+            return 1
+        fi
+
+        if ! validate_admin_compose; then
+            msg_error "Rendered admin dashboard compose is invalid"
+            return 1
+        fi
+
+        deploy_admin_compose
+
+        # Verify: check container running and HTTP response
+        if docker compose -f "$compose_file" ps --quiet >/dev/null 2>&1 && [ -n "$(docker compose -f "$compose_file" ps --quiet 2>/dev/null)" ]; then
+            msg_ok "Admin dashboard container(s) appear to be running"
+        else
+            msg_warn "Admin dashboard containers do not appear to be running; check 'docker compose -f $compose_file ps'"
+        fi
+
+        if curl -fsSI "https://${ADMIN_DASHBOARD_HOST}" >/dev/null 2>&1; then
+            msg_warn "Route ${ADMIN_DASHBOARD_HOST} responded (200/3xx). Browser-based Authentik protection verification is still required; a 200 response is not proof of Authentik protection."
+        else
+            msg_warn "Route ${ADMIN_DASHBOARD_HOST} did not respond to HTTP probe; verify Traefik and DNS"
+        fi
+
+        return 0
 }
 
 function sensitive_line_input() {
@@ -1725,6 +2106,7 @@ function main() {
 
     run_n8n_module
     run_landing_module
+    run_admin_dashboard_module
 
     write_verification_report
     write_completion_marker

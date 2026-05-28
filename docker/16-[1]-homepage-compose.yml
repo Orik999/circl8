@@ -1,0 +1,23 @@
+version: '3.9'
+services:
+  admin-homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    volumes:
+      - ${DOCKER_DIR}/appdata/admin-dashboard/config/homepage:/app/config:ro
+    environment:
+      - HOMEPAGE_ALLOWED_HOSTS=${ADMIN_DASHBOARD_HOST}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=t2_proxy"
+      - "traefik.http.routers.admin-dashboard.rule=Host(`${ADMIN_DASHBOARD_HOST}`)"
+      - "traefik.http.routers.admin-dashboard.entrypoints=https"
+      - "traefik.http.routers.admin-dashboard.tls=true"
+      - "traefik.http.routers.admin-dashboard.middlewares=chain-secure@file"
+      - "traefik.http.services.admin-dashboard.loadbalancer.server.port=3000"
+
+networks:
+  t2_proxy:
+    external: true

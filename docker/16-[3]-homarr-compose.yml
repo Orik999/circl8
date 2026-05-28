@@ -1,0 +1,24 @@
+version: '3.9'
+services:
+  admin-homarr:
+    image: ghcr.io/homarr-labs/homarr:latest
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    volumes:
+      - ${DOCKER_DIR}/appdata/admin-dashboard/homarr:/appdata:rw
+    environment:
+      # Placeholder only: do not store real secrets in repo
+      - SECRET_ENCRYPTION_KEY=${HOMARR_SECRET_ENCRYPTION_KEY}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=t2_proxy"
+      - "traefik.http.routers.admin-dashboard.rule=Host(`${ADMIN_DASHBOARD_HOST}`)"
+      - "traefik.http.routers.admin-dashboard.entrypoints=https"
+      - "traefik.http.routers.admin-dashboard.tls=true"
+      - "traefik.http.routers.admin-dashboard.middlewares=chain-secure@file"
+      - "traefik.http.services.admin-dashboard.loadbalancer.server.port=7575"
+
+networks:
+  t2_proxy:
+    external: true
