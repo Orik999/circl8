@@ -378,6 +378,156 @@ function timed_text_input() {
     echo "$answer"
 }
 
+# --- 40. LANDING PAGE HELPERS ---
+function validate_astro_project() {
+    local p="$1"
+    # must be a dir
+    if [ -z "$p" ] || [ ! -d "$p" ]; then
+        return 1
+    fi
+    # must contain package.json
+    if [ ! -f "$p/package.json" ]; then
+        return 1
+    fi
+    # must have astro config file
+    if ls "$p"/astro.config.* >/dev/null 2>&1 || [ -f "$p/astro.config.mjs" ]; then
+        return 0
+    fi
+    return 1
+}
+
+function collect_landing_source_path() {
+    section "LANDING SOURCE"
+    # Ensure VM-side folders exist
+    mkdir -p "${DOCKER_DIR}/projects/landing"
+    mkdir -p "${DOCKER_DIR}/appdata/landing"
+    mkdir -p "${DOCKER_DIR}/compose/landing"
+
+    local vm_path="${DOCKER_DIR}/projects/landing"
+    # Check for an existing Astro project in the VM destination
+    if validate_astro_project "$vm_path"; then
+        LANDING_SOURCE_PATH="$vm_path"
+        msg_ok "Landing source found on VM: ${LANDING_SOURCE_PATH}"
+        return 0
+    fi
+
+    msg_warn "No Astro landing source found at ${vm_path}"
+    cat <<-EOF
+Copy your Astro project from your laptop to the VM:
+
+  scp -r /path/to/circl8_astro/* <vm-user>@<vm-ip>:${vm_path}/
+
+Replace <vm-user> and <vm-ip> with your VM login and address.
+After copying, return here and press Enter to re-check; or type 's' then Enter to skip deployment.
+EOF
+
+    while true; do
+        printf "Press Enter to re-check, or type 's' to skip: "
+        read -r _ans
+        if [[ "$_ans" =~ ^[sS]$ ]]; then
+            msg_skip "Landing deployment skipped by user"
+            return 1
+        fi
+        if validate_astro_project "$vm_path"; then
+            LANDING_SOURCE_PATH="$vm_path"
+            msg_ok "Landing source detected: ${LANDING_SOURCE_PATH}"
+            return 0
+        fi
+        msg_warn "Still no valid Astro project at ${vm_path}."
+        cat <<-EOF
+If you copied files, ensure they include a package.json and astro.config.mjs (or astro.config.*).
+You can copy again with:
+
+  scp -r /path/to/circl8_astro/* <vm-user>@<vm-ip>:${vm_path}/
+
+Or type 's' then Enter to skip landing deployment.
+EOF
+    done
+}
+
+function backup_existing_landing() {
+    local ts
+    ts="$(date +%Y%m%d%H%M%S)"
+    if [ -d "${DOCKER_DIR}/appdata/landing" ]; then
+        mv "${DOCKER_DIR}/appdata/landing" "${DOCKER_DIR}/backups/landing-backup-${ts}" || true
+    fi
+}
+
+function copy_dist_to_appdata() {
+    local src_dist="$1"
+    local dest="${DOCKER_DIR}/appdata/landing"
+    mkdir -p "${DOCKER_DIR}/appdata" || true
+    mkdir -p "${DOCKER_DIR}/appdata/landing.new"
+    # portable copy via tar stream
+    tar -C "$src_dist" -cf - . | tar -C "${DOCKER_DIR}/appdata/landing.new" -xpf -
+    # rotate
+    if [ -d "$dest" ]; then
+        backup_existing_landing
+    fi
+    mv "${DOCKER_DIR}/appdata/landing.new" "$dest"
+    chown -R "${DOCKER_USER}:${DOCKER_USER}" "$dest" 2>/dev/null || true
+}
+
+function build_landing_ephemeral_docker() {
+    local src="$1"
+    msg_info "Building landing site in ephemeral Docker container"
+    if ! command -v docker >/dev/null 2>&1; then
+        msg_warn "Docker not available; cannot use ephemeral builder"
+        return 2
+    fi
+    run_cmd "building landing (docker)" docker run --rm -v "${src}":/src -w /src node:18-bullseye bash -lc "npm ci --no-audit --no-fund && \
+        PUBLIC_LANDING_HOST='${LANDING_HOST}' PUBLIC_LANDING_WWW_HOST='${LANDING_WWW_HOST}' PUBLIC_POSTIZ_HOST='${POSTIZ_HOST}' npm run build"
+    return 0
+}
+
+function build_landing_host_node() {
+    local src="$1"
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        msg_warn "Host Node/npm not available"
+        return 2
+    fi
+    (cd "$src" && npm ci --no-audit --no-fund && PUBLIC_LANDING_HOST="${LANDING_HOST}" PUBLIC_LANDING_WWW_HOST="${LANDING_WWW_HOST}" PUBLIC_POSTIZ_HOST="${POSTIZ_HOST}" npm run build)
+}
+
+function run_landing_module() {
+    section "LANDING MODULE"
+    # Read env-driven hostnames (assumes load_env_file already ran)
+    : "${LANDING_HOST:=}"
+    : "${LANDING_WWW_HOST:=}"
+    : "${POSTIZ_HOST:=}"
+
+    if ! collect_landing_source_path; then
+        msg_skip "Landing: no source provided; skipping"
+        return 0
+    fi
+
+    # Prompt user before building
+    if [[ "$(timed_yes_no 'Build landing site now?' 'Y')" =~ ^[Nn]$ ]]; then
+        msg_skip "Landing build skipped by user"
+        return 0
+    fi
+
+    # build: prefer docker builder, fallback to host node
+    if build_landing_ephemeral_docker "$LANDING_SOURCE_PATH"; then
+        :
+    else
+        if build_landing_host_node "$LANDING_SOURCE_PATH"; then :; else
+            msg_error "Landing build failed (no builder available)"
+            return 1
+        fi
+    fi
+
+    # verify dist
+    if [ ! -d "${LANDING_SOURCE_PATH}/dist" ]; then
+        msg_error "Landing build did not produce dist/"
+    fi
+
+    copy_dist_to_appdata "${LANDING_SOURCE_PATH}/dist"
+    msg_ok "Landing deployed to ${DOCKER_DIR}/appdata/landing"
+
+    return 0
+}
+
 function sensitive_line_input() {
     local prompt="$1"
     local answer=""
@@ -1574,6 +1724,7 @@ function main() {
     start_confirmation
 
     run_n8n_module
+    run_landing_module
 
     write_verification_report
     write_completion_marker

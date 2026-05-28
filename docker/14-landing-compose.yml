@@ -10,7 +10,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=t2_proxy"
-      - "traefik.http.routers.crea-landing.rule=Host(`www.${DOMAIN}`) || Host(`${DOMAIN}`)"
+      - "traefik.http.routers.crea-landing.rule=Host(`${LANDING_WWW_HOST}`) || Host(`${LANDING_HOST}`)"
       - "traefik.http.routers.crea-landing.entrypoints=https"
       - "traefik.http.routers.crea-landing.tls=true"
       - "traefik.http.routers.crea-landing.middlewares=chain-secure@file"
