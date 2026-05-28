@@ -1399,7 +1399,8 @@ function verify_postiz_health() {
     local postiz_running="no"
     local temporal_running="no"
     local backend_port_found=""
-    local auth_url="https://postiz.${DOMAIN}/auth"
+    local POSTIZ_HOST_VALUE="${POSTIZ_HOST:-app.${DOMAIN}}"
+    local auth_url="https://${POSTIZ_HOST_VALUE}/auth"
     local auth_code=""
 
     msg_info "Checking Temporal container"

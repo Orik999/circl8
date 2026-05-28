@@ -18,10 +18,10 @@ services:
     environment:
       TZ: ${TZ}
 
-      MAIN_URL: https://postiz.${DOMAIN}
-      FRONTEND_URL: https://postiz.${DOMAIN}
-      NEXT_PUBLIC_BACKEND_URL: https://postiz.${DOMAIN}/api
-      BACKEND_URL: https://postiz.${DOMAIN}/api
+      MAIN_URL: https://${POSTIZ_HOST}
+      FRONTEND_URL: https://${POSTIZ_HOST}
+      NEXT_PUBLIC_BACKEND_URL: https://${POSTIZ_HOST}/api
+      BACKEND_URL: https://${POSTIZ_HOST}/api
       BACKEND_INTERNAL_URL: http://127.0.0.1:3000
 
       DATABASE_URL: postgresql://postiz:${POSTIZ_POSTGRES_PASSWORD}@postgres:5432/postiz
@@ -52,7 +52,7 @@ services:
     labels:
       traefik.enable: "true"
 
-      traefik.http.routers.postiz.rule: Host(`postiz.${DOMAIN}`)
+      traefik.http.routers.postiz.rule: Host(`${POSTIZ_HOST}`)
       traefik.http.routers.postiz.entrypoints: https
       traefik.http.routers.postiz.tls: "true"
       traefik.http.routers.postiz.middlewares: chain-large-upload@file
