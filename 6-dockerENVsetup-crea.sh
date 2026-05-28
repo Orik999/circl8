@@ -839,6 +839,19 @@ function untimed_menu_input() {
     done
 }
 
+# --- 27B. NON-TIMED HOSTNAME INPUT HELPER ---
+# Uses editable_input_loop directly to guarantee no countdown/timer is shown
+function hostname_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+
+    answer="$(editable_input_loop "$prompt" "$default" "")"
+    [ -z "$answer" ] && answer="$default"
+    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    echo "$answer"
+}
+
 
 # --- 28. HIDDEN INPUT HELPER ---
 # Reads sensitive input without echoing it to terminal.
@@ -1600,6 +1613,150 @@ function collect_domain_cloudflare_inputs() {
 }
 
 
+# --- 47. SERVICE HOSTNAMES INPUTS ---
+# Collects optional per-service hostnames and writes into variables used by write_env_file().
+function collect_service_hostnames() {
+    section "SERVICE HOSTNAMES"
+
+    tty_println "Base domain: ${DOMAIN_VALUE}"
+    echo ""
+
+    # Compute defaults
+    local d="${DOMAIN_VALUE}"
+    local def_landing="${d}"
+    local def_landing_www="www.${d}"
+    local def_authentik="auth.${d}"
+    local def_traefik="traefik.${d}"
+    local def_admin="dockge.${d}"
+    local def_postiz="app.${d}"
+    local def_n8n="n8n.${d}"
+    local def_files="files.${d}"
+    local def_code="code.${d}"
+
+    # If an existing .env exists, prefer those values when preserving on No
+    local existing_landing existing_landing_www existing_authentik existing_traefik existing_admin existing_postiz existing_n8n existing_files existing_code
+    if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
+        existing_landing="$(grep -E '^LANDING_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_landing_www="$(grep -E '^LANDING_WWW_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_authentik="$(grep -E '^AUTHENTIK_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_traefik="$(grep -E '^TRAEFIK_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_admin="$(grep -E '^ADMIN_UI_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_postiz="$(grep -E '^POSTIZ_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_n8n="$(grep -E '^N8N_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_files="$(grep -E '^FILEBROWSER_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_code="$(grep -E '^VSCODE_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    fi
+
+    # If Admin UI selection already set ADMIN_UI_HOST at runtime, prefer it
+    if [ -n "${ADMIN_UI_HOST:-}" ]; then
+        existing_admin="${ADMIN_UI_HOST}"
+    fi
+
+    # Ask whether to customize (default No)
+    local customize="$(timed_yes_no "Customize service hostnames?" "N")"
+
+    if [[ "$customize" =~ ^[Nn]$ ]]; then
+        # Preserve existing values when present, otherwise use defaults
+        LANDING_HOST="${existing_landing:-${def_landing}}"
+        LANDING_WWW_HOST="${existing_landing_www:-${def_landing_www}}"
+        AUTHENTIK_HOST="${existing_authentik:-${def_authentik}}"
+        TRAEFIK_HOST="${existing_traefik:-${def_traefik}}"
+        ADMIN_UI_HOST="${existing_admin:-${def_admin}}"
+        # POSTIZ_HOST handled by existing Batch 2 code; preserve existing or default
+        POSTIZ_HOST="${existing_postiz:-${def_postiz}}"
+        N8N_HOST="${existing_n8n:-${def_n8n}}"
+        FILEBROWSER_HOST="${existing_files:-${def_files}}"
+        VSCODE_HOST="${existing_code:-${def_code}}"
+
+        msg_ok "Service hostnames set to defaults/preserved values"
+        return 0
+    fi
+
+    # Interactive customization: use non-timed hostname_input() and validate
+    while true; do
+        LANDING_HOST="$(hostname_input "Landing page hostname" "${existing_landing:-${def_landing}}")"
+        if validate_domain "$LANDING_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    while true; do
+        LANDING_WWW_HOST="$(hostname_input "Landing www hostname" "${existing_landing_www:-${def_landing_www}}")"
+        if validate_domain "$LANDING_WWW_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    while true; do
+        AUTHENTIK_HOST="$(hostname_input "Authentik hostname" "${existing_authentik:-${def_authentik}}")"
+        if validate_domain "$AUTHENTIK_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    while true; do
+        TRAEFIK_HOST="$(hostname_input "Traefik hostname" "${existing_traefik:-${def_traefik}}")"
+        if validate_domain "$TRAEFIK_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    while true; do
+        ADMIN_UI_HOST="$(hostname_input "Admin UI hostname" "${existing_admin:-${def_admin}}")"
+        if validate_domain "$ADMIN_UI_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    while true; do
+        POSTIZ_HOST="$(hostname_input "Postiz app hostname" "${existing_postiz:-${def_postiz}}")"
+        if validate_domain "$POSTIZ_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    while true; do
+        N8N_HOST="$(hostname_input "n8n hostname" "${existing_n8n:-${def_n8n}}")"
+        if validate_domain "$N8N_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    while true; do
+        FILEBROWSER_HOST="$(hostname_input "Files hostname" "${existing_files:-${def_files}}")"
+        if validate_domain "$FILEBROWSER_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    while true; do
+        VSCODE_HOST="$(hostname_input "VS Code hostname" "${existing_code:-${def_code}}")"
+        if validate_domain "$VSCODE_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    echo ""
+    detail_line "LANDING_HOST" "$LANDING_HOST"
+    detail_line "LANDING_WWW_HOST" "$LANDING_WWW_HOST"
+    detail_line "AUTHENTIK_HOST" "$AUTHENTIK_HOST"
+    detail_line "TRAEFIK_HOST" "$TRAEFIK_HOST"
+    detail_line "ADMIN_UI_HOST" "$ADMIN_UI_HOST"
+    detail_line "POSTIZ_HOST" "$POSTIZ_HOST"
+    detail_line "N8N_HOST" "$N8N_HOST"
+    detail_line "FILEBROWSER_HOST" "$FILEBROWSER_HOST"
+    detail_line "VSCODE_HOST" "$VSCODE_HOST"
+
+    local confirm="$(timed_yes_no "Write these hostnames to .env?" "Y")"
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        msg_ok "Hostnames will be written into .env when write_env_file() runs"
+    else
+        msg_warn "Hostnames not changed; existing values will be preserved"
+        # If user cancels, preserve existing or defaults without writing changes now
+        LANDING_HOST="${existing_landing:-${def_landing}}"
+        LANDING_WWW_HOST="${existing_landing_www:-${def_landing_www}}"
+        AUTHENTIK_HOST="${existing_authentik:-${def_authentik}}"
+        TRAEFIK_HOST="${existing_traefik:-${def_traefik}}"
+        ADMIN_UI_HOST="${existing_admin:-${def_admin}}"
+        POSTIZ_HOST="${existing_postiz:-${def_postiz}}"
+        N8N_HOST="${existing_n8n:-${def_n8n}}"
+        FILEBROWSER_HOST="${existing_files:-${def_files}}"
+        VSCODE_HOST="${existing_code:-${def_code}}"
+    fi
+}
+
+
 # --- 46A. TRAEFIK CONFIG INPUTS ---
 # Collects non-secret Traefik values used to render template config files.
 # Cloudflare token stays in ${CF_API_TOKEN_FILE}; it is never embedded into Traefik YAML.
@@ -2239,7 +2396,17 @@ PROXMOX_URL="${PROXMOX_URL}"
 TRAEFIK_DASHBOARD_HOST="${TRAEFIK_DASHBOARD_HOST}"
 TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_STATIC_CONFIG_FILE}"
 TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DYNAMIC_CONFIG_FILE}"
-TRAEFIK_ACME_STORAGE="${TRAEFIK_ACME_DIR}/acme.json"
+    TRAEFIK_ACME_STORAGE="${TRAEFIK_ACME_DIR}/acme.json"
+
+# --- Service hostnames (set by collect_service_hostnames) ---
+LANDING_HOST="${LANDING_HOST}"
+LANDING_WWW_HOST="${LANDING_WWW_HOST}"
+AUTHENTIK_HOST="${AUTHENTIK_HOST}"
+TRAEFIK_HOST="${TRAEFIK_HOST}"
+# POSTIZ_HOST is populated by Batch 2 and preserved here
+N8N_HOST="${N8N_HOST}"
+FILEBROWSER_HOST="${FILEBROWSER_HOST}"
+VSCODE_HOST="${VSCODE_HOST}"
 
 # --- Admin UI selection ---
 ADMIN_UI="${ADMIN_UI}"
@@ -2795,6 +2962,7 @@ function main() {
     detect_existing_setup
     collect_domain_cloudflare_inputs
     collect_admin_ui_selection
+    collect_service_hostnames
     collect_authentik_inputs
     collect_traefik_inputs
     collect_htpasswd_inputs
