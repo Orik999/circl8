@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  filebrowser:
+    image: gtstef/filebrowser:stable
+    container_name: filebrowser
+    restart: unless-stopped
+
+    # runtime substitution: PUID/PGID/TZ/DOCKER_DIR/FILEBROWSER_HOST provided by Script 8
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    networks:
+      - t2_proxy
+
+    volumes:
+      # STRICT single appdata mount only
+      - ${DOCKER_DIR}/appdata/filebrowser-quantum/data:/home/filebrowser/data:rw
+
+    environment:
+      TZ: "${TZ:-UTC}"
+
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.filebrowser.rule: "Host(`${FILEBROWSER_HOST}`)"
+      traefik.http.routers.filebrowser.entrypoints: "https"
+      traefik.http.routers.filebrowser.tls: "true"
+      # NOTE: Do NOT add Authentik forward-auth middleware here.
+      # If upload middleware is required and validated, Script 8 will append it when rendering.
+      traefik.http.services.filebrowser.loadbalancer.server.port: "80"
+
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  t2_proxy:
+    external: true

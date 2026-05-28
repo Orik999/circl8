@@ -764,6 +764,262 @@ function show_admin_dashboard_ready() {
     esac
 }
 
+function sensitive_line_input() {
+    local prompt="$1"
+    local val=""
+    if [ -r /dev/tty ]; then
+        tty_print "${BFR}${YW}${prompt}: ${CL}"
+        IFS= read -rs val < /dev/tty || true
+        tty_print "\n"
+    else
+        read -rs val || true
+        echo
+    fi
+    val="$(printf '%s' "$val" | tr -d '\r')"
+    printf '%s' "$val"
+}
+
+function show_filebrowser_quantum_instructions() {
+    section "FILEBROWSER QUANTUM OIDC INSTRUCTIONS"
+    echo "Manual Authentik OIDC setup instructions"
+    echo "  - Create an OAuth2/OIDC Application in Authentik."
+    echo "  - Suggested provider slug: filebrowser-quantum (verify in Authentik UI)."
+    echo "  - Issuer URL must match the provider issuer exactly."
+    echo "  - Callback URI: https://${FILEBROWSER_HOST}/api/auth/oidc/callback"
+    echo "  - Scopes: openid, email, profile, groups"
+    echo "  - User identifier: preferred_username"
+    echo ""
+}
+
+function text_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+
+    flush_input_buffer
+    tty_print "${YW}${prompt} [default: ${default}]: ${CL}"
+    if [ -r /dev/tty ]; then
+        IFS= read -r answer < /dev/tty || true
+    else
+        IFS= read -r answer || true
+    fi
+    answer="${answer:-$default}"
+    tty_println ""
+    printf '%s' "$answer"
+}
+
+function collect_filebrowser_oidc_vars() {
+    section "FILEBROWSER OIDC CONFIG"
+    show_filebrowser_quantum_instructions
+
+    : "${AUTHENTIK_HOST:=}"
+    local default_issuer="https://${AUTHENTIK_HOST}/application/o/filebrowser-quantum/"
+    FILEBROWSER_OIDC_ISSUER_URL="$(text_input 'FILEBROWSER_OIDC_ISSUER_URL' "$default_issuer")"
+    FILEBROWSER_OIDC_CLIENT_ID="$(text_input 'FILEBROWSER_OIDC_CLIENT_ID' '')"
+    FILEBROWSER_OIDC_CLIENT_SECRET="$(sensitive_line_input 'FILEBROWSER_OIDC_CLIENT_SECRET (input hidden)')"
+
+    if [ -z "$FILEBROWSER_OIDC_ISSUER_URL" ] || [ -z "$FILEBROWSER_OIDC_CLIENT_ID" ] || [ -z "$FILEBROWSER_OIDC_CLIENT_SECRET" ]; then
+        msg_error "OIDC issuer URL, client ID, and client secret are required."
+    fi
+}
+
+function prepare_filebrowser_dirs() {
+    msg_info "Creating FileBrowser directories"
+    mkdir -p "${DOCKER_DIR}/appdata/filebrowser-quantum/data"
+    mkdir -p "${DOCKER_DIR}/compose/filebrowser-quantum"
+    chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/filebrowser-quantum" 2>/dev/null || true
+    msg_ok "Prepared FileBrowser appdata and compose dirs"
+}
+
+function backup_filebrowser_appdata() {
+    local fb_dir="${DOCKER_DIR}/appdata/filebrowser-quantum"
+    if [ -d "$fb_dir" ]; then
+        mkdir -p "${DOCKER_DIR}/backups"
+        local ts
+        ts="$(date +%Y%m%d-%H%M%S)"
+        local archive="${DOCKER_DIR}/backups/filebrowser-quantum-${ts}.tar.gz"
+        if tar -czf "$archive" -C "${DOCKER_DIR}" "appdata/filebrowser-quantum" >/dev/null 2>&1; then
+            msg_ok "Backed up existing FileBrowser appdata to $archive"
+        else
+            msg_warn "Failed to back up existing FileBrowser appdata to $archive"
+            rm -f "$archive" 2>/dev/null || true
+        fi
+    fi
+}
+
+function render_filebrowser_config() {
+    local cfg_dir="${DOCKER_DIR}/appdata/filebrowser-quantum/data"
+    local tmpf
+    tmpf="$(mktemp)" || msg_error "Failed to create temporary file for config"
+    umask 077
+    cat > "$tmpf" <<-EOF
+server:
+  port: 80
+
+auth:
+  oidc:
+    enabled: true
+    issuerUrl: "${FILEBROWSER_OIDC_ISSUER_URL}"
+    clientId: "${FILEBROWSER_OIDC_CLIENT_ID}"
+    clientSecret: "${FILEBROWSER_OIDC_CLIENT_SECRET}"
+    scopes:
+      - openid
+      - email
+      - profile
+      - groups
+    userIdentifier: "preferred_username"
+EOF
+    mkdir -p "$cfg_dir"
+    mv "$tmpf" "${cfg_dir}/config.yaml"
+    chown "${DOCKER_USER}:${DOCKER_USER}" "${cfg_dir}/config.yaml" 2>/dev/null || true
+    chmod 0600 "${cfg_dir}/config.yaml" || true
+    msg_ok "Wrote FileBrowser config.yaml to ${cfg_dir}/config.yaml"
+}
+
+function render_filebrowser_compose() {
+    local local_template="${SCRIPT_DIR}/docker/15-filebrowser-quantum-compose.yml"
+    local remote_url="https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main/docker/15-filebrowser-quantum-compose.yml"
+    local out_compose="${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
+    local template_file=""
+    local downloaded="no"
+
+    if [ -f "$local_template" ]; then
+        template_file="$local_template"
+    else
+        template_file="$(mktemp)" || msg_error "Failed to create temp file for remote template"
+        downloaded="yes"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL -g "$remote_url" -o "$template_file" || { rm -f "$template_file"; msg_error "Failed to download remote FileBrowser compose template"; }
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO "$template_file" "$remote_url" || { rm -f "$template_file"; msg_error "Failed to download remote FileBrowser compose template"; }
+        else
+            rm -f "$template_file"
+            msg_error "Neither curl nor wget available to fetch remote FileBrowser compose template"
+        fi
+    fi
+
+    envsubst < "$template_file" > "$out_compose" || { rm -f "$out_compose"; [ "$downloaded" = "yes" ] && rm -f "$template_file"; msg_error "Failed to render FileBrowser compose"; }
+    [ "$downloaded" = "yes" ] && rm -f "$template_file"
+    msg_ok "Rendered FileBrowser compose to $out_compose"
+}
+
+function validate_filebrowser_compose() {
+    local compose_file="${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
+    msg_info "Validating FileBrowser compose"
+    if ! docker compose -f "$compose_file" config >/dev/null 2>&1; then
+        msg_error "docker compose config failed for $compose_file"
+    fi
+    msg_ok "FileBrowser compose validated"
+}
+
+function deploy_filebrowser_compose() {
+    local compose_file="${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
+    msg_info "Deploying FileBrowser stack"
+    if ! docker compose -f "$compose_file" up -d; then
+        msg_error "docker compose up failed for FileBrowser"
+    fi
+    msg_ok "FileBrowser stack started"
+}
+
+function verify_filebrowser_deploy() {
+    msg_info "Verifying FileBrowser deployment"
+    docker ps --filter "name=filebrowser" --format 'table {{.Names}}\t{{.Status}}'
+    docker compose -f "${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml" logs --tail 80 || true
+    if curl -fsSI "https://${FILEBROWSER_HOST}" >/dev/null 2>&1; then
+        msg_ok "Route https://${FILEBROWSER_HOST} is reachable"
+    else
+        msg_warn "Route https://${FILEBROWSER_HOST} is not reachable via HTTPS"
+    fi
+    msg_warn "Browser-based OIDC login flow must be tested manually. Visit https://${FILEBROWSER_HOST} and confirm Authentik redirect and successful login."
+}
+
+function prompt_filebrowser_action() {
+    local compose_file="${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
+    local choice=""
+    if [ -f "$compose_file" ]; then
+        echo "Existing FileBrowser Quantum compose detected at $compose_file"
+        echo "Options:"
+        echo "  1) Skip"
+        echo "  2) Recreate (backup then overwrite compose/config)"
+        echo "  3) Reset (backup, remove appdata and compose, then deploy fresh)"
+        echo "  4) Deploy existing compose"
+        choice="$(read_menu_choice 'Choose FileBrowser Quantum action' '1')"
+        case "$choice" in
+            1) echo "skip" ;;
+            2) echo "recreate" ;;
+            3) echo "reset" ;;
+            4) echo "deploy" ;;
+            *) echo "skip" ;;
+        esac
+    else
+        echo "FileBrowser Quantum is not currently deployed."
+        echo "Options:"
+        echo "  1) Deploy"
+        echo "  2) Skip"
+        choice="$(read_menu_choice 'Choose FileBrowser Quantum action' '2')"
+        case "$choice" in
+            1) echo "deploy" ;;
+            2) echo "skip" ;;
+            *) echo "skip" ;;
+        esac
+    fi
+}
+
+function run_filebrowser_quantum_module() {
+    section "FILEBROWSER QUANTUM MODULE"
+    : "${DOCKER_DIR:=/home/${DOCKER_USER}/docker}"
+    : "${FILEBROWSER_HOST:=files.${DOMAIN}}"
+
+    local compose_file="${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
+    local action
+    action="$(prompt_filebrowser_action)"
+    if [ "$action" = "skip" ]; then
+        msg_skip "FileBrowser Quantum action skipped by user"
+        return 0
+    fi
+
+    if [ "$action" = "reset" ]; then
+        backup_filebrowser_appdata
+        rm -rf "${DOCKER_DIR}/appdata/filebrowser-quantum" "${DOCKER_DIR}/compose/filebrowser-quantum" 2>/dev/null || true
+    elif [ "$action" = "recreate" ]; then
+        backup_filebrowser_appdata
+    fi
+
+    if [ "$action" = "deploy" ] && [ -f "$compose_file" ]; then
+        msg_ok "Using existing FileBrowser compose at $compose_file"
+        validate_filebrowser_compose
+        deploy_filebrowser_compose
+        sleep 3
+        verify_filebrowser_deploy
+        return 0
+    fi
+
+    collect_filebrowser_oidc_vars
+    echo ""
+    echo "READY TO APPLY FileBrowser Quantum"
+    echo " - FileBrowser host: https://${FILEBROWSER_HOST}"
+    echo " - Runtime config: ${DOCKER_DIR}/appdata/filebrowser-quantum/data/config.yaml"
+    echo " - Runtime compose: ${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
+    echo " - Compose template: ${SCRIPT_DIR}/docker/15-filebrowser-quantum-compose.yml"
+    echo ""
+    if [[ "$(timed_yes_no 'Proceed and apply FileBrowser Quantum deployment now?' 'Y')" =~ ^[Nn]$ ]]; then
+        msg_skip "FileBrowser Quantum deployment skipped by user"
+        return 0
+    fi
+
+    prepare_filebrowser_dirs
+    render_filebrowser_config
+    render_filebrowser_compose
+    validate_filebrowser_compose
+    if [[ "$(timed_yes_no 'Deploy FileBrowser Quantum now with docker compose up -d?' 'Y')" =~ ^[Nn]$ ]]; then
+        msg_skip "FileBrowser Quantum deployment aborted after validation"
+        return 0
+    fi
+    deploy_filebrowser_compose
+    sleep 3
+    verify_filebrowser_deploy
+}
+
 function validate_admin_compose() {
         docker compose -f "${DOCKER_DIR}/compose/admin-dashboard/compose.yaml" config >/dev/null 2>&1
 }
@@ -907,19 +1163,6 @@ function run_admin_dashboard_module() {
         fi
 
         return 0
-}
-
-function sensitive_line_input() {
-    local prompt="$1"
-    local answer=""
-    tty_print "${YW}${prompt}: ${CL}"
-    if [ -r /dev/tty ]; then
-        IFS= read -rs answer < /dev/tty || true
-    else
-        IFS= read -rs answer || true
-    fi
-    tty_println ""
-    printf '%s' "$answer"
 }
 
 function read_menu_choice() {
@@ -2107,6 +2350,7 @@ function main() {
     run_n8n_module
     run_landing_module
     run_admin_dashboard_module
+    run_filebrowser_quantum_module
 
     write_verification_report
     write_completion_marker
