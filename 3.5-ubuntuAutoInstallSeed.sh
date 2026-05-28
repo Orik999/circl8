@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.0"
-SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="audit-untimed-inputs-stability"
+SCRIPT_VERSION="v1.2.1"
+SCRIPT_UPDATED="2026-05-28"
+SCRIPT_BUILD="audit-untimed-inputs-stability-ui-color-fix"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -866,9 +866,11 @@ echo "Keyboard Layout: ${TARGET_KEYBOARD_LAYOUT}"
 echo "Locale: ${TARGET_LOCALE}"
 echo ""
 
-PASS() { echo "✓ PASS - \$1"; }
-WARN() { echo "! WARN - \$1"; }
-FAIL() { echo "✗ FAIL - \$1"; }
+# Colourised output for readability (UI-only). Uses ANSI escapes so
+# the verifier script remains self-contained when executed on target.
+PASS() { echo -e "\033[1;92m✓ PASS - \$1\033[m"; }
+WARN() { echo -e "\033[33m! WARN - \$1\033[m"; }
+FAIL() { echo -e "\033[01;31m✗ FAIL - \$1\033[m"; }
 
 if [ -s "/home/${TARGET_USERNAME}/.ssh/authorized_keys" ]; then PASS "SSH authorized_keys present"; else FAIL "SSH authorized_keys missing"; fi
 if sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then PASS "SSH password authentication disabled"; else FAIL "SSH password authentication not disabled"; fi
@@ -1905,9 +1907,9 @@ Results:
 EOF
 
     {
-        PASS() { echo "✓ PASS - $1"; }
-        WARN() { echo "! WARN - $1"; }
-        FAIL() { echo "✗ FAIL - $1"; }
+        PASS() { echo -e "\033[1;92m✓ PASS - $1\033[m"; }
+        WARN() { echo -e "\033[33m! WARN - $1\033[m"; }
+        FAIL() { echo -e "\033[01;31m✗ FAIL - $1\033[m"; }
 
         if qm config "$TARGET_VMID" >/dev/null 2>&1; then PASS "VM config exists"; else FAIL "VM config missing"; fi
         if qm config "$TARGET_VMID" 2>/dev/null | grep -q "^boot: order=scsi0"; then PASS "Boot order is installed disk first"; else WARN "Boot order is not confirmed as scsi0"; fi
