@@ -1,0 +1,60 @@
+# 10-cf-companion-compose.yml
+# Project: Traefik Cloudflare Companion
+# Purpose: Automatically creates/updates Cloudflare DNS records from Traefik Docker labels.
+#
+# Public-GitHub-safe:
+# - No Cloudflare token is stored in this file.
+# - Script 6 writes the real token to ${CF_API_TOKEN_FILE}.
+# - Docker mounts it as the official companion secret name: cf_token.
+# - API token auth uses only the official cf_token Docker secret; CF_EMAIL is not rendered for token auth.
+#
+# Notes:
+# - Docker label discovery is enabled through socket-proxy.
+# - Traefik polling is intentionally disabled because Docker label discovery is sufficient.
+# - Uses official tiredofit/traefik-cloudflare-companion Cloudflare auth naming.
+
+name: cf-companion
+
+secrets:
+  cf_token:
+    file: ${CF_API_TOKEN_FILE}
+
+services:
+  cf-companion:
+    env_file:
+      - ${DOCKER_DIR}/.env
+    image: ${CF_COMPANION_IMAGE:-tiredofit/traefik-cloudflare-companion:latest}
+    container_name: cf-companion
+    restart: unless-stopped
+
+    security_opt:
+      - no-new-privileges:true
+
+    networks:
+      - socket_proxy
+
+    secrets:
+      - cf_token
+
+    environment:
+      # Timezone.
+      TIMEZONE: ${TZ}
+
+      # Docker provider discovery through socket proxy.
+      DOCKER_HOST: tcp://socket-proxy:2375
+
+      # Traefik label discovery mode.
+      TRAEFIK_VERSION: 2
+      ENABLE_TRAEFIK_POLL: "FALSE"
+
+      # Cloudflare zone/domain mapping.
+      TARGET_DOMAIN: ${DOMAIN}
+      DOMAIN1: ${DOMAIN}
+      DOMAIN1_ZONE_ID: ${CF_ZONE_ID}
+      DOMAIN1_PROXIED: "true"
+      DEFAULT_TTL: 1
+
+networks:
+  socket_proxy:
+    name: socket_proxy
+    external: true

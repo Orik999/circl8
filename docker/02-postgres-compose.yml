@@ -1,0 +1,41 @@
+# 02-postgres-compose.yml
+# Project: PostgreSQL
+# Purpose: Shared internal PostgreSQL service for Authentik, Postiz, Temporal, and future apps.
+
+name: postgres
+
+services:
+  postgres:
+    env_file:
+      - ${DOCKER_DIR}/.env
+    image: ${POSTGRES_IMAGE:-postgres:latest}
+    container_name: postgres
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - database
+    volumes:
+      # PostgreSQL 18+ / postgres:latest requires a single mount at /var/lib/postgresql.
+      # Keep this separate from legacy failed-init folders to avoid PG18 layout detection issues.
+      - ${DOCKER_DIR}/appdata/postgres/pgdata:/var/lib/postgresql
+      - ${DOCKER_DIR}/appdata/postgres/init:/docker-entrypoint-initdb.d:ro
+    environment:
+      TZ: ${TZ}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      AUTHENTIK_POSTGRES_PASSWORD: ${AUTHENTIK_POSTGRES_PASSWORD}
+      POSTIZ_POSTGRES_PASSWORD: ${POSTIZ_POSTGRES_PASSWORD}
+      TEMPORAL_POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  database:
+    name: database
+    external: true

@@ -1,0 +1,50 @@
+# 04-traefik-compose.yml
+# Project: Traefik
+# Purpose: Reverse proxy and Cloudflare DNS-01 certificate resolver.
+# Runtime config is rendered by Script 6 into ${DOCKER_DIR}/appdata/traefik.
+
+name: traefik
+
+secrets:
+  cf_api_token:
+    file: ${CF_API_TOKEN_FILE}
+  htpasswd:
+    file: ${DOCKER_SECRETS_DIR}/htpasswd
+
+services:
+  traefik:
+    env_file:
+      - ${DOCKER_DIR}/.env
+    image: ${TRAEFIK_IMAGE:-traefik:latest}
+    container_name: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      t2_proxy:
+        ipv4_address: 192.168.90.254
+      socket_proxy:
+    ports:
+      - "80:80"
+      - "443:443"
+    secrets:
+      - cf_api_token
+      - htpasswd
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${DOCKER_DIR}/appdata/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ${DOCKER_DIR}/appdata/traefik/dynamic-config.yml:/etc/traefik/dynamic-config.yml:ro
+      - ${DOCKER_DIR}/appdata/traefik/acme:/acme
+    environment:
+      TZ: ${TZ}
+      CF_DNS_API_TOKEN_FILE: /run/secrets/cf_api_token
+    labels:
+      traefik.enable: "true"
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true
+  socket_proxy:
+    name: socket_proxy
+    external: true
