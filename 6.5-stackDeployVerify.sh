@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.31"
+SCRIPT_VERSION="v1.3.34"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="postgres-pgdata-repair-gate"
+SCRIPT_BUILD="postgres-pgdata-restart-membership-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1728,6 +1728,38 @@ function postgres_data_owner() {
     service_data_owner "$POSTGRES_STACK_FILE" "999" "999"
 }
 
+function postgres_container_process_owner() {
+    local runtime_uid=""
+    local runtime_gid=""
+
+    if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'postgres'; then
+        runtime_uid="$(docker_cmd exec postgres sh -lc 'id -u postgres' 2>/dev/null || true)"
+        runtime_gid="$(docker_cmd exec postgres sh -lc 'id -g postgres' 2>/dev/null || true)"
+
+        if [[ "$runtime_uid" =~ ^[0-9]+$ ]] && [[ "$runtime_gid" =~ ^[0-9]+$ ]]; then
+            printf '%s:%s' "$runtime_uid" "$runtime_gid"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+function postgres_container_pgdata_path() {
+    local pgdata=""
+
+    if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'postgres'; then
+        pgdata="$(docker_cmd exec postgres sh -lc 'printf "%s\n" "${PGDATA:-/var/lib/postgresql/data}"' 2>/dev/null || true)"
+    fi
+
+    if [ -n "$pgdata" ]; then
+        printf '%s' "$pgdata"
+        return 0
+    fi
+
+    return 1
+}
+
 function redis_process_owner() {
     local runtime_uid=""
     local runtime_gid=""
@@ -1761,51 +1793,111 @@ function redis_data_owner() {
 
 function repair_postgres_pgdata_permissions() {
     local pg_data_dir="${DOCKER_DIR}/appdata/postgres/pgdata"
+    local expected_owner=""
+    local expected_uid=""
+    local expected_gid=""
+    local deps="authentik-worker authentik-server postiz temporal"
+    local running_deps=""
+    local dep=""
 
     if [ -z "$pg_data_dir" ]; then
         msg_error "PostgreSQL pgdata path is empty. Cannot repair permissions."
     fi
 
+    expected_owner="$(postgres_container_process_owner 2>/dev/null || true)"
+    if [ -z "$expected_owner" ]; then
+        expected_owner="$(postgres_data_owner)"
+    fi
+
+    expected_uid="${expected_owner%%:*}"
+    expected_gid="${expected_owner##*:}"
+
+    for dep in $deps; do
+        if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx "$dep"; then
+            running_deps="${running_deps}${dep}"$'\n'
+            docker_cmd stop "$dep" >/dev/null 2>&1 || true
+        fi
+    done
+
+    if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'postgres'; then
+        docker_cmd stop postgres >/dev/null 2>&1 || true
+    fi
+
     run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "$pg_data_dir"
-    run_cmd "setting PostgreSQL pgdata ownership recursively" chown -R 999:999 "$pg_data_dir"
+    run_cmd "setting PostgreSQL pgdata ownership recursively" chown -R "${expected_uid}:${expected_gid}" "$pg_data_dir"
     run_cmd "setting PostgreSQL pgdata directory permissions" find "$pg_data_dir" -type d -exec chmod 700 {} +
     run_cmd "setting PostgreSQL pgdata file permissions" find "$pg_data_dir" -type f -exec chmod 600 {} +
     run_cmd "setting PostgreSQL pgdata root mode" chmod 700 "$pg_data_dir"
+
+    docker_cmd start postgres >/dev/null 2>&1 || true
+    wait_for_postgres_ready
+
+    for dep in temporal postiz authentik-server authentik-worker; do
+        if printf '%s' "$running_deps" | grep -qx "$dep"; then
+            msg_info "Restarting dependant container: $dep"
+            docker_cmd start "$dep" >/dev/null 2>&1 || true
+        fi
+    done
 }
 
 function verify_postgres_pgdata_permissions() {
     local pg_data_dir="${DOCKER_DIR}/appdata/postgres/pgdata"
     local bad=""
-    local owner_spec="999"
-    local group_spec="999"
+    local container_pgdata=""
+    local owner_spec=""
+    local group_spec=""
+    local expected_owner=""
 
-    if [ ! -d "$pg_data_dir" ]; then
-        msg_warn "PostgreSQL pgdata directory is missing; created placeholder and skipped strict verification."
-        return 0
+    if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'postgres'; then
+        msg_error "PostgreSQL container is not running. Fix PostgreSQL before Authentik automation."
     fi
 
-    if [ -n "$SUDO_CMD" ]; then
-        bad="$($SUDO_CMD find "$pg_data_dir" \( ! -uid "$owner_spec" -o ! -gid "$group_spec" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -30 || true)"
-    else
-        bad="$(find "$pg_data_dir" \( ! -uid "$owner_spec" -o ! -gid "$group_spec" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -30 || true)"
+    expected_owner="$(postgres_container_process_owner 2>/dev/null || true)"
+    if [ -z "$expected_owner" ]; then
+        msg_error "Unable to determine PostgreSQL process owner from the postgres container."
     fi
+
+    owner_spec="${expected_owner%%:*}"
+    group_spec="${expected_owner##*:}"
+    container_pgdata="$(postgres_container_pgdata_path 2>/dev/null || true)"
+    if [ -z "$container_pgdata" ]; then
+        container_pgdata="/var/lib/postgresql/data"
+    fi
+
+    bad="$(docker_cmd exec postgres sh -lc '
+expected_uid="$(id -u postgres)"
+expected_gid="$(id -g postgres)"
+pgdata="${PGDATA:-/var/lib/postgresql/data}"
+find "$pgdata" \( ! -uid "$expected_uid" -o ! -gid "$expected_gid" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf "%u:%g %m %p\n" | head -30' 2>/dev/null || true)"
 
     if [ -n "$bad" ]; then
-        echo -e "${YW}PostgreSQL pgdata permission offenders detected:${CL}"
+        echo -e "${YW}PostgreSQL pgdata container-side permission offenders detected:${CL}"
         printf '%s\n' "$bad"
+        echo -e "${YW}Expected PostgreSQL UID:GID inside container:${CL} ${owner_spec}:${group_spec}"
+        echo -e "${YW}PostgreSQL container PGDATA path:${CL} ${container_pgdata}"
+        echo -e "${YW}Host PostgreSQL pgdata path:${CL} ${pg_data_dir}"
+
+        if [ -n "$SUDO_CMD" ]; then
+            echo -e "${YW}Host pgdata stats:${CL}"
+            "$SUDO_CMD" stat -c 'path=%n owner=%u:%g mode=%a type=%F' "$pg_data_dir" "$pg_data_dir/18/docker" "$pg_data_dir/18/docker/global" "$pg_data_dir/18/docker/global/pg_filenode.map" 2>/dev/null || true
+        else
+            echo -e "${YW}Host pgdata stats:${CL}"
+            stat -c 'path=%n owner=%u:%g mode=%a type=%F' "$pg_data_dir" "$pg_data_dir/18/docker" "$pg_data_dir/18/docker/global" "$pg_data_dir/18/docker/global/pg_filenode.map" 2>/dev/null || true
+        fi
+
         msg_info "Attempting PostgreSQL pgdata repair."
         repair_postgres_pgdata_permissions
 
-        if [ -n "$SUDO_CMD" ]; then
-            bad="$($SUDO_CMD find "$pg_data_dir" \( ! -uid "$owner_spec" -o ! -gid "$group_spec" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -30 || true)"
-        else
-            bad="$(find "$pg_data_dir" \( ! -uid "$owner_spec" -o ! -gid "$group_spec" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -30 || true)"
-        fi
+        bad="$(docker_cmd exec postgres sh -lc '
+expected_uid="$(id -u postgres)"
+expected_gid="$(id -g postgres)"
+pgdata="${PGDATA:-/var/lib/postgresql/data}"
+find "$pgdata" \( ! -uid "$expected_uid" -o ! -gid "$expected_gid" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf "%u:%g %m %p\n" | head -30' 2>/dev/null || true)"
 
         if [ -n "$bad" ]; then
-            echo -e "${YW}PostgreSQL pgdata repair failed. Remaining offenders:${CL}"
+            echo -e "${YW}PostgreSQL pgdata repair failed. Remaining container-side offenders:${CL}"
             printf '%s\n' "$bad"
-            msg_error "PostgreSQL pgdata still contains files not owned by ${owner_spec}:${group_spec} or with wrong permissions after repair. Refusing to deploy dependants."
+            msg_error "PostgreSQL pgdata still contains container-side ownership/permission offenders after repair. Refusing to deploy dependants."
         fi
     fi
 
@@ -2703,14 +2795,17 @@ AK_READY_PY
     done
 
     clear_transient_line
-    echo -e "${YW}Authentik server logs:${CL}"
-    docker_cmd logs --tail=160 authentik-server 2>/dev/null || true
-    echo -e "${YW}Authentik worker logs:${CL}"
-    docker_cmd logs --tail=120 authentik-worker 2>/dev/null || true
-    echo -e "${YW}PostgreSQL logs:${CL}"
-    docker_cmd logs --tail=100 postgres 2>/dev/null || true
-    echo -e "${YW}Redis logs:${CL}"
-    docker_cmd logs --tail=80 redis 2>/dev/null || true
+    echo -e "${YW}Container status summary:${CL}"
+    docker_cmd ps -a --filter "name=postgres" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+    docker_cmd ps -a --filter "name=redis" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+    docker_cmd ps -a --filter "name=authentik-server" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+    docker_cmd ps -a --filter "name=authentik-worker" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+    echo -e "${YW}PostgreSQL filtered logs:${CL}"
+    docker_cmd logs --tail=200 postgres 2>/dev/null | grep -Ei 'error|exception|traceback|fatal|permission|denied|database|postgres|redis|migration|smtp|email' || true
+    echo -e "${YW}Authentik server filtered logs:${CL}"
+    docker_cmd logs --tail=200 authentik-server 2>/dev/null | grep -Ei 'error|exception|traceback|fatal|permission|denied|database|postgres|redis|migration|smtp|email' || true
+    echo -e "${YW}Authentik worker filtered logs:${CL}"
+    docker_cmd logs --tail=200 authentik-worker 2>/dev/null | grep -Ei 'error|exception|traceback|fatal|permission|denied|database|postgres|redis|migration|smtp|email' || true
     msg_error "Authentik internal API stayed unavailable/HTTP 500 after waiting. Fix Authentik logs before route automation."
 }
 
