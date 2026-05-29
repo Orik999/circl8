@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.6"
+SCRIPT_VERSION="v1.0.7"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="admin-dashboard-menu-visible"
+SCRIPT_BUILD="landing-rerun-admin-ui-cleanup"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -530,12 +530,55 @@ function build_landing_host_node() {
     )
 }
 
+function landing_deployment_appears_working() {
+    local deployed_index="${DOCKER_DIR}/appdata/landing/index.html"
+    local route_code=""
+
+    if [ ! -f "$deployed_index" ]; then
+        return 1
+    fi
+
+    if [ -n "${LANDING_HOST:-}" ]; then
+        route_code="$(http_code_for_url "https://${LANDING_HOST}/")"
+        case "$route_code" in
+            200|301|302|303|307|308)
+                detail_line "Landing route" "https://${LANDING_HOST}/ -> ${route_code}"
+                return 0
+                ;;
+            *)
+                msg_warn "Landing files exist but route returned HTTP ${route_code:-none}"
+                detail_line "Landing route" "https://${LANDING_HOST}/ -> ${route_code:-none}"
+                return 1
+                ;;
+        esac
+    fi
+
+    return 0
+}
+
 function run_landing_module() {
     section "LANDING MODULE"
+
     # Read env-driven hostnames (assumes load_env_file already ran)
     : "${LANDING_HOST:=}"
     : "${LANDING_WWW_HOST:=}"
     : "${POSTIZ_HOST:=}"
+
+    detail_line "Runtime path" "${DOCKER_DIR}/appdata/landing"
+    detail_line "Source path" "${DOCKER_DIR}/projects/landing"
+
+    if landing_deployment_appears_working; then
+        echo -e "${GN}Landing Page appears deployed and working.${CL}"
+        echo -e "${YW}Default is to skip and leave the working landing deployment untouched.${CL}"
+        if [[ "$(timed_yes_no 'Skip Landing Page and continue?' 'y')" =~ ^[Yy]$ ]]; then
+            msg_skip "Landing Page skipped; existing deployment left untouched"
+            return 0
+        fi
+        echo ""
+        msg_warn "Landing Page rebuild selected by user"
+    else
+        msg_warn "Landing Page is missing or needs review"
+    fi
 
     if ! collect_landing_source_path; then
         msg_skip "Landing: no source provided; skipping"
@@ -591,14 +634,16 @@ function detect_admin_dashboard_state() {
 
 function prompt_admin_dashboard_selection() {
         section "ADMIN DASHBOARD"
-        tty_println "Select the admin dashboard to deploy:"
-        tty_println "  1) Homepage (default - lightweight links)"
-        tty_println "  2) Glance"
-        tty_println "  3) Homarr"
-        tty_println "  4) Dashy"
-        tty_println "  5) Skip"
+        tty_println "${BL}Select the admin dashboard to deploy:${CL}"
+        tty_println "  ${YW}1)${CL} ${GN}Homepage${CL} ${DGN}(default - lightweight links)${CL}"
+        tty_println "  ${YW}2)${CL} ${GN}Glance${CL}"
+        tty_println "  ${YW}3)${CL} ${GN}Homarr${CL}"
+        tty_println "  ${YW}4)${CL} ${GN}Dashy${CL}"
+        tty_println "  ${YW}5)${CL} ${YW}Skip${CL}"
+        tty_println ""
         local choice
         choice="$(read_menu_choice "Choose dashboard" "1")"
+        tty_println ""
         echo "$choice"
 }
 
@@ -756,49 +801,84 @@ function render_admin_compose() {
 }
 
 
+function https_url_for_host() {
+    local host="$1"
+    host="${host#https://}"
+    host="${host#http://}"
+    printf 'https://%s' "$host"
+}
+
 function show_admin_dashboard_ready() {
     local sel_name="$1"
     local will_generate_homarr_key="$2"
-    echo "Admin Dashboard Summary"
-    echo "-----------------------"
-    echo "Selected: $sel_name"
-    echo "Host: ${ADMIN_DASHBOARD_HOST}"
-    echo "Runtime compose: ${DOCKER_DIR}/compose/admin-dashboard/compose.yaml"
-    echo "Appdata path: ${DOCKER_DIR}/appdata/admin-dashboard"
+    local landing_url=""
+    local postiz_url=""
+    local authentik_url=""
+    local traefik_url=""
+    local admin_ui_url=""
+    local n8n_url=""
+    local files_url=""
+    local vscode_url=""
+    local yn=""
+
+    landing_url="$(https_url_for_host "${LANDING_HOST}")"
+    postiz_url="$(https_url_for_host "${POSTIZ_HOST}")"
+    authentik_url="$(https_url_for_host "${AUTHENTIK_HOST}")"
+    traefik_url="$(https_url_for_host "${TRAEFIK_HOST}")"
+    admin_ui_url="$(https_url_for_host "${ADMIN_UI_HOST}")"
+    n8n_url="$(https_url_for_host "${N8N_HOST}")"
+    files_url="$(https_url_for_host "${FILEBROWSER_HOST}")"
+    vscode_url="$(https_url_for_host "${VSCODE_HOST}")"
+
     echo ""
-    echo "Planned link/config files:"
+    echo -e "${BORDER}"
+    echo -e "${BL}ADMIN DASHBOARD SUMMARY${CL}"
+    echo -e "${BORDER}"
+    detail_line "Selected dashboard" "$sel_name"
+    detail_line "Host" "$ADMIN_DASHBOARD_HOST"
+    detail_line "Runtime compose" "${DOCKER_DIR}/compose/admin-dashboard/compose.yaml"
+    detail_line "Appdata path" "${DOCKER_DIR}/appdata/admin-dashboard"
+    echo ""
+
+    echo -e "${BL}Planned link/config files:${CL}"
     case "$sel_name" in
         Homepage)
-            echo " - ${DOCKER_DIR}/appdata/admin-dashboard/config/homepage/ (bookmarks/widgets)"
+            echo -e " ${YW}-${CL} ${DOCKER_DIR}/appdata/admin-dashboard/config/homepage/ ${DGN}(bookmarks/widgets)${CL}"
             ;;
         Glance)
-            echo " - ${DOCKER_DIR}/appdata/admin-dashboard/config/glance.yml"
+            echo -e " ${YW}-${CL} ${DOCKER_DIR}/appdata/admin-dashboard/config/glance.yml"
             ;;
         Homarr)
-            echo " - ${DOCKER_DIR}/appdata/admin-dashboard/homarr/ (persistent appdata)"
+            echo -e " ${YW}-${CL} ${DOCKER_DIR}/appdata/admin-dashboard/homarr/ ${DGN}(persistent appdata)${CL}"
             if [ "$will_generate_homarr_key" = "yes" ]; then
-                echo " - A Homarr secret key will be generated and stored at ${DOCKER_DIR}/appdata/admin-dashboard/homarr/secret.key"
+                echo -e " ${YW}-${CL} Homarr secret key will be generated and stored securely."
             else
-                echo " - Existing Homarr secret.key will be reused if present"
+                echo -e " ${YW}-${CL} Existing Homarr secret.key will be reused if present."
             fi
             ;;
         Dashy)
-            echo " - ${DOCKER_DIR}/appdata/admin-dashboard/config/dashy/conf.yml"
+            echo -e " ${YW}-${CL} ${DOCKER_DIR}/appdata/admin-dashboard/config/dashy/conf.yml"
+            ;;
+        *)
+            msg_error "Unknown admin dashboard selection: ${sel_name}"
             ;;
     esac
+
     echo ""
-    echo "Dashboard links that will be configured:"
-    echo " - Landing Page: https://${LANDING_HOST}"
-    echo " - Circl8 App: https://${POSTIZ_HOST}"
-    echo " - Authentik User Portal: https://${AUTHENTIK_HOST}"
-    echo " - Authentik Admin: https://${AUTHENTIK_HOST}/if/admin/"
-    echo " - Traefik: https://${TRAEFIK_HOST}"
-    echo " - Admin UI: https://${ADMIN_UI_HOST}"
-    echo " - n8n: https://${N8N_HOST}"
-    echo " - Files: https://${FILEBROWSER_HOST}"
-    echo " - VS Code: https://${VSCODE_HOST}"
+    echo -e "${BL}Dashboard links that will be configured:${CL}"
+    echo -e " ${YW}-${CL} ${GN}Landing Page:${CL} ${landing_url}"
+    echo -e " ${YW}-${CL} ${GN}Circl8 App:${CL} ${postiz_url}"
+    echo -e " ${YW}-${CL} ${GN}Authentik User Portal:${CL} ${authentik_url}"
+    echo -e " ${YW}-${CL} ${GN}Authentik Admin:${CL} ${authentik_url}/if/admin/"
+    echo -e " ${YW}-${CL} ${GN}Traefik:${CL} ${traefik_url}"
+    echo -e " ${YW}-${CL} ${GN}Admin UI:${CL} ${admin_ui_url}"
+    echo -e " ${YW}-${CL} ${GN}n8n:${CL} ${n8n_url}"
+    echo -e " ${YW}-${CL} ${GN}Files:${CL} ${files_url}"
+    echo -e " ${YW}-${CL} ${GN}VS Code:${CL} ${vscode_url}"
     echo ""
+
     read -r -p "Proceed with these changes? (y/N): " yn
+    echo ""
     case "$yn" in
         [Yy]*) return 0 ;;
         *) msg_skip "User aborted admin dashboard action"; return 1 ;;
@@ -1099,6 +1179,9 @@ function run_admin_dashboard_module() {
 
         local choice
         choice="$(prompt_admin_dashboard_selection)"
+        choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
+        [ -z "$choice" ] && choice="1"
+
         if [ "$choice" == "5" ] || [ "$choice" == "skip" ]; then
             msg_skip "Admin dashboard: skipped by user"
             return 0
