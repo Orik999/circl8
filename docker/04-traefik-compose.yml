@@ -40,6 +40,11 @@ services:
       CF_DNS_API_TOKEN_FILE: /run/secrets/cf_api_token
     labels:
       traefik.enable: "true"
+      traefik.http.routers.traefik.rule: "Host(`${TRAEFIK_HOST}`)"
+      traefik.http.routers.traefik.entrypoints: "https"
+      traefik.http.routers.traefik.tls: "true"
+      traefik.http.routers.traefik.middlewares: "chain-authentik@file"
+      traefik.http.routers.traefik.service: "api@internal"
 
 networks:
   t2_proxy:

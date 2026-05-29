@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.34"
+SCRIPT_VERSION="v1.3.35"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="postgres-pgdata-restart-membership-fix"
+SCRIPT_BUILD="traefik-dashboard-cf-companion-rescan"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -2635,6 +2635,29 @@ function verify_cf_companion_runtime_if_selected() {
     fi
 
     msg_ok "CF-COMPANION LOGS SHOW NO OBVIOUS AUTH FAILURE"
+
+    # Attempt a cf-companion restart/rescan to ensure Traefik label discovery
+    refresh_cf_companion_dns_records
+
+    return 0
+}
+
+function refresh_cf_companion_dns_records() {
+    section "CF-COMPANION DNS RESCAN"
+
+    if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cf-companion'; then
+        msg_warn "cf-companion not present; skipping DNS rescan"
+        return 0
+    fi
+
+    msg_info "Restarting cf-companion for DNS rescan"
+    docker_cmd restart cf-companion >/dev/null 2>&1 || true
+    sleep 12
+
+    msg_info "Checking cf-companion logs for discovery events"
+    docker_cmd logs --tail=200 cf-companion 2>/dev/null | grep -E -i 'Found Service|Created new record|Existing record|Updated record|error|denied' || true
+
+    msg_ok "cf-companion rescan completed"
 }
 
 
