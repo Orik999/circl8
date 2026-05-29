@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.35"
+SCRIPT_VERSION="v1.3.38"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="traefik-dashboard-cf-companion-rescan"
+SCRIPT_BUILD="cf-companion-rescan-pipefail-safe"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -2655,8 +2655,62 @@ function refresh_cf_companion_dns_records() {
     sleep 12
 
     msg_info "Checking cf-companion logs for discovery events"
-    docker_cmd logs --tail=200 cf-companion 2>/dev/null | grep -E -i 'Found Service|Created new record|Existing record|Updated record|error|denied' || true
+    local cf_log_file
+    cf_log_file="$(mktemp)"
+    docker_cmd logs --tail=200 cf-companion 2>/dev/null >"$cf_log_file" || true
 
+    local found_records created_records existing_records updated_records
+    found_records=$(grep -Ei 'Found Service ID:.*Hostname' "$cf_log_file" | sed -E 's/.*Hostname[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
+    created_records=$(grep -Ei 'Created new record:' "$cf_log_file" | sed -E 's/.*Created new record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
+    existing_records=$(grep -Ei 'Existing record:' "$cf_log_file" | sed -E 's/.*Existing record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
+    updated_records=$(grep -Ei 'Updated record:' "$cf_log_file" | sed -E 's/.*Updated record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
+
+    local warn_lines
+    warn_lines=$(grep -Ei 'error|denied|unauthorized|authentication failed|invalid token|permission denied|auth' "$cf_log_file" | awk '{ if(length($0) > 140) print substr($0,1,137) "..."; else print }' | sort -u | head -n20 || true)
+
+    echo ""
+    echo -e " ${CM} cf-companion restarted for DNS rescan${CL}"
+
+    if [ -n "$found_records" ] || [ -n "$created_records" ] || [ -n "$existing_records" ] || [ -n "$updated_records" ]; then
+        echo -e " ${CM} DNS discovery events:${CL}"
+        if [ -n "$found_records" ]; then
+            while IFS= read -r hostname; do
+                echo -e "   - Found: ${hostname}"
+            done <<< "$found_records"
+        else
+            echo -e "   - No discovery hostnames found"
+        fi
+
+        echo -e ""
+        echo -e " ${CM} DNS record actions:${CL}"
+        if [ -n "$created_records" ]; then
+            while IFS= read -r hostname; do
+                echo -e "   - Created: ${hostname}"
+            done <<< "$created_records"
+        fi
+        if [ -n "$existing_records" ]; then
+            while IFS= read -r hostname; do
+                echo -e "   - Existing: ${hostname}"
+            done <<< "$existing_records"
+        fi
+        if [ -n "$updated_records" ]; then
+            while IFS= read -r hostname; do
+                echo -e "   - Updated: ${hostname}"
+            done <<< "$updated_records"
+        fi
+    else
+        echo -e " ${YW}! No cf-companion DNS discovery/action lines found in recent logs.${CL}"
+    fi
+
+    if [ -n "$warn_lines" ]; then
+        echo ""
+        echo -e " ${WARN} cf-companion warnings/errors:${CL}"
+        while IFS= read -r warn_line; do
+            echo -e "   - ${warn_line}"
+        done <<< "$warn_lines"
+    fi
+
+    rm -f "$cf_log_file"
     msg_ok "cf-companion rescan completed"
 }
 
