@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.1"
-SCRIPT_UPDATED="2026-05-26"
-SCRIPT_BUILD="n8n-post-core-baseline-hardening"
+SCRIPT_VERSION="v1.0.2"
+SCRIPT_UPDATED="2026-05-29"
+SCRIPT_BUILD="landing-node22-lockfile-install"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -475,8 +475,26 @@ function build_landing_ephemeral_docker() {
         msg_warn "Docker not available; cannot use ephemeral builder"
         return 2
     fi
-    run_cmd "building landing (docker)" docker run --rm -v "${src}":/src -w /src node:18-bullseye bash -lc "npm ci --no-audit --no-fund && \
-        PUBLIC_LANDING_HOST='${LANDING_HOST}' PUBLIC_LANDING_WWW_HOST='${LANDING_WWW_HOST}' PUBLIC_POSTIZ_HOST='${POSTIZ_HOST}' npm run build"
+
+    # Astro currently requires Node.js >=22.12.0. Use Node 22 for the
+    # disposable builder and install dependencies based on whether the
+    # project has a lockfile. npm ci fails on lockfile-less projects.
+    run_cmd "building landing (docker)" docker run --rm \
+        -e PUBLIC_LANDING_HOST="${LANDING_HOST}" \
+        -e PUBLIC_LANDING_WWW_HOST="${LANDING_WWW_HOST}" \
+        -e PUBLIC_POSTIZ_HOST="${POSTIZ_HOST}" \
+        -v "${src}:/src" \
+        -w /src \
+        node:22-bookworm \
+        bash -lc '
+            set -e
+            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+                npm ci --no-audit --no-fund
+            else
+                npm install --no-audit --no-fund
+            fi
+            npm run build
+        '
     return 0
 }
 
@@ -486,7 +504,16 @@ function build_landing_host_node() {
         msg_warn "Host Node/npm not available"
         return 2
     fi
-    (cd "$src" && npm ci --no-audit --no-fund && PUBLIC_LANDING_HOST="${LANDING_HOST}" PUBLIC_LANDING_WWW_HOST="${LANDING_WWW_HOST}" PUBLIC_POSTIZ_HOST="${POSTIZ_HOST}" npm run build)
+
+    (
+        cd "$src"
+        if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci --no-audit --no-fund
+        else
+            npm install --no-audit --no-fund
+        fi
+        PUBLIC_LANDING_HOST="${LANDING_HOST}" PUBLIC_LANDING_WWW_HOST="${LANDING_WWW_HOST}" PUBLIC_POSTIZ_HOST="${POSTIZ_HOST}" npm run build
+    )
 }
 
 function run_landing_module() {
