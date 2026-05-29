@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.8"
+SCRIPT_VERSION="v1.0.9"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="landing-runtime-compose"
+SCRIPT_BUILD="admin-dashboard-choice-capture-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -724,7 +724,14 @@ function detect_admin_dashboard_state() {
 }
 
 function prompt_admin_dashboard_selection() {
-        section "ADMIN DASHBOARD"
+        # This function is called via command substitution:
+        #   choice="$(prompt_admin_dashboard_selection)"
+        # Therefore every UI line must go to /dev/tty/stderr, and stdout must
+        # contain only the selected value.
+        tty_println ""
+        tty_println "${BORDER}"
+        tty_println "${BL}ADMIN DASHBOARD${CL}"
+        tty_println "${BORDER}"
         tty_println "${BL}Select the admin dashboard to deploy:${CL}"
         tty_println "  ${YW}1)${CL} ${GN}Homepage${CL} ${DGN}(default - lightweight links)${CL}"
         tty_println "  ${YW}2)${CL} ${GN}Glance${CL}"
@@ -735,7 +742,7 @@ function prompt_admin_dashboard_selection() {
         local choice
         choice="$(read_menu_choice "Choose dashboard" "1")"
         tty_println ""
-        echo "$choice"
+        printf '%s\n' "$choice"
 }
 
 function prepare_admin_dashboard_dirs() {
@@ -1270,8 +1277,16 @@ function run_admin_dashboard_module() {
 
         local choice
         choice="$(prompt_admin_dashboard_selection)"
-        choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
+        choice="$(printf '%s' "$choice" | tail -n1 | tr -d '[:space:]')"
         [ -z "$choice" ] && choice="1"
+
+        case "$choice" in
+            1|2|3|4|5|skip) ;;
+            *)
+                msg_warn "Invalid admin dashboard selection captured: ${choice}; defaulting to Homepage"
+                choice="1"
+                ;;
+        esac
 
         if [ "$choice" == "5" ] || [ "$choice" == "skip" ]; then
             msg_skip "Admin dashboard: skipped by user"
