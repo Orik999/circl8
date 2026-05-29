@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.39"
+SCRIPT_VERSION="v1.3.40"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="ensure-core-stacks-before-authentik-gate"
+SCRIPT_BUILD="redis-current-persistence-check"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -2705,7 +2705,7 @@ function refresh_cf_companion_dns_records() {
     updated_records=$(grep -Ei 'Updated record:' "$cf_log_file" | sed -E 's/.*Updated record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
 
     local warn_lines
-    warn_lines=$(grep -Ei 'error|denied|unauthorized|authentication failed|invalid token|permission denied|auth' "$cf_log_file" | awk '{ if(length($0) > 140) print substr($0,1,137) "..."; else print }' | sort -u | head -n20 || true)
+    warn_lines=$(grep -Ei 'error|denied|unauthorized|authentication failed|invalid token|missing token|permission denied' "$cf_log_file" | awk '{ if(length($0) > 140) print substr($0,1,137) "..."; else print }' | sort -u | head -n20 || true)
 
     echo ""
     echo -e " ${CM} cf-companion restarted for DNS rescan${CL}"
@@ -2837,10 +2837,7 @@ function verify_authentik_dependencies_for_deploy() {
     repair_redis_data_permissions
     verify_redis_data_permissions
 
-    if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1 || docker_cmd logs --tail=120 redis 2>/dev/null | grep -Eiq 'MISCONF|Permission denied|Background saving error'; then
-        docker_cmd logs --tail=120 redis 2>/dev/null || true
-        msg_error "Redis persistence is not healthy. Fix ${DOCKER_DIR}/appdata/redis before Authentik API automation."
-    fi
+    verify_redis_persistence_ready
 
     check_output="$(docker_cmd exec authentik-server sh -lc '
 python - <<PY
