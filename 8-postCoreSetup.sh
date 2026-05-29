@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.7"
+SCRIPT_VERSION="v1.0.8"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="landing-rerun-admin-ui-cleanup"
+SCRIPT_BUILD="landing-runtime-compose"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -530,30 +530,102 @@ function build_landing_host_node() {
     )
 }
 
-function landing_deployment_appears_working() {
-    local deployed_index="${DOCKER_DIR}/appdata/landing/index.html"
+function landing_compose_file() {
+    printf '%s' "${DOCKER_DIR}/compose/landing/compose.yaml"
+}
+
+function landing_container_running() {
+    docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -Eq '^(crea-landing|landing)$'
+}
+
+function render_landing_compose() {
+    local template="${SCRIPT_DIR}/docker/14-landing-compose.yml"
+    local out_compose=""
+    out_compose="$(landing_compose_file)"
+
+    run_cmd "creating landing compose directory" mkdir -p "$(dirname "$out_compose")"
+
+    if [ -f "$template" ]; then
+        envsubst < "$template" > "$out_compose"
+    else
+        cat > "$out_compose" <<EOF_LANDING_COMPOSE
+services:
+  crea-landing:
+    image: nginx:alpine
+    container_name: crea-landing
+    restart: unless-stopped
+    volumes:
+      - ${DOCKER_DIR}/appdata/landing:/usr/share/nginx/html:ro
+    networks:
+      - t2_proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=t2_proxy"
+      - "traefik.http.routers.crea-landing.rule=Host(\`${LANDING_WWW_HOST}\`) || Host(\`${LANDING_HOST}\`)"
+      - "traefik.http.routers.crea-landing.entrypoints=https"
+      - "traefik.http.routers.crea-landing.tls=true"
+      - "traefik.http.routers.crea-landing.middlewares=chain-secure@file"
+      - "traefik.http.services.crea-landing.loadbalancer.server.port=80"
+
+networks:
+  t2_proxy:
+    external: true
+EOF_LANDING_COMPOSE
+    fi
+
+    run_cmd "setting landing compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$out_compose"
+    run_cmd "setting landing compose permissions" chmod 640 "$out_compose"
+    msg_ok "LANDING RUNTIME COMPOSE READY"
+    detail_line "Landing compose" "$out_compose"
+}
+
+function deploy_landing_compose() {
+    local compose_file=""
+    compose_file="$(landing_compose_file)"
+
+    [ -f "$compose_file" ] || render_landing_compose
+
+    msg_info "Validating landing runtime compose"
+    run_docker_cmd "validating landing runtime compose" compose -f "$compose_file" config -q
+    msg_ok "LANDING RUNTIME COMPOSE VALID"
+
+    msg_info "Deploying landing runtime container"
+    run_docker_cmd "deploying landing runtime container" compose -f "$compose_file" up -d
+    msg_ok "LANDING RUNTIME CONTAINER DEPLOYED"
+}
+
+function verify_landing_runtime() {
     local route_code=""
+    local compose_file=""
+    compose_file="$(landing_compose_file)"
 
-    if [ ! -f "$deployed_index" ]; then
-        return 1
+    [ -f "${DOCKER_DIR}/appdata/landing/index.html" ] || return 1
+    [ -f "$compose_file" ] || return 1
+    landing_container_running || return 1
+
+    route_code="$(http_code_for_url "https://${LANDING_HOST}/")"
+    detail_line "Landing route" "https://${LANDING_HOST}/ -> ${route_code:-none}"
+
+    case "$route_code" in
+        200|301|302|303|307|308)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+function landing_deployment_appears_working() {
+    if verify_landing_runtime; then
+        return 0
     fi
 
-    if [ -n "${LANDING_HOST:-}" ]; then
-        route_code="$(http_code_for_url "https://${LANDING_HOST}/")"
-        case "$route_code" in
-            200|301|302|303|307|308)
-                detail_line "Landing route" "https://${LANDING_HOST}/ -> ${route_code}"
-                return 0
-                ;;
-            *)
-                msg_warn "Landing files exist but route returned HTTP ${route_code:-none}"
-                detail_line "Landing route" "https://${LANDING_HOST}/ -> ${route_code:-none}"
-                return 1
-                ;;
-        esac
+    if [ -f "${DOCKER_DIR}/appdata/landing/index.html" ]; then
+        msg_warn "Landing files exist but runtime route/container needs repair"
     fi
 
-    return 0
+    return 1
 }
 
 function run_landing_module() {
@@ -578,6 +650,16 @@ function run_landing_module() {
         msg_warn "Landing Page rebuild selected by user"
     else
         msg_warn "Landing Page is missing or needs review"
+        if [ -f "${DOCKER_DIR}/appdata/landing/index.html" ]; then
+            msg_info "Repairing landing runtime before rebuild"
+            render_landing_compose
+            deploy_landing_compose
+            if verify_landing_runtime; then
+                msg_ok "LANDING PAGE RUNTIME REPAIRED"
+                return 0
+            fi
+            msg_warn "Landing runtime repair did not fully verify; rebuild may be needed"
+        fi
     fi
 
     if ! collect_landing_source_path; then
@@ -608,6 +690,15 @@ function run_landing_module() {
 
     copy_dist_to_appdata "${LANDING_SOURCE_PATH}/dist"
     msg_ok "Landing deployed to ${DOCKER_DIR}/appdata/landing"
+
+    render_landing_compose
+    deploy_landing_compose
+
+    if verify_landing_runtime; then
+        msg_ok "LANDING PAGE RUNTIME VERIFIED"
+    else
+        msg_warn "Landing files deployed, but route still needs review. Check Traefik and DNS."
+    fi
 
     return 0
 }
