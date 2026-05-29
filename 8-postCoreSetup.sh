@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.11"
+SCRIPT_VERSION="v1.0.12"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="filebrowser-oidc-dns-route-ui"
+SCRIPT_BUILD="homepage-500-filebrowser-oidc-skip"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -762,26 +762,26 @@ function generate_admin_links_config() {
                                                 mkdir -p "${cfgdir}/homepage"
                                                 # Homepage minimal config files
                                                                                                 cat > "${cfgdir}/homepage/services.yaml" <<EOF
-services:
-  - group: "Public / Customer"
-    items:
-      - name: "Landing Page"
+- Public / Customer:
+    - Landing Page:
         href: "https://${LANDING_HOST}"
-  - group: "Identity / Admin"
-    items:
-      - name: "Authentik Admin"
+    - Circl8 App:
+        href: "https://${POSTIZ_HOST}"
+- Identity / Admin:
+    - Authentik User Portal:
+        href: "https://${AUTHENTIK_HOST}"
+    - Authentik Admin:
         href: "https://${AUTHENTIK_HOST}/if/admin/"
-  - group: "Admin Tools"
-    items:
-      - name: "Traefik"
+- Admin Tools:
+    - Traefik:
         href: "https://${TRAEFIK_HOST}"
-      - name: "Admin UI"
+    - Admin UI:
         href: "https://${ADMIN_UI_HOST}"
-      - name: "n8n"
+    - n8n:
         href: "https://${N8N_HOST}"
-      - name: "Files"
+    - Files:
         href: "https://${FILEBROWSER_HOST}"
-      - name: "VS Code"
+    - VS Code:
         href: "https://${VSCODE_HOST}"
 EOF
 
@@ -791,14 +791,14 @@ theme: "default"
 EOF
 
                                                 cat > "${cfgdir}/homepage/bookmarks.yaml" <<EOF
-bookmarks:
-  - title: "Circl8 App"
-    href: "https://${POSTIZ_HOST}"
+- Circl8:
+    - Circl8 App:
+        - href: "https://${POSTIZ_HOST}"
 EOF
 
                                                 # widgets.yaml left minimal for user customization
                                                 cat > "${cfgdir}/homepage/widgets.yaml" <<EOF
-widgets: []
+[]
 EOF
                         ;;
                                 2)
@@ -1002,7 +1002,6 @@ function show_filebrowser_quantum_instructions() {
     section "FILEBROWSER OIDC CONFIG"
 
     echo -e "${BL}FileBrowser Quantum requires an Authentik OAuth2/OIDC provider.${CL}"
-    echo -e "${YW}You can either paste existing saved credentials, or create a new provider in Authentik now.${CL}"
     echo ""
     echo -e "${BL}Create/check this in Authentik:${CL}"
     echo -e " ${YW}-${CL} ${GN}Provider type:${CL} OAuth2/OIDC"
@@ -1047,13 +1046,9 @@ function collect_filebrowser_oidc_vars() {
     have_creds="$(timed_yes_no "Do you already have the FileBrowser OIDC client ID and secret ready to paste?" "n")"
     if [[ "$have_creds" =~ ^[Nn]$ ]]; then
         echo ""
-        echo -e "${YW}Create the Authentik OAuth2/OIDC provider now, then return here.${CL}"
-        echo -e "${YW}Press Enter when ready to paste credentials, or Ctrl+C to cancel safely.${CL}"
-        if [ -r /dev/tty ]; then
-            read -r _ < /dev/tty || true
-        else
-            read -r _ || true
-        fi
+        echo -e "${YW}Create the Authentik OAuth2/OIDC provider first, then rerun Script 8 when the client ID and secret are ready.${CL}"
+        msg_skip "FileBrowser Quantum deployment skipped; OIDC credentials not ready"
+        return 1
     fi
 
     FILEBROWSER_OIDC_ISSUER_URL="$(text_input 'FILEBROWSER_OIDC_ISSUER_URL' "$default_issuer")"
@@ -1251,7 +1246,9 @@ function run_filebrowser_quantum_module() {
         return 0
     fi
 
-    collect_filebrowser_oidc_vars
+    if ! collect_filebrowser_oidc_vars; then
+        return 0
+    fi
     echo ""
     echo "READY TO APPLY FileBrowser Quantum"
     echo " - FileBrowser host: https://${FILEBROWSER_HOST}"
@@ -1440,6 +1437,9 @@ function run_admin_dashboard_module() {
             200|301|302|303|307|308|401|403)
                 msg_ok "ADMIN DASHBOARD ROUTE RESPONDED WITH HTTP ${admin_route_code}"
                 msg_warn "Browser-based Authentik protection verification is still required."
+                ;;
+            500)
+                msg_warn "Admin dashboard route reached the service but returned HTTP 500; check dashboard app config/logs"
                 ;;
             *)
                 msg_warn "Admin dashboard route returned HTTP ${admin_route_code:-none}; verify Traefik/router after DNS propagation"
