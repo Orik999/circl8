@@ -2692,7 +2692,7 @@ function refresh_cf_companion_dns_records() {
     msg_info "Restarting cf-companion for DNS rescan"
     docker_cmd restart cf-companion >/dev/null 2>&1 || true
     sleep 12
-
+    echo ""
     msg_info "Checking cf-companion logs for discovery events"
     local cf_log_file
     cf_log_file="$(mktemp)"
