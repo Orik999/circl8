@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.4"
+SCRIPT_VERSION="v1.0.5"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="landing-clean-user-owned-build"
+SCRIPT_BUILD="cf-companion-dns-skip-clean-ui"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1941,8 +1941,41 @@ function http_code_for_url() {
     curl -ksS -o /dev/null -w '%{http_code}' "$url" || true
 }
 
+function host_dns_resolves() {
+    local host="$1"
+
+    if [ -z "$host" ]; then
+        return 1
+    fi
+
+    if command -v getent >/dev/null 2>&1; then
+        getent hosts "$host" >/dev/null 2>&1 && return 0
+    fi
+
+    if command -v dig >/dev/null 2>&1; then
+        [ -n "$(dig +short "$host" 2>/dev/null | head -n1)" ] && return 0
+    fi
+
+    return 1
+}
+
 function refresh_cf_companion_dns_records_for_post_core() {
-    section "POST-CORE CLOUDFLARE DNS RESCAN"
+    section "POST-CORE CLOUDFLARE DNS CHECK"
+
+    local expected_host="${N8N_HOST:-n8n.${DOMAIN}}"
+    local cf_log_file=""
+    local found_records=""
+    local created_records=""
+    local existing_records=""
+    local updated_records=""
+    local warn_lines=""
+
+    if host_dns_resolves "$expected_host"; then
+        msg_ok "DNS already resolves: ${expected_host}"
+        msg_ok "cf-companion restart skipped"
+        msg_ok "POST-CORE DNS CHECK COMPLETE"
+        return 0
+    fi
 
     if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cf-companion'; then
         msg_warn "cf-companion not present; skipping DNS rescan"
@@ -1952,30 +1985,63 @@ function refresh_cf_companion_dns_records_for_post_core() {
     msg_info "Restarting cf-companion for post-core DNS rescan"
     docker_cmd restart cf-companion >/dev/null 2>&1 || true
     sleep 15
-    msg_ok "CF-COMPANION RESTARTED FOR POST-CORE DNS RESCAN"
+    msg_ok "cf-companion restarted for post-core DNS rescan"
 
-    msg_info "Checking cf-companion logs for n8n DNS discovery"
-    local cf_log_file=""
-    local expected_host="${N8N_HOST:-n8n.${DOMAIN}}"
+    msg_info "Checking cf-companion logs for DNS discovery events"
     cf_log_file="$(mktemp)"
     TEMP_FILES+=("$cf_log_file")
     docker_cmd logs --tail=200 cf-companion 2>/dev/null >"$cf_log_file" || true
 
-    if grep -Fq "$expected_host" "$cf_log_file"; then
-        msg_ok "CF-COMPANION N8N DNS DISCOVERY FOUND"
-        grep -F "$expected_host" "$cf_log_file" || true
+    found_records="$(grep -Ei 'Found Service ID:.*Hostname' "$cf_log_file" | sed -E 's/.*Hostname[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
+    created_records="$(grep -Ei 'Created new record:' "$cf_log_file" | sed -E 's/.*Created new record:[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
+    existing_records="$(grep -Ei 'Existing record:' "$cf_log_file" | sed -E 's/.*Existing record:[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
+    updated_records="$(grep -Ei 'Updated record:' "$cf_log_file" | sed -E 's/.*Updated record:[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
+
+    if [ -n "$found_records" ] || [ -n "$created_records" ] || [ -n "$existing_records" ] || [ -n "$updated_records" ]; then
+        echo ""
+        echo -e " ${CM} DNS discovery events:${CL}"
+        if [ -n "$found_records" ]; then
+            while IFS= read -r hostname; do
+                echo -e "   - Found: ${hostname}"
+            done <<< "$found_records"
+        else
+            echo -e "   - No discovery hostnames found for ${expected_host}"
+        fi
+
+        echo ""
+        echo -e " ${CM} DNS record actions:${CL}"
+        if [ -n "$created_records" ]; then
+            while IFS= read -r hostname; do
+                echo -e "   - Created: ${hostname}"
+            done <<< "$created_records"
+        fi
+        if [ -n "$existing_records" ]; then
+            while IFS= read -r hostname; do
+                echo -e "   - Existing: ${hostname}"
+            done <<< "$existing_records"
+        fi
+        if [ -n "$updated_records" ]; then
+            while IFS= read -r hostname; do
+                echo -e "   - Updated: ${hostname}"
+            done <<< "$updated_records"
+        fi
     else
-        msg_warn "No n8n DNS discovery/action lines found in recent cf-companion logs"
+        msg_warn "No DNS discovery/action lines found for ${expected_host}"
     fi
 
-    local warn_lines=""
     warn_lines="$(grep -Ei 'error|denied|unauthorized|authentication failed|invalid token|missing token|permission denied' "$cf_log_file" | head -n20 || true)"
     if [ -n "$warn_lines" ]; then
-        msg_warn "cf-companion warnings/errors detected during post-core DNS rescan"
+        msg_warn "cf-companion warnings/errors detected during post-core DNS check"
         printf '%s\n' "$warn_lines"
     fi
 
-    msg_ok "POST-CORE DNS RESCAN COMPLETE"
+    if host_dns_resolves "$expected_host"; then
+        msg_ok "DNS now resolves: ${expected_host}"
+    else
+        msg_warn "DNS still does not resolve yet: ${expected_host}"
+    fi
+
+    msg_ok "POST-CORE DNS CHECK COMPLETE"
 }
 
 function verify_n8n_routes() {
