@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.10"
+SCRIPT_VERSION="v1.0.11"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="clean-deploy-dns-filebrowser-ui"
+SCRIPT_BUILD="filebrowser-oidc-dns-route-ui"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -999,14 +999,19 @@ function sensitive_line_input() {
 }
 
 function show_filebrowser_quantum_instructions() {
-    section "FILEBROWSER QUANTUM OIDC INSTRUCTIONS"
-    echo "Manual Authentik OIDC setup instructions"
-    echo "  - Create an OAuth2/OIDC Application in Authentik."
-    echo "  - Suggested provider slug: filebrowser-quantum (verify in Authentik UI)."
-    echo "  - Issuer URL must match the provider issuer exactly."
-    echo "  - Callback URI: https://${FILEBROWSER_HOST}/api/auth/oidc/callback"
-    echo "  - Scopes: openid, email, profile, groups"
-    echo "  - User identifier: preferred_username"
+    section "FILEBROWSER OIDC CONFIG"
+
+    echo -e "${BL}FileBrowser Quantum requires an Authentik OAuth2/OIDC provider.${CL}"
+    echo -e "${YW}You can either paste existing saved credentials, or create a new provider in Authentik now.${CL}"
+    echo ""
+    echo -e "${BL}Create/check this in Authentik:${CL}"
+    echo -e " ${YW}-${CL} ${GN}Provider type:${CL} OAuth2/OIDC"
+    echo -e " ${YW}-${CL} ${GN}Suggested provider slug:${CL} filebrowser-quantum"
+    echo -e " ${YW}-${CL} ${GN}Callback URI:${CL} https://${FILEBROWSER_HOST}/api/auth/oidc/callback"
+    echo -e " ${YW}-${CL} ${GN}Scopes:${CL} openid, email, profile, groups"
+    echo -e " ${YW}-${CL} ${GN}User identifier:${CL} preferred_username"
+    echo ""
+    echo -e "${YW}After creating/reviewing the provider, paste the issuer URL, client ID, and client secret below.${CL}"
     echo ""
 }
 
@@ -1028,17 +1033,38 @@ function text_input() {
 }
 
 function collect_filebrowser_oidc_vars() {
-    section "FILEBROWSER OIDC CONFIG"
+    : "${AUTHENTIK_HOST:=}"
+
+    local authentik_base=""
+    local default_issuer=""
+    local have_creds=""
+
+    authentik_base="$(https_url_for_host "$AUTHENTIK_HOST")"
+    default_issuer="${authentik_base}/application/o/filebrowser-quantum/"
+
     show_filebrowser_quantum_instructions
 
-    : "${AUTHENTIK_HOST:=}"
-    local default_issuer="https://${AUTHENTIK_HOST}/application/o/filebrowser-quantum/"
+    have_creds="$(timed_yes_no "Do you already have the FileBrowser OIDC client ID and secret ready to paste?" "n")"
+    if [[ "$have_creds" =~ ^[Nn]$ ]]; then
+        echo ""
+        echo -e "${YW}Create the Authentik OAuth2/OIDC provider now, then return here.${CL}"
+        echo -e "${YW}Press Enter when ready to paste credentials, or Ctrl+C to cancel safely.${CL}"
+        if [ -r /dev/tty ]; then
+            read -r _ < /dev/tty || true
+        else
+            read -r _ || true
+        fi
+    fi
+
     FILEBROWSER_OIDC_ISSUER_URL="$(text_input 'FILEBROWSER_OIDC_ISSUER_URL' "$default_issuer")"
     FILEBROWSER_OIDC_CLIENT_ID="$(text_input 'FILEBROWSER_OIDC_CLIENT_ID' '')"
     FILEBROWSER_OIDC_CLIENT_SECRET="$(sensitive_line_input 'FILEBROWSER_OIDC_CLIENT_SECRET (input hidden)')"
 
+    FILEBROWSER_OIDC_ISSUER_URL="$(printf '%s' "$FILEBROWSER_OIDC_ISSUER_URL" | sed -E 's#^https://https://#https://#; s#^http://https://#https://#')"
+
     if [ -z "$FILEBROWSER_OIDC_ISSUER_URL" ] || [ -z "$FILEBROWSER_OIDC_CLIENT_ID" ] || [ -z "$FILEBROWSER_OIDC_CLIENT_SECRET" ]; then
-        msg_error "OIDC issuer URL, client ID, and client secret are required."
+        echo ""
+        msg_error "OIDC issuer URL, client ID, and client secret are required. Create/review the Authentik provider first, then rerun Script 8."
     fi
 }
 
@@ -1147,11 +1173,17 @@ function verify_filebrowser_deploy() {
     msg_info "Verifying FileBrowser deployment"
     docker ps --filter "name=filebrowser" --format 'table {{.Names}}\t{{.Status}}'
     docker compose -f "${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml" logs --tail 80 || true
-    if curl -fsSI "https://${FILEBROWSER_HOST}" >/dev/null 2>&1; then
-        msg_ok "Route https://${FILEBROWSER_HOST} is reachable"
-    else
-        msg_warn "Route https://${FILEBROWSER_HOST} is not reachable via HTTPS"
-    fi
+    local fb_route_code=""
+    fb_route_code="$(http_code_for_url "https://${FILEBROWSER_HOST}/")"
+    case "$fb_route_code" in
+        200|301|302|303|307|308|401|403)
+            msg_ok "FILEBROWSER ROUTE RESPONDED WITH HTTP ${fb_route_code}"
+            ;;
+        *)
+            msg_warn "FileBrowser route returned HTTP ${fb_route_code:-none}; verify Traefik/router after DNS propagation"
+            ;;
+    esac
+    detail_line "FileBrowser route" "https://${FILEBROWSER_HOST}/ -> ${fb_route_code:-none}"
     msg_warn "Browser-based OIDC login flow must be tested manually. Visit https://${FILEBROWSER_HOST} and confirm Authentik redirect and successful login."
 }
 
@@ -1180,7 +1212,7 @@ function prompt_filebrowser_action() {
         esac
     else
         tty_println "${YW}FileBrowser Quantum is not currently deployed.${CL}"
-        deploy_yn="$(timed_yes_no 'Deploy FileBrowser Quantum now?' 'n')"
+        deploy_yn="$(timed_yes_no 'Deploy FileBrowser Quantum now?' 'y')"
         if [[ "$deploy_yn" =~ ^[Yy]$ ]]; then
             printf '%s\n' "deploy"
         else
@@ -1213,6 +1245,7 @@ function run_filebrowser_quantum_module() {
         msg_ok "Using existing FileBrowser compose at $compose_file"
         validate_filebrowser_compose
         deploy_filebrowser_compose
+        refresh_cf_companion_dns_for_host_if_needed "filebrowser quantum" "$FILEBROWSER_HOST"
         sleep 3
         verify_filebrowser_deploy
         return 0
@@ -1240,6 +1273,7 @@ function run_filebrowser_quantum_module() {
         return 0
     fi
     deploy_filebrowser_compose
+    refresh_cf_companion_dns_for_host_if_needed "filebrowser quantum" "$FILEBROWSER_HOST"
     sleep 3
     verify_filebrowser_deploy
 }
@@ -1400,11 +1434,18 @@ function run_admin_dashboard_module() {
             msg_warn "Admin dashboard containers do not appear to be running; check 'docker compose -f $compose_file ps'"
         fi
 
-        if curl -fsSI "https://${ADMIN_DASHBOARD_HOST}" >/dev/null 2>&1; then
-            msg_warn "Route ${ADMIN_DASHBOARD_HOST} responded (200/3xx). Browser-based Authentik protection verification is still required; a 200 response is not proof of Authentik protection."
-        else
-            msg_warn "Route ${ADMIN_DASHBOARD_HOST} did not respond to HTTP probe; verify Traefik and DNS"
-        fi
+        local admin_route_code=""
+        admin_route_code="$(http_code_for_url "https://${ADMIN_DASHBOARD_HOST}/")"
+        case "$admin_route_code" in
+            200|301|302|303|307|308|401|403)
+                msg_ok "ADMIN DASHBOARD ROUTE RESPONDED WITH HTTP ${admin_route_code}"
+                msg_warn "Browser-based Authentik protection verification is still required."
+                ;;
+            *)
+                msg_warn "Admin dashboard route returned HTTP ${admin_route_code:-none}; verify Traefik/router after DNS propagation"
+                ;;
+        esac
+        detail_line "Admin dashboard route" "https://${ADMIN_DASHBOARD_HOST}/ -> ${admin_route_code:-none}"
 
         return 0
 }
