@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.3"
+SCRIPT_VERSION="v1.0.4"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="post-core-cf-companion-rescan"
+SCRIPT_BUILD="landing-clean-user-owned-build"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -470,16 +470,28 @@ function copy_dist_to_appdata() {
 
 function build_landing_ephemeral_docker() {
     local src="$1"
+    local builder_uid=""
+    local builder_gid=""
+
     msg_info "Building landing site in ephemeral Docker container"
     if ! command -v docker >/dev/null 2>&1; then
         msg_warn "Docker not available; cannot use ephemeral builder"
         return 2
     fi
 
+    # Remove stale build output before each build. Previous container builds may
+    # have produced root-owned dist/.astro files, so use run_cmd for sudo fallback.
+    run_cmd "cleaning stale landing build output" rm -rf "${src}/dist" "${src}/.astro"
+
+    builder_uid="$(id -u "$DOCKER_USER" 2>/dev/null || id -u)"
+    builder_gid="$(id -g "$DOCKER_USER" 2>/dev/null || id -g)"
+
     # Astro currently requires Node.js >=22.12.0. Use Node 22 for the
     # disposable builder and install dependencies based on whether the
     # project has a lockfile. npm ci fails on lockfile-less projects.
+    # Run as the Docker user so generated dist/.astro files are not root-owned.
     run_cmd "building landing (docker)" docker run --rm \
+        --user "${builder_uid}:${builder_gid}" \
         -e PUBLIC_LANDING_HOST="${LANDING_HOST}" \
         -e PUBLIC_LANDING_WWW_HOST="${LANDING_WWW_HOST}" \
         -e PUBLIC_POSTIZ_HOST="${POSTIZ_HOST}" \
@@ -504,6 +516,8 @@ function build_landing_host_node() {
         msg_warn "Host Node/npm not available"
         return 2
     fi
+
+    run_cmd "cleaning stale landing build output" rm -rf "${src}/dist" "${src}/.astro"
 
     (
         cd "$src"
