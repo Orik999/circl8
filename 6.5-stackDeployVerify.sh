@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.38"
+SCRIPT_VERSION="v1.3.39"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="cf-companion-rescan-pipefail-safe"
+SCRIPT_BUILD="ensure-core-stacks-before-authentik-gate"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1791,6 +1791,45 @@ function redis_data_owner() {
     service_data_owner "$REDIS_STACK_FILE" "999" "999"
 }
 
+function ensure_core_stack_started() {
+    local container_name="$1"
+    local stack_file="$2"
+    local project="$3"
+    local description="$4"
+    local compose_path=""
+
+    compose_path="$(compose_path_for_stack_file "$stack_file")"
+
+    if [ ! -f "$compose_path" ]; then
+        msg_error "Compose file missing for ${description}: ${compose_path}"
+    fi
+
+    if ! docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$container_name"; then
+        msg_info "${description} container not found; deploying stack"
+        compose_up_quiet "deploying ${description} before dependency checks" --env-file "$ENV_FILE" -p "$project" -f "$compose_path"
+        msg_ok "${description^^} STACK DEPLOYED"
+        return 0
+    fi
+
+    if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx "$container_name"; then
+        msg_info "${description} container not running; starting stack"
+        compose_up_quiet "starting ${description} before dependency checks" --env-file "$ENV_FILE" -p "$project" -f "$compose_path"
+        msg_ok "${description^^} STACK STARTED"
+        return 0
+    fi
+
+    return 0
+}
+
+function ensure_postgres_stack_started() {
+    ensure_core_stack_started "postgres" "$POSTGRES_STACK_FILE" "postgres" "PostgreSQL"
+}
+
+function ensure_redis_stack_started() {
+    ensure_core_stack_started "redis" "$REDIS_STACK_FILE" "redis" "Redis"
+}
+
+
 function repair_postgres_pgdata_permissions() {
     local pg_data_dir="${DOCKER_DIR}/appdata/postgres/pgdata"
     local expected_owner=""
@@ -1829,7 +1868,7 @@ function repair_postgres_pgdata_permissions() {
     run_cmd "setting PostgreSQL pgdata file permissions" find "$pg_data_dir" -type f -exec chmod 600 {} +
     run_cmd "setting PostgreSQL pgdata root mode" chmod 700 "$pg_data_dir"
 
-    docker_cmd start postgres >/dev/null 2>&1 || true
+    ensure_postgres_stack_started
     wait_for_postgres_ready
 
     for dep in temporal postiz authentik-server authentik-worker; do
@@ -2782,12 +2821,15 @@ function verify_authentik_dependencies_for_deploy() {
         return 0
     fi
 
+    ensure_postgres_stack_started
+    ensure_redis_stack_started
+
     if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'postgres'; then
-        msg_error "PostgreSQL container is not running. Fix PostgreSQL before Authentik automation."
+        msg_error "PostgreSQL container is not running after deployment guard. Fix PostgreSQL before Authentik automation."
     fi
 
     if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'redis'; then
-        msg_error "Redis container is not running. Fix Redis before Authentik automation."
+        msg_error "Redis container is not running after deployment guard. Fix Redis before Authentik automation."
     fi
 
     repair_postgres_pgdata_permissions
