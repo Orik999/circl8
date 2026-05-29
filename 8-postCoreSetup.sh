@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.2"
+SCRIPT_VERSION="v1.0.3"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="landing-node22-lockfile-install"
+SCRIPT_BUILD="post-core-cf-companion-rescan"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1927,6 +1927,43 @@ function http_code_for_url() {
     curl -ksS -o /dev/null -w '%{http_code}' "$url" || true
 }
 
+function refresh_cf_companion_dns_records_for_post_core() {
+    section "POST-CORE CLOUDFLARE DNS RESCAN"
+
+    if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cf-companion'; then
+        msg_warn "cf-companion not present; skipping DNS rescan"
+        return 0
+    fi
+
+    msg_info "Restarting cf-companion for post-core DNS rescan"
+    docker_cmd restart cf-companion >/dev/null 2>&1 || true
+    sleep 15
+    msg_ok "CF-COMPANION RESTARTED FOR POST-CORE DNS RESCAN"
+
+    msg_info "Checking cf-companion logs for n8n DNS discovery"
+    local cf_log_file=""
+    local expected_host="${N8N_HOST:-n8n.${DOMAIN}}"
+    cf_log_file="$(mktemp)"
+    TEMP_FILES+=("$cf_log_file")
+    docker_cmd logs --tail=200 cf-companion 2>/dev/null >"$cf_log_file" || true
+
+    if grep -Fq "$expected_host" "$cf_log_file"; then
+        msg_ok "CF-COMPANION N8N DNS DISCOVERY FOUND"
+        grep -F "$expected_host" "$cf_log_file" || true
+    else
+        msg_warn "No n8n DNS discovery/action lines found in recent cf-companion logs"
+    fi
+
+    local warn_lines=""
+    warn_lines="$(grep -Ei 'error|denied|unauthorized|authentication failed|invalid token|missing token|permission denied' "$cf_log_file" | head -n20 || true)"
+    if [ -n "$warn_lines" ]; then
+        msg_warn "cf-companion warnings/errors detected during post-core DNS rescan"
+        printf '%s\n' "$warn_lines"
+    fi
+
+    msg_ok "POST-CORE DNS RESCAN COMPLETE"
+}
+
 function verify_n8n_routes() {
     local ui_code=""
     local webhook_code=""
@@ -2175,6 +2212,7 @@ function run_n8n_module() {
             ;;
     esac
 
+    refresh_cf_companion_dns_records_for_post_core
     verify_n8n_stack
     SUMMARY_LINES+=("${N8N_SERVICE_NAME}|${N8N_ACTION}|verified=${N8N_VERIFIED}")
 }
