@@ -106,7 +106,7 @@ SECRET_DISPLAY_WAS_SHOWN="no"
 SECRET_SCREEN_CLEARED="no"
 
 # Traefik template download defaults. These contain no secrets and can safely live in a public GitHub repo.
-TRAEFIK_TEMPLATE_RAW_BASE="${TRAEFIK_TEMPLATE_RAW_BASE:-https://raw.githubusercontent.com/Orik999/mySetup/main/docker/traefik}"
+TRAEFIK_TEMPLATE_RAW_BASE="${TRAEFIK_TEMPLATE_RAW_BASE:-https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main/docker/traefik}"
 TRAEFIK_STATIC_TEMPLATE_URL="${TRAEFIK_STATIC_TEMPLATE_URL:-${TRAEFIK_TEMPLATE_RAW_BASE}/traefik.yml.template}"
 TRAEFIK_DYNAMIC_TEMPLATE_URL="${TRAEFIK_DYNAMIC_TEMPLATE_URL:-${TRAEFIK_TEMPLATE_RAW_BASE}/dynamic-config.yml.template}"
 
