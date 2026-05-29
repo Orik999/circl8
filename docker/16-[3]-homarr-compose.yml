@@ -1,4 +1,3 @@
-version: '3.9'
 services:
   admin-homarr:
     image: ghcr.io/homarr-labs/homarr:latest

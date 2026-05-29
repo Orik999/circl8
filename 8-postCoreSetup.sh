@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.9"
+SCRIPT_VERSION="v1.0.10"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="admin-dashboard-choice-capture-fix"
+SCRIPT_BUILD="clean-deploy-dns-filebrowser-ui"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1133,9 +1133,12 @@ function validate_filebrowser_compose() {
 
 function deploy_filebrowser_compose() {
     local compose_file="${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
+
     msg_info "Deploying FileBrowser stack"
-    if ! docker compose -f "$compose_file" up -d; then
-        msg_error "docker compose up failed for FileBrowser"
+    if docker_cmd compose up --help 2>/dev/null | grep -q -- '--quiet-pull'; then
+        run_docker_cmd "deploying FileBrowser stack" compose -f "$compose_file" up -d --quiet-pull
+    else
+        run_docker_cmd "deploying FileBrowser stack" compose -f "$compose_file" up -d
     fi
     msg_ok "FileBrowser stack started"
 }
@@ -1155,32 +1158,34 @@ function verify_filebrowser_deploy() {
 function prompt_filebrowser_action() {
     local compose_file="${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
     local choice=""
+    local deploy_yn=""
+
+    # This function is called via command substitution; UI must go to tty/stderr
+    # and stdout must contain only the final action string.
     if [ -f "$compose_file" ]; then
-        echo "Existing FileBrowser Quantum compose detected at $compose_file"
-        echo "Options:"
-        echo "  1) Skip"
-        echo "  2) Recreate (backup then overwrite compose/config)"
-        echo "  3) Reset (backup, remove appdata and compose, then deploy fresh)"
-        echo "  4) Deploy existing compose"
-        choice="$(read_menu_choice 'Choose FileBrowser Quantum action' '1')"
+        tty_println "${BL}Existing FileBrowser Quantum compose detected:${CL} ${compose_file}"
+        tty_println "${BL}Choose FileBrowser Quantum action:${CL}"
+        tty_println "  ${YW}1)${CL} ${GN}Skip${CL}"
+        tty_println "  ${YW}2)${CL} ${GN}Recreate${CL} ${DGN}(backup then overwrite compose/config)${CL}"
+        tty_println "  ${YW}3)${CL} ${GN}Reset${CL} ${DGN}(backup, remove appdata and compose, then deploy fresh)${CL}"
+        tty_println "  ${YW}4)${CL} ${GN}Deploy existing compose${CL}"
+        choice="$(read_menu_choice 'Select FileBrowser action' '1')"
+        tty_println ""
         case "$choice" in
-            1) echo "skip" ;;
-            2) echo "recreate" ;;
-            3) echo "reset" ;;
-            4) echo "deploy" ;;
-            *) echo "skip" ;;
+            1) printf '%s\n' "skip" ;;
+            2) printf '%s\n' "recreate" ;;
+            3) printf '%s\n' "reset" ;;
+            4) printf '%s\n' "deploy" ;;
+            *) printf '%s\n' "skip" ;;
         esac
     else
-        echo "FileBrowser Quantum is not currently deployed."
-        echo "Options:"
-        echo "  1) Deploy"
-        echo "  2) Skip"
-        choice="$(read_menu_choice 'Choose FileBrowser Quantum action' '2')"
-        case "$choice" in
-            1) echo "deploy" ;;
-            2) echo "skip" ;;
-            *) echo "skip" ;;
-        esac
+        tty_println "${YW}FileBrowser Quantum is not currently deployed.${CL}"
+        deploy_yn="$(timed_yes_no 'Deploy FileBrowser Quantum now?' 'n')"
+        if [[ "$deploy_yn" =~ ^[Yy]$ ]]; then
+            printf '%s\n' "deploy"
+        else
+            printf '%s\n' "skip"
+        fi
     fi
 }
 
@@ -1240,16 +1245,24 @@ function run_filebrowser_quantum_module() {
 }
 
 function validate_admin_compose() {
-        docker compose -f "${DOCKER_DIR}/compose/admin-dashboard/compose.yaml" config >/dev/null 2>&1
+        docker_cmd compose -f "${DOCKER_DIR}/compose/admin-dashboard/compose.yaml" config >/dev/null 2>&1
 }
 
 function deploy_admin_compose() {
-        docker compose -f "${DOCKER_DIR}/compose/admin-dashboard/compose.yaml" up -d
+        local compose_file="${DOCKER_DIR}/compose/admin-dashboard/compose.yaml"
+
+        msg_info "Deploying admin dashboard stack"
+        if docker_cmd compose up --help 2>/dev/null | grep -q -- '--quiet-pull'; then
+            run_docker_cmd "deploying admin dashboard stack" compose -f "$compose_file" up -d --quiet-pull
+        else
+            run_docker_cmd "deploying admin dashboard stack" compose -f "$compose_file" up -d
+        fi
+        msg_ok "ADMIN DASHBOARD STACK DEPLOYED"
 }
 
 function verify_admin_dashboard() {
         # check if any admin-* container running
-        if ! docker ps --format '{{.Names}}' | grep -q '^admin-'; then
+        if ! docker_cmd ps --format '{{.Names}}' | grep -q '^admin-'; then
                 msg_warn "No admin dashboard container running"
                 return 1
         fi
@@ -1378,9 +1391,10 @@ function run_admin_dashboard_module() {
         fi
 
         deploy_admin_compose
+        refresh_cf_companion_dns_for_host_if_needed "admin dashboard" "$ADMIN_DASHBOARD_HOST"
 
         # Verify: check container running and HTTP response
-        if docker compose -f "$compose_file" ps --quiet >/dev/null 2>&1 && [ -n "$(docker compose -f "$compose_file" ps --quiet 2>/dev/null)" ]; then
+        if docker_cmd compose -f "$compose_file" ps --quiet >/dev/null 2>&1 && [ -n "$(docker_cmd compose -f "$compose_file" ps --quiet 2>/dev/null)" ]; then
             msg_ok "Admin dashboard container(s) appear to be running"
         else
             msg_warn "Admin dashboard containers do not appear to be running; check 'docker compose -f $compose_file ps'"
@@ -2231,6 +2245,72 @@ function refresh_cf_companion_dns_records_for_post_core() {
     fi
 
     msg_ok "POST-CORE DNS CHECK COMPLETE"
+}
+
+function refresh_cf_companion_dns_for_host_if_needed() {
+    local service_label="$1"
+    local expected_host="$2"
+    local cf_log_file=""
+    local found_records=""
+    local created_records=""
+    local existing_records=""
+    local updated_records=""
+    local warn_lines=""
+
+    [ -n "$expected_host" ] || return 0
+
+    section "${service_label^^} CLOUDFLARE DNS CHECK"
+
+    if host_dns_resolves "$expected_host"; then
+        msg_ok "DNS already resolves: ${expected_host}"
+        msg_ok "cf-companion restart skipped"
+        msg_ok "${service_label^^} DNS CHECK COMPLETE"
+        return 0
+    fi
+
+    if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cf-companion'; then
+        msg_warn "cf-companion not present; skipping DNS rescan for ${expected_host}"
+        return 0
+    fi
+
+    msg_info "Restarting cf-companion for ${service_label} DNS rescan"
+    docker_cmd restart cf-companion >/dev/null 2>&1 || true
+    sleep 15
+    msg_ok "cf-companion restarted for ${service_label} DNS rescan"
+
+    cf_log_file="$(mktemp)"
+    TEMP_FILES+=("$cf_log_file")
+    docker_cmd logs --tail=200 cf-companion 2>/dev/null >"$cf_log_file" || true
+
+    found_records="$(grep -Ei 'Found Service ID:.*Hostname' "$cf_log_file" | sed -E 's/.*Hostname[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
+    created_records="$(grep -Ei 'Created new record:' "$cf_log_file" | sed -E 's/.*Created new record:[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
+    existing_records="$(grep -Ei 'Existing record:' "$cf_log_file" | sed -E 's/.*Existing record:[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
+    updated_records="$(grep -Ei 'Updated record:' "$cf_log_file" | sed -E 's/.*Updated record:[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
+
+    if [ -n "$found_records" ] || [ -n "$created_records" ] || [ -n "$existing_records" ] || [ -n "$updated_records" ]; then
+        echo ""
+        echo -e " ${CM} DNS discovery/action summary:${CL}"
+        [ -n "$found_records" ] && echo -e "   - Found: ${expected_host}"
+        [ -n "$created_records" ] && echo -e "   - Created: ${expected_host}"
+        [ -n "$existing_records" ] && echo -e "   - Existing: ${expected_host}"
+        [ -n "$updated_records" ] && echo -e "   - Updated: ${expected_host}"
+    else
+        msg_warn "No DNS discovery/action lines found for ${expected_host}"
+    fi
+
+    warn_lines="$(grep -Ei 'error|denied|unauthorized|authentication failed|invalid token|missing token|permission denied' "$cf_log_file" | head -n20 || true)"
+    if [ -n "$warn_lines" ]; then
+        msg_warn "cf-companion warnings/errors detected during ${service_label} DNS check"
+        printf '%s\n' "$warn_lines"
+    fi
+
+    if host_dns_resolves "$expected_host"; then
+        msg_ok "DNS now resolves: ${expected_host}"
+    else
+        msg_warn "DNS still does not resolve yet: ${expected_host}"
+    fi
+
+    msg_ok "${service_label^^} DNS CHECK COMPLETE"
 }
 
 function verify_n8n_routes() {
