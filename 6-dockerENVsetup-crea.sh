@@ -1628,19 +1628,23 @@ function collect_service_hostnames() {
     local def_authentik="auth.${d}"
     local def_traefik="traefik.${d}"
     local def_admin="dockge.${d}"
+    local def_admin_dashboard="admin.${d}"
     local def_postiz="app.${d}"
     local def_n8n="n8n.${d}"
     local def_files="files.${d}"
     local def_code="code.${d}"
 
+    local preview_landing preview_landing_www preview_authentik preview_traefik preview_admin preview_admin_dashboard preview_postiz preview_n8n preview_files preview_code
+
     # If an existing .env exists, prefer those values when preserving on No
-    local existing_landing existing_landing_www existing_authentik existing_traefik existing_admin existing_postiz existing_n8n existing_files existing_code
+    local existing_landing existing_landing_www existing_authentik existing_traefik existing_admin existing_admin_dashboard existing_postiz existing_n8n existing_files existing_code
     if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
         existing_landing="$(grep -E '^LANDING_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_landing_www="$(grep -E '^LANDING_WWW_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_authentik="$(grep -E '^AUTHENTIK_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_traefik="$(grep -E '^TRAEFIK_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_admin="$(grep -E '^ADMIN_UI_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_admin_dashboard="$(grep -E '^ADMIN_DASHBOARD_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_postiz="$(grep -E '^POSTIZ_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_n8n="$(grep -E '^N8N_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_files="$(grep -E '^FILEBROWSER_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
@@ -1652,21 +1656,46 @@ function collect_service_hostnames() {
         existing_admin="${ADMIN_UI_HOST}"
     fi
 
+    preview_landing="${existing_landing:-${def_landing}}"
+    preview_landing_www="${existing_landing_www:-${def_landing_www}}"
+    preview_authentik="${existing_authentik:-${def_authentik}}"
+    preview_traefik="${existing_traefik:-${def_traefik}}"
+    preview_admin="${existing_admin:-${def_admin}}"
+    preview_admin_dashboard="${existing_admin_dashboard:-${def_admin_dashboard}}"
+    preview_postiz="${existing_postiz:-${def_postiz}}"
+    preview_n8n="${existing_n8n:-${def_n8n}}"
+    preview_files="${existing_files:-${def_files}}"
+    preview_code="${existing_code:-${def_code}}"
+
+    echo "Default service hostnames:"
+    echo "  Landing page:      ${preview_landing}"
+    echo "  Landing www:       ${preview_landing_www}"
+    echo "  Authentik:         ${preview_authentik}"
+    echo "  Traefik:           ${preview_traefik}"
+    echo "  Admin UI:          ${preview_admin}"
+    echo "  Admin Dashboard:   ${preview_admin_dashboard}"
+    echo "  Postiz/Circl8 app: ${preview_postiz}"
+    echo "  n8n:               ${preview_n8n}"
+    echo "  Files:             ${preview_files}"
+    echo "  VS Code:           ${preview_code}"
+    echo ""
+
     # Ask whether to customize (default No)
     local customize="$(timed_yes_no "Customize service hostnames?" "N")"
 
     if [[ "$customize" =~ ^[Nn]$ ]]; then
         # Preserve existing values when present, otherwise use defaults
-        LANDING_HOST="${existing_landing:-${def_landing}}"
-        LANDING_WWW_HOST="${existing_landing_www:-${def_landing_www}}"
-        AUTHENTIK_HOST="${existing_authentik:-${def_authentik}}"
-        TRAEFIK_HOST="${existing_traefik:-${def_traefik}}"
-        ADMIN_UI_HOST="${existing_admin:-${def_admin}}"
+        LANDING_HOST="${preview_landing}"
+        LANDING_WWW_HOST="${preview_landing_www}"
+        AUTHENTIK_HOST="${preview_authentik}"
+        TRAEFIK_HOST="${preview_traefik}"
+        ADMIN_UI_HOST="${preview_admin}"
+        ADMIN_DASHBOARD_HOST="${preview_admin_dashboard}"
         # POSTIZ_HOST handled by existing Batch 2 code; preserve existing or default
-        POSTIZ_HOST="${existing_postiz:-${def_postiz}}"
-        N8N_HOST="${existing_n8n:-${def_n8n}}"
-        FILEBROWSER_HOST="${existing_files:-${def_files}}"
-        VSCODE_HOST="${existing_code:-${def_code}}"
+        POSTIZ_HOST="${preview_postiz}"
+        N8N_HOST="${preview_n8n}"
+        FILEBROWSER_HOST="${preview_files}"
+        VSCODE_HOST="${preview_code}"
 
         msg_ok "Service hostnames set to defaults/preserved values"
         return 0
@@ -1704,6 +1733,12 @@ function collect_service_hostnames() {
     done
 
     while true; do
+        ADMIN_DASHBOARD_HOST="$(hostname_input "Admin Dashboard hostname" "${existing_admin_dashboard:-${def_admin_dashboard}}")"
+        if validate_domain "$ADMIN_DASHBOARD_HOST"; then break; fi
+        msg_warn "Invalid hostname format"
+    done
+
+    while true; do
         POSTIZ_HOST="$(hostname_input "Postiz app hostname" "${existing_postiz:-${def_postiz}}")"
         if validate_domain "$POSTIZ_HOST"; then break; fi
         msg_warn "Invalid hostname format"
@@ -1733,6 +1768,7 @@ function collect_service_hostnames() {
     detail_line "AUTHENTIK_HOST" "$AUTHENTIK_HOST"
     detail_line "TRAEFIK_HOST" "$TRAEFIK_HOST"
     detail_line "ADMIN_UI_HOST" "$ADMIN_UI_HOST"
+    detail_line "ADMIN_DASHBOARD_HOST" "$ADMIN_DASHBOARD_HOST"
     detail_line "POSTIZ_HOST" "$POSTIZ_HOST"
     detail_line "N8N_HOST" "$N8N_HOST"
     detail_line "FILEBROWSER_HOST" "$FILEBROWSER_HOST"
@@ -1749,6 +1785,7 @@ function collect_service_hostnames() {
         AUTHENTIK_HOST="${existing_authentik:-${def_authentik}}"
         TRAEFIK_HOST="${existing_traefik:-${def_traefik}}"
         ADMIN_UI_HOST="${existing_admin:-${def_admin}}"
+        ADMIN_DASHBOARD_HOST="${existing_admin_dashboard:-${def_admin_dashboard}}"
         POSTIZ_HOST="${existing_postiz:-${def_postiz}}"
         N8N_HOST="${existing_n8n:-${def_n8n}}"
         FILEBROWSER_HOST="${existing_files:-${def_files}}"
@@ -2403,6 +2440,7 @@ LANDING_HOST="${LANDING_HOST}"
 LANDING_WWW_HOST="${LANDING_WWW_HOST}"
 AUTHENTIK_HOST="${AUTHENTIK_HOST}"
 TRAEFIK_HOST="${TRAEFIK_HOST}"
+ADMIN_DASHBOARD_HOST="${ADMIN_DASHBOARD_HOST}"
 # POSTIZ_HOST is populated by Batch 2 and preserved here
 N8N_HOST="${N8N_HOST}"
 FILEBROWSER_HOST="${FILEBROWSER_HOST}"
