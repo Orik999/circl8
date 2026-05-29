@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.5"
+SCRIPT_VERSION="v1.0.6"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="cf-companion-dns-skip-clean-ui"
+SCRIPT_BUILD="admin-dashboard-menu-visible"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -591,12 +591,12 @@ function detect_admin_dashboard_state() {
 
 function prompt_admin_dashboard_selection() {
         section "ADMIN DASHBOARD"
-        echo "Select the admin dashboard to deploy:"
-        echo "  1) Homepage (default - lightweight links)"
-        echo "  2) Glance"
-        echo "  3) Homarr"
-        echo "  4) Dashy"
-        echo "  5) Skip"
+        tty_println "Select the admin dashboard to deploy:"
+        tty_println "  1) Homepage (default - lightweight links)"
+        tty_println "  2) Glance"
+        tty_println "  3) Homarr"
+        tty_println "  4) Dashy"
+        tty_println "  5) Skip"
         local choice
         choice="$(read_menu_choice "Choose dashboard" "1")"
         echo "$choice"
