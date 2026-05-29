@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.5.9"
+SCRIPT_VERSION="v1.5.10"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="brevo-authentik-smtp-input-cleanup"
+SCRIPT_BUILD="postgres-pgdata-permission-repair"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -443,6 +443,27 @@ function chown_required_service_directories() {
     # PostgreSQL official image data paths use UID/GID 999.
     run_cmd "setting PostgreSQL root ownership" chown 999:999 "${DOCKER_DIR}/appdata/postgres"
     run_cmd "setting PostgreSQL PG18-compatible data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "setting PostgreSQL PG18-compatible data directory permissions" find "${DOCKER_DIR}/appdata/postgres/pgdata" -type d -exec chmod 700 {} +
+    run_cmd "setting PostgreSQL PG18-compatible data file permissions" find "${DOCKER_DIR}/appdata/postgres/pgdata" -type f -exec chmod 600 {} +
+
+    if [ -d "${DOCKER_DIR}/appdata/postgres/pgdata" ]; then
+        local postgres_pgdata_offenders=""
+
+        if [ -n "$SUDO_CMD" ]; then
+            postgres_pgdata_offenders="$($SUDO_CMD find "${DOCKER_DIR}/appdata/postgres/pgdata" \( ! -uid 999 -o ! -gid 999 -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+        else
+            postgres_pgdata_offenders="$(find "${DOCKER_DIR}/appdata/postgres/pgdata" \( ! -uid 999 -o ! -gid 999 -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+        fi
+
+        if [ -n "$postgres_pgdata_offenders" ]; then
+            echo -e "${YW}PostgreSQL pgdata audit offenders:${CL}"
+            printf '%s\n' "$postgres_pgdata_offenders"
+            msg_error "PostgreSQL pgdata still contains ownership/permission offenders after repair."
+        fi
+
+        msg_ok "PostgreSQL pgdata ownership and permissions verified"
+    fi
+
     run_cmd "setting PostgreSQL legacy data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "setting PostgreSQL init ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/postgres/init"
 

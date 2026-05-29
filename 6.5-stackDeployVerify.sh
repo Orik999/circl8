@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.30"
+SCRIPT_VERSION="v1.3.31"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="authentik-smtp-env-verification"
+SCRIPT_BUILD="postgres-pgdata-repair-gate"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1761,38 +1761,55 @@ function redis_data_owner() {
 
 function repair_postgres_pgdata_permissions() {
     local pg_data_dir="${DOCKER_DIR}/appdata/postgres/pgdata"
-    local pg_owner=""
 
-    pg_owner="$(postgres_data_owner)"
+    if [ -z "$pg_data_dir" ]; then
+        msg_error "PostgreSQL pgdata path is empty. Cannot repair permissions."
+    fi
 
     run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "$pg_data_dir"
-    run_cmd "setting PostgreSQL pgdata ownership recursively" chown -R "$pg_owner" "$pg_data_dir"
-    run_cmd "setting PostgreSQL pgdata permissions recursively" chmod -R u+rwX,go-rwx "$pg_data_dir"
+    run_cmd "setting PostgreSQL pgdata ownership recursively" chown -R 999:999 "$pg_data_dir"
+    run_cmd "setting PostgreSQL pgdata directory permissions" find "$pg_data_dir" -type d -exec chmod 700 {} +
+    run_cmd "setting PostgreSQL pgdata file permissions" find "$pg_data_dir" -type f -exec chmod 600 {} +
     run_cmd "setting PostgreSQL pgdata root mode" chmod 700 "$pg_data_dir"
 }
 
 function verify_postgres_pgdata_permissions() {
     local pg_data_dir="${DOCKER_DIR}/appdata/postgres/pgdata"
-    local pg_owner=""
-    local pg_uid=""
-    local pg_gid=""
     local bad=""
+    local owner_spec="999"
+    local group_spec="999"
 
-    pg_owner="$(postgres_data_owner)"
-    pg_uid="${pg_owner%%:*}"
-    pg_gid="${pg_owner##*:}"
+    if [ ! -d "$pg_data_dir" ]; then
+        msg_warn "PostgreSQL pgdata directory is missing; created placeholder and skipped strict verification."
+        return 0
+    fi
 
     if [ -n "$SUDO_CMD" ]; then
-        bad="$($SUDO_CMD find "$pg_data_dir" \( ! -uid "$pg_uid" -o ! -gid "$pg_gid" \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+        bad="$($SUDO_CMD find "$pg_data_dir" \( ! -uid "$owner_spec" -o ! -gid "$group_spec" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -30 || true)"
     else
-        bad="$(find "$pg_data_dir" \( ! -uid "$pg_uid" -o ! -gid "$pg_gid" \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+        bad="$(find "$pg_data_dir" \( ! -uid "$owner_spec" -o ! -gid "$group_spec" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -30 || true)"
     fi
 
     if [ -n "$bad" ]; then
-        echo -e "${YW}PostgreSQL permission offenders:${CL}"
+        echo -e "${YW}PostgreSQL pgdata permission offenders detected:${CL}"
         printf '%s\n' "$bad"
-        msg_error "PostgreSQL pgdata still contains files not owned by ${pg_owner}. Refusing to deploy dependants."
+        msg_info "Attempting PostgreSQL pgdata repair."
+        repair_postgres_pgdata_permissions
+
+        if [ -n "$SUDO_CMD" ]; then
+            bad="$($SUDO_CMD find "$pg_data_dir" \( ! -uid "$owner_spec" -o ! -gid "$group_spec" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -30 || true)"
+        else
+            bad="$(find "$pg_data_dir" \( ! -uid "$owner_spec" -o ! -gid "$group_spec" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -30 || true)"
+        fi
+
+        if [ -n "$bad" ]; then
+            echo -e "${YW}PostgreSQL pgdata repair failed. Remaining offenders:${CL}"
+            printf '%s\n' "$bad"
+            msg_error "PostgreSQL pgdata still contains files not owned by ${owner_spec}:${group_spec} or with wrong permissions after repair. Refusing to deploy dependants."
+        fi
     fi
+
+    msg_ok "PostgreSQL pgdata ownership and permissions are verified."
 }
 
 function repair_redis_data_permissions() {
