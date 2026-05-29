@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.29"
-SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="postgres-redis-process-owner-authentik-wait-function-restored"
+SCRIPT_VERSION="v1.3.30"
+SCRIPT_UPDATED="2026-05-29"
+SCRIPT_BUILD="authentik-smtp-env-verification"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1468,6 +1468,59 @@ function verify_authentik_folders() {
     AUTHENTIK_FOLDERS_OK="yes"
 }
 
+function verify_authentik_smtp_env() {
+    section "AUTHENTIK SMTP VERIFICATION"
+
+    local smtp_host=""
+    local smtp_port=""
+    local smtp_username=""
+    local smtp_from=""
+    local smtp_use_tls=""
+    local smtp_use_ssl=""
+    local smtp_timeout=""
+    local smtp_password=""
+    local password_status=""
+
+    [ -f "$ENV_FILE" ] || msg_error "Docker .env file not found: ${ENV_FILE}"
+
+    smtp_host="$(grep -E '^AUTHENTIK_EMAIL__HOST=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+
+    if [ -z "$smtp_host" ]; then
+        msg_warn "Authentik SMTP relay not configured; skipping SMTP env verification"
+        AUTHENTIK_SMTP_ENV_OK="skipped"
+        return 0
+    fi
+
+    smtp_port="$(grep -E '^AUTHENTIK_EMAIL__PORT=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    smtp_username="$(grep -E '^AUTHENTIK_EMAIL__USERNAME=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    smtp_from="$(grep -E '^AUTHENTIK_EMAIL__FROM=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    smtp_use_tls="$(grep -E '^AUTHENTIK_EMAIL__USE_TLS=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    smtp_use_ssl="$(grep -E '^AUTHENTIK_EMAIL__USE_SSL=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    smtp_timeout="$(grep -E '^AUTHENTIK_EMAIL__TIMEOUT=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    smtp_password="$(grep -E '^AUTHENTIK_EMAIL__PASSWORD=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+
+    password_status="$( [ -n "$smtp_password" ] && echo set || echo missing)"
+
+    detail_line "SMTP host" "$smtp_host"
+    detail_line "SMTP port" "${smtp_port:-587}"
+    detail_line "SMTP username" "$( [ -n "$smtp_username" ] && echo set || echo missing)"
+    detail_line "SMTP from" "${smtp_from:-not set}"
+    detail_line "SMTP TLS/SSL" "${smtp_use_tls:-true}/${smtp_use_ssl:-false}"
+    detail_line "SMTP timeout" "${smtp_timeout:-30}"
+    detail_line "SMTP password" "$password_status"
+
+    [ -n "$smtp_port" ] || msg_error "Authentik SMTP port is required when SMTP host is set"
+    [ -n "$smtp_username" ] || msg_error "Authentik SMTP username is required when SMTP host is set"
+    [ -n "$smtp_password" ] || msg_error "Authentik SMTP password is required when SMTP host is set"
+    [ -n "$smtp_from" ] || msg_error "Authentik SMTP sender address is required when SMTP host is set"
+    [ -n "$smtp_use_tls" ] || msg_error "Authentik SMTP USE_TLS is required when SMTP host is set"
+    [ -n "$smtp_use_ssl" ] || msg_error "Authentik SMTP USE_SSL is required when SMTP host is set"
+    [ -n "$smtp_timeout" ] || msg_error "Authentik SMTP TIMEOUT is required when SMTP host is set"
+
+    AUTHENTIK_SMTP_ENV_OK="yes"
+    msg_ok "AUTHENTIK SMTP ENV VERIFIED"
+}
+
 # --- 33E. ADMIN UI SELECTION VERIFICATION ---
 # Maps .env ADMIN_UI to expected compose template and service.
 function verify_admin_ui_selection() {
@@ -2238,6 +2291,7 @@ function verify_selected_stack_preflight() {
         verify_redis_host_tuning
         verify_traefik_rendered_configs
         verify_authentik_folders
+        verify_authentik_smtp_env
     fi
 
     if [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then

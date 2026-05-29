@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.5.7"
-SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="pg18-redis-recursive-permissions-acme-wildcard-render"
+SCRIPT_VERSION="v1.5.9"
+SCRIPT_UPDATED="2026-05-29"
+SCRIPT_BUILD="brevo-authentik-smtp-input-cleanup"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -95,6 +95,14 @@ AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
 AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
 AUTHENTIK_API_TOKEN_MODE="skip"
 AUTHENTIK_API_TOKEN_VALUE=""
+AUTHENTIK_EMAIL__HOST_VALUE=""
+AUTHENTIK_EMAIL__PORT_VALUE=""
+AUTHENTIK_EMAIL__USERNAME_VALUE=""
+AUTHENTIK_EMAIL__PASSWORD_VALUE=""
+AUTHENTIK_EMAIL__USE_TLS_VALUE=""
+AUTHENTIK_EMAIL__USE_SSL_VALUE=""
+AUTHENTIK_EMAIL__TIMEOUT_VALUE=""
+AUTHENTIK_EMAIL__FROM_VALUE=""
 
 HTPASSWD_MODE="empty"
 HTPASSWD_USER_VALUE=""
@@ -817,6 +825,19 @@ function timed_text_input() {
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
     flush_input_buffer 2>/dev/null || true
 
+    echo "$answer"
+}
+
+# --- 27B. NON-TIMED TEXT INPUT HELPER ---
+# Uses editable_input_loop without a countdown for plain text fields.
+function text_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+
+    answer="$(editable_input_loop "$prompt" "$default" "")"
+    [ -z "$answer" ] && answer="$default"
+    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
     echo "$answer"
 }
 
@@ -2135,7 +2156,98 @@ function collect_authentik_inputs() {
             ;;
     esac
 
+    collect_authentik_email_smtp_inputs
+
     return 0
+}
+
+# --- 47C. AUTHENTIK SMTP RELAY INPUTS ---
+# Collects optional Authentik SMTP relay values, preserving existing settings when present.
+function collect_authentik_email_smtp_inputs() {
+    local configure_choice=""
+    local existing_host=""
+    local existing_port=""
+    local existing_username=""
+    local existing_password=""
+    local existing_use_tls=""
+    local existing_use_ssl=""
+    local existing_timeout=""
+    local existing_from=""
+    local password_rotate=""
+
+    section "AUTHENTIK SMTP RELAY"
+
+    if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
+        existing_host="$(grep -E '^AUTHENTIK_EMAIL__HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_port="$(grep -E '^AUTHENTIK_EMAIL__PORT=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_username="$(grep -E '^AUTHENTIK_EMAIL__USERNAME=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_password="$(grep -E '^AUTHENTIK_EMAIL__PASSWORD=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_use_tls="$(grep -E '^AUTHENTIK_EMAIL__USE_TLS=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_use_ssl="$(grep -E '^AUTHENTIK_EMAIL__USE_SSL=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_timeout="$(grep -E '^AUTHENTIK_EMAIL__TIMEOUT=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_from="$(grep -E '^AUTHENTIK_EMAIL__FROM=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    fi
+
+    AUTHENTIK_EMAIL__HOST_VALUE="${AUTHENTIK_EMAIL__HOST:-${existing_host:-}}"
+    AUTHENTIK_EMAIL__PORT_VALUE="${AUTHENTIK_EMAIL__PORT:-${existing_port:-587}}"
+    AUTHENTIK_EMAIL__USERNAME_VALUE="${AUTHENTIK_EMAIL__USERNAME:-${existing_username:-}}"
+    AUTHENTIK_EMAIL__PASSWORD_VALUE="${AUTHENTIK_EMAIL__PASSWORD:-${existing_password:-}}"
+    AUTHENTIK_EMAIL__USE_TLS_VALUE="${AUTHENTIK_EMAIL__USE_TLS:-${existing_use_tls:-true}}"
+    AUTHENTIK_EMAIL__USE_SSL_VALUE="${AUTHENTIK_EMAIL__USE_SSL:-${existing_use_ssl:-false}}"
+    AUTHENTIK_EMAIL__TIMEOUT_VALUE="${AUTHENTIK_EMAIL__TIMEOUT:-${existing_timeout:-30}}"
+    AUTHENTIK_EMAIL__FROM_VALUE="${AUTHENTIK_EMAIL__FROM:-${existing_from:-Circl8 <no-reply@${DOMAIN_VALUE}>}}"
+
+    if [ -n "$AUTHENTIK_EMAIL__HOST_VALUE" ] || [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] || [ -n "$AUTHENTIK_EMAIL__FROM_VALUE" ]; then
+        detail_line "Existing SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-not configured}"
+        detail_line "Existing SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)"
+        detail_line "Existing SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE:-not set}"
+        detail_line "Existing SMTP timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}"
+        configure_choice="$(timed_yes_no "Update Authentik SMTP relay settings?" "N")"
+        if [[ "$configure_choice" =~ ^[Nn]$ ]]; then
+            msg_ok "Authentik SMTP relay settings preserved"
+            return 0
+        fi
+    else
+        configure_choice="$(timed_yes_no "Configure Authentik SMTP relay now?" "N")"
+        if [[ "$configure_choice" =~ ^[Nn]$ ]]; then
+            msg_ok "Authentik SMTP relay configuration skipped"
+            return 0
+        fi
+    fi
+
+    while true; do
+        AUTHENTIK_EMAIL__HOST_VALUE="$(hostname_input "Enter Authentik SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-smtp-relay.brevo.com}")"
+        if [ -n "$AUTHENTIK_EMAIL__HOST_VALUE" ]; then
+            break
+        fi
+        msg_warn "SMTP host cannot be empty."
+    done
+
+    AUTHENTIK_EMAIL__PORT_VALUE="$(text_input "Enter Authentik SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}")"
+    AUTHENTIK_EMAIL__USERNAME_VALUE="$(text_input "Enter Authentik SMTP username" "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}")"
+
+    if [ -n "${AUTHENTIK_EMAIL__PASSWORD_VALUE:-}" ]; then
+        password_rotate="$(timed_yes_no "Rotate/update Authentik SMTP password?" "N")"
+        if [[ "$password_rotate" =~ ^[Yy]$ ]]; then
+            AUTHENTIK_EMAIL__PASSWORD_VALUE="$(sensitive_line_input "Enter Authentik SMTP password")" || AUTHENTIK_EMAIL__PASSWORD_VALUE=""
+        fi
+    else
+        AUTHENTIK_EMAIL__PASSWORD_VALUE="$(sensitive_line_input "Enter Authentik SMTP password")" || AUTHENTIK_EMAIL__PASSWORD_VALUE=""
+    fi
+
+    AUTHENTIK_EMAIL__PASSWORD_VALUE="$(printf '%s' "$AUTHENTIK_EMAIL__PASSWORD_VALUE" | tr -d '\r\n')"
+    [ -n "$AUTHENTIK_EMAIL__PASSWORD_VALUE" ] || msg_error "Authentik SMTP password cannot be empty when SMTP host is configured."
+
+    AUTHENTIK_EMAIL__FROM_VALUE="$(text_input "Enter Authentik SMTP sender address" "${AUTHENTIK_EMAIL__FROM_VALUE}")"
+    AUTHENTIK_EMAIL__TIMEOUT_VALUE="$(text_input "Enter Authentik SMTP timeout seconds" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}")"
+
+    echo ""
+    detail_line "SMTP host" "$AUTHENTIK_EMAIL__HOST_VALUE"
+    detail_line "SMTP port" "$AUTHENTIK_EMAIL__PORT_VALUE"
+    detail_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)"
+    detail_line "SMTP from" "$AUTHENTIK_EMAIL__FROM_VALUE"
+    detail_line "SMTP TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}"
+    detail_line "SMTP timeout" "$AUTHENTIK_EMAIL__TIMEOUT_VALUE"
 }
 
 # --- 47C. READY TO APPLY SUMMARY ---
@@ -2161,6 +2273,10 @@ function show_ready_summary_and_confirm() {
     detail_line "Admin UI host" "$ADMIN_UI_HOST"
     detail_line "Authentik host" "$AUTHENTIK_HOST_VALUE"
     detail_line "Authentik bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
+    detail_line "Authentik SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-not configured}"
+    detail_line "Authentik SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE:-not set}"
+    detail_line "Authentik SMTP username" "$( [ -n "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}" ] && echo set || echo missing)"
+    detail_line "Authentik SMTP TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE:-true}/${AUTHENTIK_EMAIL__USE_SSL_VALUE:-false}"
     detail_line "Traefik dashboard host" "$TRAEFIK_DASHBOARD_HOST"
     detail_line "Proxmox route enabled" "$PROXMOX_ROUTE_ENABLED"
     if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
@@ -2475,14 +2591,14 @@ AUTHENTIK_API_TOKEN="${AUTHENTIK_API_TOKEN_VALUE}"
 AUTHENTIK_DISABLE_UPDATE_CHECK="true"
 AUTHENTIK_DISABLE_STARTUP_ANALYTICS="true"
 AUTHENTIK_ERROR_REPORTING__ENABLED="false"
-AUTHENTIK_EMAIL__HOST=""
-AUTHENTIK_EMAIL__PORT="587"
-AUTHENTIK_EMAIL__USERNAME=""
-AUTHENTIK_EMAIL__PASSWORD=""
-AUTHENTIK_EMAIL__USE_TLS="true"
-AUTHENTIK_EMAIL__USE_SSL="false"
-AUTHENTIK_EMAIL__TIMEOUT="30"
-AUTHENTIK_EMAIL__FROM="authentik@${DOMAIN_VALUE}"
+AUTHENTIK_EMAIL__HOST="${AUTHENTIK_EMAIL__HOST_VALUE:-}"
+AUTHENTIK_EMAIL__PORT="${AUTHENTIK_EMAIL__PORT_VALUE:-587}"
+AUTHENTIK_EMAIL__USERNAME="${AUTHENTIK_EMAIL__USERNAME_VALUE:-}"
+AUTHENTIK_EMAIL__PASSWORD="${AUTHENTIK_EMAIL__PASSWORD_VALUE:-}"
+AUTHENTIK_EMAIL__USE_TLS="${AUTHENTIK_EMAIL__USE_TLS_VALUE:-true}"
+AUTHENTIK_EMAIL__USE_SSL="${AUTHENTIK_EMAIL__USE_SSL_VALUE:-false}"
+AUTHENTIK_EMAIL__TIMEOUT="${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}"
+AUTHENTIK_EMAIL__FROM="${AUTHENTIK_EMAIL__FROM_VALUE:-Circl8 <no-reply@${DOMAIN_VALUE}>}"
 
 # --- Postiz ---
 POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
