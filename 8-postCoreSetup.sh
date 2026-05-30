@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.15"
-SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="filebrowser-oidc-auto-confirm-docker-cmd"
+SCRIPT_VERSION="v1.0.18"
+SCRIPT_UPDATED="2026-05-30"
+SCRIPT_BUILD="restore-url-helper-route-cleanup"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -412,14 +412,13 @@ function collect_landing_source_path() {
     fi
 
     msg_warn "No Astro landing source found at ${vm_path}"
-    cat <<-EOF
-Copy your Astro project from your laptop to the VM:
-
-  scp -r /path/to/circl8_astro/* <vm-user>@<vm-ip>:${vm_path}/
-
-Replace <vm-user> and <vm-ip> with your VM login and address.
-After copying, return here and press Enter to re-check; or type 's' then Enter to skip deployment.
-EOF
+    echo -e "${YW}${CLF}LANDING SOURCE REQUIRED${CL}"
+    echo -e "${YW}Copy your Astro project from your laptop to the VM:${CL}"
+    echo ""
+    echo -e "  ${GN}scp -r /path/to/circl8_astro/* <vm-user>@<vm-ip>:${vm_path}/${CL}"
+    echo ""
+    echo -e "${YW}Replace <vm-user> and <vm-ip> with your VM login and address.${CL}"
+    echo -e "${YW}After copying, return here and press Enter to re-check; or type 's' then Enter to skip deployment.${CL}"
 
     while true; do
         printf "Press Enter to re-check, or type 's' to skip: "
@@ -434,17 +433,14 @@ EOF
             return 0
         fi
         msg_warn "Still no valid Astro project at ${vm_path}."
-        cat <<-EOF
-If you copied files, ensure they include a package.json and astro.config.mjs (or astro.config.*).
-You can copy again with:
-
-  scp -r /path/to/circl8_astro/* <vm-user>@<vm-ip>:${vm_path}/
-
-Or type 's' then Enter to skip landing deployment.
-EOF
+        echo -e "${YW}If you copied files, ensure they include package.json and astro.config.mjs or astro.config.*.${CL}"
+        echo -e "${YW}You can copy again with:${CL}"
+        echo ""
+        echo -e "  ${GN}scp -r /path/to/circl8_astro/* <vm-user>@<vm-ip>:${vm_path}/${CL}"
+        echo ""
+        echo -e "${YW}Or type 's' then Enter to skip landing deployment.${CL}"
     done
 }
-
 function backup_existing_landing() {
     local ts
     ts="$(date +%Y%m%d%H%M%S)"
@@ -479,17 +475,11 @@ function build_landing_ephemeral_docker() {
         return 2
     fi
 
-    # Remove stale build output before each build. Previous container builds may
-    # have produced root-owned dist/.astro files, so use run_cmd for sudo fallback.
     run_cmd "cleaning stale landing build output" rm -rf "${src}/dist" "${src}/.astro"
 
     builder_uid="$(id -u "$DOCKER_USER" 2>/dev/null || id -u)"
     builder_gid="$(id -g "$DOCKER_USER" 2>/dev/null || id -g)"
 
-    # Astro currently requires Node.js >=22.12.0. Use Node 22 for the
-    # disposable builder and install dependencies based on whether the
-    # project has a lockfile. npm ci fails on lockfile-less projects.
-    # Run as the Docker user so generated dist/.astro files are not root-owned.
     run_cmd "building landing (docker)" docker run --rm \
         --user "${builder_uid}:${builder_gid}" \
         -e PUBLIC_LANDING_HOST="${LANDING_HOST}" \
@@ -595,25 +585,44 @@ function deploy_landing_compose() {
 }
 
 function verify_landing_runtime() {
-    local route_code=""
     local compose_file=""
+    local route_code=""
+    local host=""
+    local attempt=""
+    local ok="no"
+    local hosts=()
+
     compose_file="$(landing_compose_file)"
 
     [ -f "${DOCKER_DIR}/appdata/landing/index.html" ] || return 1
     [ -f "$compose_file" ] || return 1
     landing_container_running || return 1
 
-    route_code="$(http_code_for_url "https://${LANDING_HOST}/")"
-    detail_line "Landing route" "https://${LANDING_HOST}/ -> ${route_code:-none}"
+    [ -n "${LANDING_HOST:-}" ] && hosts+=("$LANDING_HOST")
+    if [ -n "${LANDING_WWW_HOST:-}" ] && [ "${LANDING_WWW_HOST:-}" != "${LANDING_HOST:-}" ]; then
+        hosts+=("$LANDING_WWW_HOST")
+    fi
 
-    case "$route_code" in
-        200|301|302|303|307|308)
+    for attempt in 1 2 3; do
+        ok="no"
+        for host in "${hosts[@]}"; do
+            route_code="$(http_code_for_url "$(https_url_for_host "$host")/")"
+            detail_line "Landing route" "$(https_url_for_host "$host")/ -> ${route_code:-none}"
+            case "$route_code" in
+                200|301|302|303|307|308)
+                    ok="yes"
+                    ;;
+            esac
+        done
+
+        if [ "$ok" == "yes" ]; then
             return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+        fi
+
+        [ "$attempt" -lt 3 ] && sleep 5
+    done
+
+    return 1
 }
 
 function landing_deployment_appears_working() {
@@ -631,7 +640,6 @@ function landing_deployment_appears_working() {
 function run_landing_module() {
     section "LANDING MODULE"
 
-    # Read env-driven hostnames (assumes load_env_file already ran)
     : "${LANDING_HOST:=}"
     : "${LANDING_WWW_HOST:=}"
     : "${POSTIZ_HOST:=}"
@@ -667,13 +675,11 @@ function run_landing_module() {
         return 0
     fi
 
-    # Prompt user before building
     if [[ "$(timed_yes_no 'Build landing site now?' 'Y')" =~ ^[Nn]$ ]]; then
         msg_skip "Landing build skipped by user"
         return 0
     fi
 
-    # build: prefer docker builder, fallback to host node
     if build_landing_ephemeral_docker "$LANDING_SOURCE_PATH"; then
         :
     else
@@ -683,7 +689,6 @@ function run_landing_module() {
         fi
     fi
 
-    # verify dist
     if [ ! -d "${LANDING_SOURCE_PATH}/dist" ]; then
         msg_error "Landing build did not produce dist/"
     fi
@@ -744,7 +749,6 @@ function prompt_admin_dashboard_selection() {
         tty_println ""
         printf '%s\n' "$choice"
 }
-
 function prepare_admin_dashboard_dirs() {
         mkdir -p "${DOCKER_DIR}/compose/admin-dashboard"
         mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/config"
@@ -755,7 +759,6 @@ function prepare_admin_dashboard_dirs() {
         chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/admin-dashboard" 2>/dev/null || true
         chmod 755 "${DOCKER_DIR}/appdata/admin-dashboard/config/homepage" "${DOCKER_DIR}/appdata/admin-dashboard/config/homepage/logs" 2>/dev/null || true
 }
-
 function generate_admin_links_config() {
         local sel="$1"
         local cfgdir="${DOCKER_DIR}/appdata/admin-dashboard/config"
@@ -816,13 +819,11 @@ EOF
         - href: "${postiz_url}"
 EOF
 
-                        # widgets.yaml left minimal for user customization
                         cat > "${cfgdir}/homepage/widgets.yaml" <<EOF
 []
 EOF
                         ;;
                 2)
-                        # Glance minimal page configuration
                         cat > "${cfgdir}/glance.yml" <<EOF
 pages:
   - title: "Admin"
@@ -840,7 +841,6 @@ pages:
 EOF
                         ;;
                 3)
-                        # Homarr: do not invent static links config; ensure appdata exists
                         mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/homarr"
                         ;;
                 4)
@@ -962,7 +962,7 @@ function show_admin_dashboard_ready() {
     echo -e "${BL}Planned link/config files:${CL}"
     case "$sel_name" in
         Homepage)
-            echo -e " ${YW}-${CL} ${DOCKER_DIR}/appdata/admin-dashboard/config/homepage/ ${DGN}(bookmarks/widgets)${CL}"
+            echo -e " ${YW}-${CL} ${DOCKER_DIR}/appdata/admin-dashboard/config/homepage/ ${DGN}(bookmarks/widgets/logs)${CL}"
             ;;
         Glance)
             echo -e " ${YW}-${CL} ${DOCKER_DIR}/appdata/admin-dashboard/config/glance.yml"
@@ -1003,7 +1003,6 @@ function show_admin_dashboard_ready() {
         *) msg_skip "User aborted admin dashboard action"; return 1 ;;
     esac
 }
-
 function sensitive_line_input() {
     local prompt="$1"
     local val=""
@@ -1040,8 +1039,8 @@ function prompt_filebrowser_oidc_action() {
 
     tty_println "${BL}Select FileBrowser OIDC setup method:${CL}"
     if [ "$has_api_token" == "yes" ]; then
-        tty_println "  ${YW}1)${CL} ${GN}Auto-create Authentik provider/application using Authentik API token${CL}"
-        tty_println "  ${YW}2)${CL} ${GN}Paste existing client ID / secret${CL}"
+        tty_println "  ${YW}1)${CL} ${GN}Auto-create FileBrowser OIDC in Authentik${CL}"
+        tty_println "  ${YW}2)${CL} ${GN}Paste saved FileBrowser OIDC credentials${CL}"
         tty_println "  ${YW}3)${CL} ${YW}Skip FileBrowser for now${CL}"
         choice="$(read_menu_choice "Choose FileBrowser OIDC action" "1")"
         tty_println ""
@@ -1052,7 +1051,7 @@ function prompt_filebrowser_oidc_action() {
             *) printf '%s\n' "auto" ;;
         esac
     else
-        tty_println "  ${YW}1)${CL} ${GN}Paste existing client ID / secret${CL}"
+        tty_println "  ${YW}1)${CL} ${GN}Paste saved FileBrowser OIDC credentials${CL}"
         tty_println "  ${YW}2)${CL} ${YW}Skip FileBrowser for now${CL}"
         choice="$(read_menu_choice "Choose FileBrowser OIDC action" "1")"
         tty_println ""
@@ -1067,6 +1066,7 @@ function prompt_filebrowser_oidc_action() {
 function auto_create_filebrowser_oidc_with_authentik() {
     local api_token="$1"
     local result_file=""
+    local parsed_file=""
     local authentik_base=""
     local issuer_url=""
     local callback_url=""
@@ -1087,12 +1087,11 @@ function auto_create_filebrowser_oidc_with_authentik() {
         -e FILEBROWSER_OIDC_ISSUER_URL="$issuer_url" \
         -e FILEBROWSER_OIDC_CALLBACK_URL="$callback_url" \
         -e FILEBROWSER_OIDC_LAUNCH_URL="$launch_url" \
-        authentik-server python - > "$result_file" <<'PY_AUTHENTIK_OIDC'
+        authentik-server python - > "$result_file" 2>&1 <<'PY_AUTHENTIK_OIDC'
 import json
 import os
 import secrets
 import string
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1107,10 +1106,7 @@ SLUG = "filebrowser-quantum"
 
 def req(method, path, data=None):
     body = None
-    headers = {
-        "Authorization": f"Bearer {TOKEN}",
-        "Accept": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
     if data is not None:
         body = json.dumps(data).encode()
         headers["Content-Type"] = "application/json"
@@ -1118,9 +1114,7 @@ def req(method, path, data=None):
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             raw = response.read().decode()
-            if not raw:
-                return {}
-            return json.loads(raw)
+            return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode(errors="replace")
         raise SystemExit(f"AUTHENTIK_API_ERROR {method} {path} HTTP {exc.code}: {raw}")
@@ -1140,11 +1134,12 @@ def find_flow(*slugs):
 def scope_mapping_pks():
     data = req("GET", "/api/v3/propertymappings/provider/scope/?page_size=200")
     results = data.get("results", []) if isinstance(data, dict) else []
-    wanted = ("openid", "email", "profile", "groups")
+    wanted = {"openid", "email", "profile", "groups"}
     pks = []
     for item in results:
-        hay = " ".join(str(item.get(k, "")) for k in ("name", "scope_name", "expression")).lower()
-        if any(w in hay for w in wanted):
+        scope = str(item.get("scope_name", "")).lower()
+        name = str(item.get("name", "")).lower()
+        if scope in wanted or any(w in name for w in wanted):
             pk = item.get("pk")
             if pk and pk not in pks:
                 pks.append(pk)
@@ -1154,14 +1149,15 @@ def rand_secret(length=64):
     alphabet = string.ascii_letters + string.digits + "_-"
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
+def shq(value):
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
 auth_flow = find_flow("default-provider-authorization-explicit-consent", "default-provider-authorization-implicit-consent")
 invalid_flow = find_flow("default-provider-invalidation-flow")
 client_id = "filebrowser_quantum_" + rand_secret(24)
 client_secret = rand_secret(72)
-
 provider = first_result("/api/v3/providers/oauth2/?" + urllib.parse.urlencode({"search": SLUG}))
 provider_mode = "created"
-
 provider_payload = {
     "name": NAME,
     "authorization_flow": auth_flow,
@@ -1179,26 +1175,15 @@ provider_payload = {
     "access_token_validity": "minutes=5",
     "refresh_token_validity": "days=30",
 }
-
 if provider:
     provider_pk = provider.get("pk")
-    # Existing providers are only updated after the Bash-side confirmation above.
-    # This rotates the FileBrowser OIDC secret so Script 8 can write a matching runtime config.
     req("PATCH", f"/api/v3/providers/oauth2/{provider_pk}/", provider_payload)
     provider_mode = "updated"
 else:
     provider = req("POST", "/api/v3/providers/oauth2/", provider_payload)
     provider_pk = provider.get("pk")
-
 application = first_result("/api/v3/core/applications/?" + urllib.parse.urlencode({"slug": SLUG}))
-app_payload = {
-    "name": NAME,
-    "slug": SLUG,
-    "provider": provider_pk,
-    "meta_launch_url": LAUNCH,
-    "open_in_new_tab": True,
-}
-
+app_payload = {"name": NAME, "slug": SLUG, "provider": provider_pk, "meta_launch_url": LAUNCH, "open_in_new_tab": True}
 if application:
     app_pk = application.get("pk")
     req("PATCH", f"/api/v3/core/applications/{app_pk}/", app_payload)
@@ -1207,10 +1192,6 @@ else:
     application = req("POST", "/api/v3/core/applications/", app_payload)
     app_pk = application.get("pk")
     app_mode = "created"
-
-def shq(value):
-    return "'" + value.replace("'", "'\"'\"'") + "'"
-
 print("FILEBROWSER_OIDC_ISSUER_URL=" + shq(ISSUER))
 print("FILEBROWSER_OIDC_CLIENT_ID=" + shq(client_id))
 print("FILEBROWSER_OIDC_CLIENT_SECRET=" + shq(client_secret))
@@ -1220,13 +1201,18 @@ PY_AUTHENTIK_OIDC
     then
         echo ""
         echo -e "${RD}Authentik OIDC automation failed.${CL}"
-        echo -e "${YW}The Authentik API token was not printed. Error output:${CL}"
+        echo -e "${YW}The Authentik API token was not printed. Redacted error output:${CL}"
         sed -E 's/(token|secret|password)([=: ][^[:space:]]+)/\1=REDACTED/Ig' "$result_file" || true
         return 1
     fi
 
+    parsed_file="$(mktemp)"
+    chmod 600 "$parsed_file" 2>/dev/null || true
+    TEMP_FILES+=("$parsed_file")
+    grep '^FILEBROWSER_OIDC_[A-Z_]*=' "$result_file" > "$parsed_file" || true
+
     # shellcheck disable=SC1090
-    . "$result_file"
+    . "$parsed_file"
 
     [ -n "${FILEBROWSER_OIDC_CLIENT_ID:-}" ] || return 1
     [ -n "${FILEBROWSER_OIDC_CLIENT_SECRET:-}" ] || return 1
@@ -1254,6 +1240,7 @@ function show_filebrowser_quantum_instructions() {
     echo -e " ${YW}-${CL} ${GN}User identifier:${CL} preferred_username"
     echo ""
 }
+
 function text_input() {
     local prompt="$1"
     local default="$2"
@@ -1298,8 +1285,9 @@ function collect_filebrowser_oidc_vars() {
     case "$oidc_action" in
         auto)
             echo ""
+            echo -e "${YW}${CLF}FILEBROWSER OIDC AUTO-CREATE WARNING${CL}"
             echo -e "${YW}Auto-create will create the FileBrowser Authentik provider/application if missing.${CL}"
-            echo -e "${YW}If an existing filebrowser-quantum provider is found, Script 8 will update it and rotate the FileBrowser OIDC client secret so the runtime config can be generated.${CL}"
+            echo -e "${YW}If an existing filebrowser-quantum provider is found, Script 8 will update it and rotate the FileBrowser OIDC client secret.${CL}"
             echo -e "${YW}Choose no if you want to preserve an existing provider secret and paste saved credentials instead.${CL}"
             if [[ "$(timed_yes_no 'Continue with FileBrowser OIDC auto-create/update?' 'n')" =~ ^[Nn]$ ]]; then
                 msg_skip "FileBrowser OIDC auto-create skipped by user"
@@ -1436,7 +1424,7 @@ function deploy_filebrowser_compose() {
 
 function verify_filebrowser_deploy() {
     msg_info "Verifying FileBrowser deployment"
-    docker_cmd ps --filter "name=filebrowser" --format 'table {{.Names}}	{{.Status}}'
+    docker_cmd ps --filter "name=filebrowser" --format 'table {{.Names}}\t{{.Status}}'
     docker_cmd compose -f "${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml" logs --tail 80 || true
     local fb_route_code=""
     fb_route_code="$(http_code_for_url "https://${FILEBROWSER_HOST}/")"
@@ -1457,8 +1445,6 @@ function prompt_filebrowser_action() {
     local choice=""
     local deploy_yn=""
 
-    # This function is called via command substitution; UI must go to tty/stderr
-    # and stdout must contain only the final action string.
     if [ -f "$compose_file" ]; then
         tty_println "${BL}Existing FileBrowser Quantum compose detected:${CL} ${compose_file}"
         tty_println "${BL}Choose FileBrowser Quantum action:${CL}"
@@ -1485,6 +1471,7 @@ function prompt_filebrowser_action() {
         fi
     fi
 }
+
 function run_filebrowser_quantum_module() {
     section "FILEBROWSER QUANTUM MODULE"
     : "${DOCKER_DIR:=/home/${DOCKER_USER}/docker}"
@@ -1543,7 +1530,6 @@ function run_filebrowser_quantum_module() {
     sleep 3
     verify_filebrowser_deploy
 }
-
 function validate_admin_compose() {
         docker_cmd compose -f "${DOCKER_DIR}/compose/admin-dashboard/compose.yaml" config >/dev/null 2>&1
 }
@@ -1561,14 +1547,11 @@ function deploy_admin_compose() {
 }
 
 function verify_admin_dashboard() {
-        # check if any admin-* container running
         if ! docker_cmd ps --format '{{.Names}}' | grep -q '^admin-'; then
                 msg_warn "No admin dashboard container running"
                 return 1
         fi
-        # check HTTP route
         if curl -fsSI "https://${ADMIN_DASHBOARD_HOST}" >/dev/null 2>&1; then
-                # If response 200 without redirect, still ok only if protected middleware applied
                 return 0
         else
                 msg_warn "Admin dashboard route not responding at https://${ADMIN_DASHBOARD_HOST}"
@@ -1601,9 +1584,6 @@ function show_admin_dashboard_recent_logs() {
 }
 
 function run_admin_dashboard_module() {
-        section "ADMIN DASHBOARD MODULE"
-
-        # Load .env-backed variables assumed already by load_env_file
         : "${ADMIN_DASHBOARD_HOST:=}"
         if [ -z "$ADMIN_DASHBOARD_HOST" ]; then
                 ADMIN_DASHBOARD_HOST="admin.${DOMAIN}"
@@ -1632,7 +1612,6 @@ function run_admin_dashboard_module() {
 
         prepare_admin_dashboard_dirs
 
-        # Map choice number to human name
         local sel_name
         case "$choice" in
             1) sel_name="Homepage" ;;
@@ -1642,7 +1621,6 @@ function run_admin_dashboard_module() {
             *) sel_name="Unknown" ;;
         esac
 
-        # If compose already exists, ask user what to do
         local compose_file="${DOCKER_DIR}/compose/admin-dashboard/compose.yaml"
         if [ -f "$compose_file" ]; then
             echo "An admin dashboard compose already exists at $compose_file"
@@ -1655,7 +1633,6 @@ function run_admin_dashboard_module() {
                     return 0
                     ;;
                 r|R)
-                    # backup existing appdata if present
                     if [ -d "${DOCKER_DIR}/appdata/admin-dashboard" ]; then
                         local ts
                         ts="$(date +%Y%m%d-%H%M%S)"
@@ -1671,14 +1648,12 @@ function run_admin_dashboard_module() {
             esac
         fi
 
-        # Homarr secret handling
         local will_gen_homarr_key="no"
         if [ "$choice" == "3" ]; then
             local homarr_dir="${DOCKER_DIR}/appdata/admin-dashboard/homarr"
             mkdir -p "$homarr_dir"
             local keyfile="$homarr_dir/secret.key"
             if [ ! -f "$keyfile" ]; then
-                # generate strong secret
                 if command -v openssl >/dev/null 2>&1; then
                     HOMARR_SECRET_ENCRYPTION_KEY="$(openssl rand -base64 32)"
                 else
@@ -1689,17 +1664,13 @@ function run_admin_dashboard_module() {
                 chmod 600 "$keyfile" || true
                 will_gen_homarr_key="yes"
             else
-                # reuse silently
                 HOMARR_SECRET_ENCRYPTION_KEY="$(cat "$keyfile")"
             fi
-            # export for envsubst
             export HOMARR_SECRET_ENCRYPTION_KEY
         fi
 
-        # generate config files for chosen dashboard
         generate_admin_links_config "$choice"
 
-        # Show summary and confirm
         if ! show_admin_dashboard_ready "$sel_name" "$will_gen_homarr_key"; then
             return 1
         fi
@@ -1717,7 +1688,6 @@ function run_admin_dashboard_module() {
         deploy_admin_compose
         refresh_cf_companion_dns_for_host_if_needed "admin dashboard" "$ADMIN_DASHBOARD_HOST"
 
-        # Verify: check container running and HTTP response
         if docker_cmd compose -f "$compose_file" ps --quiet >/dev/null 2>&1 && [ -n "$(docker_cmd compose -f "$compose_file" ps --quiet 2>/dev/null)" ]; then
             msg_ok "Admin dashboard container(s) appear to be running"
         else
@@ -1743,7 +1713,6 @@ function run_admin_dashboard_module() {
 
         return 0
 }
-
 function read_menu_choice() {
     local prompt="$1"
     local default="$2"
@@ -2497,91 +2466,6 @@ function host_dns_resolves() {
     return 1
 }
 
-function refresh_cf_companion_dns_records_for_post_core() {
-    section "POST-CORE CLOUDFLARE DNS CHECK"
-
-    local expected_host="${N8N_HOST:-n8n.${DOMAIN}}"
-    local cf_log_file=""
-    local found_records=""
-    local created_records=""
-    local existing_records=""
-    local updated_records=""
-    local warn_lines=""
-
-    if host_dns_resolves "$expected_host"; then
-        msg_ok "DNS already resolves: ${expected_host}"
-        msg_ok "cf-companion restart skipped"
-        msg_ok "POST-CORE DNS CHECK COMPLETE"
-        return 0
-    fi
-
-    if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cf-companion'; then
-        msg_warn "cf-companion not present; skipping DNS rescan"
-        return 0
-    fi
-
-    msg_info "Restarting cf-companion for post-core DNS rescan"
-    docker_cmd restart cf-companion >/dev/null 2>&1 || true
-    sleep 15
-    msg_ok "cf-companion restarted for post-core DNS rescan"
-
-    msg_info "Checking cf-companion logs for DNS discovery events"
-    cf_log_file="$(mktemp)"
-    TEMP_FILES+=("$cf_log_file")
-    docker_cmd logs --tail=200 cf-companion 2>/dev/null >"$cf_log_file" || true
-
-    found_records="$(grep -Ei 'Found Service ID:.*Hostname' "$cf_log_file" | sed -E 's/.*Hostname[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
-    created_records="$(grep -Ei 'Created new record:' "$cf_log_file" | sed -E 's/.*Created new record:[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
-    existing_records="$(grep -Ei 'Existing record:' "$cf_log_file" | sed -E 's/.*Existing record:[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
-    updated_records="$(grep -Ei 'Updated record:' "$cf_log_file" | sed -E 's/.*Updated record:[[:space:]]*([^[:space:]]+).*/\1/' | grep -Fx "$expected_host" | sort -u || true)"
-
-    if [ -n "$found_records" ] || [ -n "$created_records" ] || [ -n "$existing_records" ] || [ -n "$updated_records" ]; then
-        echo ""
-        echo -e " ${CM} DNS discovery events:${CL}"
-        if [ -n "$found_records" ]; then
-            while IFS= read -r hostname; do
-                echo -e "   - Found: ${hostname}"
-            done <<< "$found_records"
-        else
-            echo -e "   - No discovery hostnames found for ${expected_host}"
-        fi
-
-        echo ""
-        echo -e " ${CM} DNS record actions:${CL}"
-        if [ -n "$created_records" ]; then
-            while IFS= read -r hostname; do
-                echo -e "   - Created: ${hostname}"
-            done <<< "$created_records"
-        fi
-        if [ -n "$existing_records" ]; then
-            while IFS= read -r hostname; do
-                echo -e "   - Existing: ${hostname}"
-            done <<< "$existing_records"
-        fi
-        if [ -n "$updated_records" ]; then
-            while IFS= read -r hostname; do
-                echo -e "   - Updated: ${hostname}"
-            done <<< "$updated_records"
-        fi
-    else
-        msg_warn "No DNS discovery/action lines found for ${expected_host}"
-    fi
-
-    warn_lines="$(grep -Ei 'error|denied|unauthorized|authentication failed|invalid token|missing token|permission denied' "$cf_log_file" | head -n20 || true)"
-    if [ -n "$warn_lines" ]; then
-        msg_warn "cf-companion warnings/errors detected during post-core DNS check"
-        printf '%s\n' "$warn_lines"
-    fi
-
-    if host_dns_resolves "$expected_host"; then
-        msg_ok "DNS now resolves: ${expected_host}"
-    else
-        msg_warn "DNS still does not resolve yet: ${expected_host}"
-    fi
-
-    msg_ok "POST-CORE DNS CHECK COMPLETE"
-}
-
 function refresh_cf_companion_dns_for_host_if_needed() {
     local service_label="$1"
     local expected_host="$2"
@@ -2647,7 +2531,6 @@ function refresh_cf_companion_dns_for_host_if_needed() {
 
     msg_ok "${service_label^^} DNS CHECK COMPLETE"
 }
-
 function verify_n8n_routes() {
     local ui_code=""
     local webhook_code=""
@@ -2659,11 +2542,13 @@ function verify_n8n_routes() {
     case "$ui_code" in
         200|301|302|303|307|308|401|403)
             N8N_UI_ROUTE_OK="yes"
+            N8N_ROUTE_WARNING="none"
             msg_ok "N8N PROTECTED UI ROUTE RESPONDED WITH HTTP ${ui_code}"
             ;;
         *)
             N8N_UI_ROUTE_OK="no"
-            msg_warn "n8n UI route returned HTTP ${ui_code:-none}. Review DNS/Traefik/AuthentiK."
+            N8N_ROUTE_WARNING="ui-route-http-${ui_code:-none}"
+            msg_warn "N8N UI ROUTE NEEDS REVIEW: HTTP ${ui_code:-none}. Review DNS/Traefik/AuthentiK."
             ;;
     esac
 
@@ -2724,6 +2609,9 @@ function verify_n8n_stack() {
     if [ "$N8N_MAIN_RUNNING" == "yes" ] && [ "$N8N_WORKER_RUNNING" == "yes" ] && [ "$N8N_DB_READY" == "yes" ] && [ "$N8N_REDIS_READY" == "yes" ]; then
         N8N_VERIFIED="yes"
         msg_ok "N8N AUTOMATION CORE VERIFIED"
+        if [ "$N8N_UI_ROUTE_OK" != "yes" ]; then
+            msg_warn "N8N UI route is not verified; core backend checks passed only."
+        fi
     else
         N8N_VERIFIED="no"
         msg_warn "N8N AUTOMATION NEEDS REVIEW"
@@ -2896,7 +2784,7 @@ function run_n8n_module() {
             ;;
     esac
 
-    refresh_cf_companion_dns_records_for_post_core
+    refresh_cf_companion_dns_for_host_if_needed "n8n automation" "${N8N_HOST:-n8n.${DOMAIN}}"
     verify_n8n_stack
     SUMMARY_LINES+=("${N8N_SERVICE_NAME}|${N8N_ACTION}|verified=${N8N_VERIFIED}")
 }
@@ -3046,7 +2934,6 @@ function show_secret_summary() {
     done
     enable_logging
 }
-
 function show_final_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    POST-CORE SETUP FINISHED    ━━━━━━━━━━━━━━━━━"
 
