@@ -1266,7 +1266,7 @@ function select_vm_storage() {
 
 # --- 49. GPU PASSTHROUGH OPTION ---
 # Offers discrete GPU passthrough only if sysfs GPU detection found a discrete GPU.
-# Default is no for first Crea Social test because Docker/Postgres/Postiz do not require GPU initially.
+# Default is no for first Circl8 test because Docker/Postgres/Postiz do not require GPU initially.
 function collect_gpu_passthrough_option() {
     local gpu_yn=""
     local gpu_pci_id=""
@@ -1298,7 +1298,7 @@ function collect_gpu_passthrough_option() {
 }
 
 # --- 50. ADVANCED SETTINGS PROMPT ---
-# Keeps Crea Social recommended defaults unless user chooses to edit advanced VM options.
+# Keeps Circl8 recommended defaults unless user chooses to edit advanced VM options.
 function collect_advanced_settings() {
     local advanced_yn=""
     local balloon_yn=""

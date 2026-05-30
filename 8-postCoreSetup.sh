@@ -3,7 +3,7 @@ set -euo pipefail
 shopt -s inherit_errexit nullglob
 
 # =========================================================
-#  Project Crea - Post-Core Production/Add-on Setup
+#  Project circl8 - Post-Core Production/Add-on Setup
 # =========================================================
 # Current module: n8n Automation
 # Future modules can be added using the same detect/prompt/deploy/repair/verify pattern.
@@ -2886,7 +2886,7 @@ function write_verification_report() {
 
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" bash -c "cat > '$VERIFY_LOG'" <<EOF_REPORT
---- CREA POST-CORE SETUP VERIFICATION REPORT ---
+--- PROJECT CIRCL8 POST-CORE SETUP VERIFICATION REPORT ---
 Date: $(date)
 Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
@@ -2924,7 +2924,7 @@ Route warning: $N8N_ROUTE_WARNING
 EOF_REPORT
     else
         cat > "$VERIFY_LOG" <<EOF_REPORT
---- CREA POST-CORE SETUP VERIFICATION REPORT ---
+--- PROJECT CIRCL8 POST-CORE SETUP VERIFICATION REPORT ---
 Date: $(date)
 Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
@@ -2972,7 +2972,7 @@ function write_completion_marker() {
 
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" bash -c "cat > '$COMPLETED_MARKER'" <<EOF_MARKER
-Crea Post-Core Setup completed on: $(date)
+Project circl8 Post-Core Setup completed on: $(date)
 Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
 Compose dir: $COMPOSE_DIR
@@ -2983,7 +2983,7 @@ Verify log: $VERIFY_LOG
 EOF_MARKER
     else
         cat > "$COMPLETED_MARKER" <<EOF_MARKER
-Crea Post-Core Setup completed on: $(date)
+Project circl8 Post-Core Setup completed on: $(date)
 Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
 Compose dir: $COMPOSE_DIR
@@ -3054,7 +3054,7 @@ function show_final_summary() {
 
 function start_confirmation() {
     section "START"
-    echo -e "${YW}This script manages post-core production add-on services for Project Crea.${CL}"
+    echo -e "${YW}This script manages post-core production add-on services for Project circl8.${CL}"
     echo -e "${YW}It does not touch working Scripts 1-7 core infrastructure unless a selected add-on service requires a read-only check.${CL}"
     echo ""
     echo -e "${BL}Current module:${CL} ${N8N_SERVICE_NAME}"

@@ -3,10 +3,10 @@ set -euo pipefail
 shopt -s inherit_errexit nullglob
 
 # =========================================================
-#  Ubuntu VM Setup - Crea Final
+#  Ubuntu VM Setup - Project circl8
 # =========================================================
 # Purpose:
-#   Configure a fresh Ubuntu VM/LXC for the Crea Docker deployment chain.
+#   Configure a fresh Ubuntu VM/LXC for the Project circl8 Docker deployment chain.
 #
 # Design rules:
 #   - Phase 1: detect + collect every user answer first.

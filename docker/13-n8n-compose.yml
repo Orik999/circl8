@@ -1,6 +1,6 @@
 # 13-n8n-compose.yml
 # Project: n8n Automation
-# Purpose: Post-core automation engine for Project Crea.
+# Purpose: Post-core automation engine for Project circl8.
 # Notes:
 # - Runtime-only compose. Database/user initialization is handled by Script 8.
 # - UI/editor route is protected by Authentik forward-auth.

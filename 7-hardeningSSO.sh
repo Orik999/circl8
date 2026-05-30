@@ -1778,7 +1778,7 @@ function generate_image_lock_report() {
     TEMP_FILES+=("$tmp_report")
 
     {
-        echo "--- CREA DOCKER IMAGE LOCK REPORT ---"
+        echo "--- PROJECT CIRCL8 DOCKER IMAGE LOCK REPORT ---"
         echo "Date: $(date)"
         echo "Docker dir: ${DOCKER_DIR}"
         echo ""
@@ -1958,7 +1958,7 @@ for path in root.rglob('*'):
 
 manifest = root / 'PINNED-MANIFEST.txt'
 with manifest.open('w', encoding='utf-8') as fh:
-    fh.write('--- CREA PINNED COMPOSE SNAPSHOT ---\n')
+    fh.write('--- PROJECT CIRCL8 PINNED COMPOSE SNAPSHOT ---\n')
     fh.write('This folder contains digest-pinned compose copies generated from the verified running deployment.\n')
     fh.write('Main live compose files were not modified unless Script 7 live pinning was explicitly confirmed.\n\n')
     fh.write('Files changed:\n')
@@ -1982,7 +1982,7 @@ function write_release_rollback_notes() {
     notes="${RELEASE_SNAPSHOT_DIR}/ROLLBACK-NOTES.txt"
 
     cat > "${notes}.tmp" <<EOF_NOTES
---- CREA RELEASE SNAPSHOT / ROLLBACK NOTES ---
+--- PROJECT CIRCL8 RELEASE SNAPSHOT / ROLLBACK NOTES ---
 Created: $(date)
 Docker dir: ${DOCKER_DIR}
 Compose dir: ${COMPOSE_DIR}
