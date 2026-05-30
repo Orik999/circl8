@@ -525,7 +525,7 @@ function landing_compose_file() {
 }
 
 function landing_container_running() {
-    docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -Eq '^(circl8-landing|crea-landing|landing)$'
+    docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -Eq '^(circl8-landing|landing)$'
 }
 
 function render_landing_compose() {
