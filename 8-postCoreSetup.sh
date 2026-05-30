@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.20"
+SCRIPT_VERSION="v1.0.21"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="authentik-docker-exec-stdin-fix"
+SCRIPT_BUILD="filebrowser-db-redacted-logs"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1347,8 +1347,10 @@ function collect_filebrowser_oidc_vars() {
 function prepare_filebrowser_dirs() {
     msg_info "Creating FileBrowser directories"
     mkdir -p "${DOCKER_DIR}/appdata/filebrowser-quantum/data"
+    mkdir -p "${DOCKER_DIR}/appdata/filebrowser-quantum/files"
     mkdir -p "${DOCKER_DIR}/compose/filebrowser-quantum"
     chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/filebrowser-quantum" 2>/dev/null || true
+    chmod 750 "${DOCKER_DIR}/appdata/filebrowser-quantum" "${DOCKER_DIR}/appdata/filebrowser-quantum/data" "${DOCKER_DIR}/appdata/filebrowser-quantum/files" 2>/dev/null || true
     msg_ok "Prepared FileBrowser appdata and compose dirs"
 }
 
@@ -1376,19 +1378,22 @@ function render_filebrowser_config() {
     cat > "$tmpf" <<-EOF
 server:
   port: 80
+  database: "/home/filebrowser/data/database.db"
+  cacheDir: "/home/filebrowser/data/cache"
 
 auth:
-  oidc:
-    enabled: true
-    issuerUrl: "${FILEBROWSER_OIDC_ISSUER_URL}"
-    clientId: "${FILEBROWSER_OIDC_CLIENT_ID}"
-    clientSecret: "${FILEBROWSER_OIDC_CLIENT_SECRET}"
-    scopes:
-      - openid
-      - email
-      - profile
-      - groups
-    userIdentifier: "preferred_username"
+  methods:
+    oidc:
+      enabled: true
+      issuerUrl: "${FILEBROWSER_OIDC_ISSUER_URL}"
+      clientId: "${FILEBROWSER_OIDC_CLIENT_ID}"
+      clientSecret: "${FILEBROWSER_OIDC_CLIENT_SECRET}"
+      scopes:
+        - openid
+        - email
+        - profile
+        - groups
+      userIdentifier: "preferred_username"
 EOF
     mkdir -p "$cfg_dir"
     mv "$tmpf" "${cfg_dir}/config.yaml"
@@ -1445,10 +1450,22 @@ function deploy_filebrowser_compose() {
     msg_ok "FileBrowser stack started"
 }
 
+function redact_secret_output() {
+    sed -E \
+        -e 's/(clientSecret:[[:space:]]*).*/\1REDACTED/Ig' \
+        -e 's/(clientId:[[:space:]]*filebrowser_quantum_)[^[:space:]]+/\1REDACTED/Ig' \
+        -e 's/(FILEBROWSER_OIDC_CLIENT_SECRET=)[^[:space:]]+/\1REDACTED/Ig' \
+        -e 's/(FILEBROWSER_OIDC_CLIENT_ID=filebrowser_quantum_)[^[:space:]]+/\1REDACTED/Ig' \
+        -e 's/([Tt]oken|[Ss]ecret|[Pp]assword)([=: ][^[:space:]]+)/\1=REDACTED/g'
+}
+
 function verify_filebrowser_deploy() {
     msg_info "Verifying FileBrowser deployment"
     docker_cmd ps --filter "name=filebrowser" --format 'table {{.Names}}\t{{.Status}}'
-    docker_cmd compose -f "${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml" logs --tail 80 || true
+    if ! docker_cmd ps --filter "name=filebrowser" --format '{{.Status}}' | grep -Eiq 'up|healthy'; then
+        msg_warn "FileBrowser is not fully running; showing redacted recent logs"
+        docker_cmd compose -f "${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml" logs --tail 80 2>&1 | redact_secret_output || true
+    fi
     local fb_route_code=""
     fb_route_code="$(http_code_for_url "https://${FILEBROWSER_HOST}/")"
     case "$fb_route_code" in
@@ -1456,7 +1473,11 @@ function verify_filebrowser_deploy() {
             msg_ok "FILEBROWSER ROUTE RESPONDED WITH HTTP ${fb_route_code}"
             ;;
         *)
-            msg_warn "FileBrowser route returned HTTP ${fb_route_code:-none}; verify Traefik/router after DNS propagation"
+            if [ "$fb_route_code" = "000" ]; then
+                msg_warn "FileBrowser route could not be reached yet; DNS resolver propagation may still be pending"
+            else
+                msg_warn "FileBrowser route returned HTTP ${fb_route_code:-none}; verify Traefik/router after DNS propagation"
+            fi
             ;;
     esac
     detail_line "FileBrowser route" "https://${FILEBROWSER_HOST}/ -> ${fb_route_code:-none}"
