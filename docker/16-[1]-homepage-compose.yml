@@ -5,7 +5,7 @@ services:
     networks:
       - t2_proxy
     volumes:
-      - ${DOCKER_DIR}/appdata/admin-dashboard/config/homepage:/app/config:ro
+      - ${DOCKER_DIR}/appdata/admin-dashboard/config/homepage:/app/config:rw
     environment:
       - HOMEPAGE_ALLOWED_HOSTS=${ADMIN_DASHBOARD_HOST}
     labels:

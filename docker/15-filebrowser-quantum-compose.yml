@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   filebrowser:
     image: gtstef/filebrowser:stable
@@ -21,6 +19,7 @@ services:
 
     labels:
       traefik.enable: "true"
+      traefik.docker.network: "t2_proxy"
       traefik.http.routers.filebrowser.rule: "Host(`${FILEBROWSER_HOST}`)"
       traefik.http.routers.filebrowser.entrypoints: "https"
       traefik.http.routers.filebrowser.tls: "true"

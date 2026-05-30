@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.12"
+SCRIPT_VERSION="v1.0.15"
 SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="homepage-500-filebrowser-oidc-skip"
+SCRIPT_BUILD="filebrowser-oidc-auto-confirm-docker-cmd"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -715,7 +715,7 @@ function detect_admin_dashboard_state() {
                 return 0
         fi
         # detect containers
-        if docker ps --format '{{.Names}}' | grep -q '^admin-'; then
+        if docker_cmd ps --format '{{.Names}}' | grep -q '^admin-'; then
                 echo "installed"
                 return 0
         fi
@@ -748,62 +748,82 @@ function prompt_admin_dashboard_selection() {
 function prepare_admin_dashboard_dirs() {
         mkdir -p "${DOCKER_DIR}/compose/admin-dashboard"
         mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/config"
+        mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/config/homepage"
+        mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/config/homepage/logs"
         mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/homarr"
         mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/dashy"
         chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/admin-dashboard" 2>/dev/null || true
+        chmod 755 "${DOCKER_DIR}/appdata/admin-dashboard/config/homepage" "${DOCKER_DIR}/appdata/admin-dashboard/config/homepage/logs" 2>/dev/null || true
 }
 
 function generate_admin_links_config() {
         local sel="$1"
         local cfgdir="${DOCKER_DIR}/appdata/admin-dashboard/config"
+        local landing_url=""
+        local postiz_url=""
+        local authentik_url=""
+        local traefik_url=""
+        local admin_ui_url=""
+        local n8n_url=""
+        local filebrowser_url=""
+        local vscode_url=""
+
+        landing_url="$(https_url_for_host "${LANDING_HOST}")"
+        postiz_url="$(https_url_for_host "${POSTIZ_HOST}")"
+        authentik_url="$(https_url_for_host "${AUTHENTIK_HOST}")"
+        traefik_url="$(https_url_for_host "${TRAEFIK_HOST}")"
+        admin_ui_url="$(https_url_for_host "${ADMIN_UI_HOST}")"
+        n8n_url="$(https_url_for_host "${N8N_HOST}")"
+        filebrowser_url="$(https_url_for_host "${FILEBROWSER_HOST}")"
+        vscode_url="$(https_url_for_host "${VSCODE_HOST}")"
+
         mkdir -p "$cfgdir"
         case "$sel" in
-                                1)
-                                                mkdir -p "${cfgdir}/homepage"
-                                                # Homepage minimal config files
-                                                                                                cat > "${cfgdir}/homepage/services.yaml" <<EOF
+                1)
+                        mkdir -p "${cfgdir}/homepage/logs"
+                        cat > "${cfgdir}/homepage/services.yaml" <<EOF
 - Public / Customer:
     - Landing Page:
-        href: "https://${LANDING_HOST}"
+        href: "${landing_url}"
     - Circl8 App:
-        href: "https://${POSTIZ_HOST}"
+        href: "${postiz_url}"
 - Identity / Admin:
     - Authentik User Portal:
-        href: "https://${AUTHENTIK_HOST}"
+        href: "${authentik_url}"
     - Authentik Admin:
-        href: "https://${AUTHENTIK_HOST}/if/admin/"
+        href: "${authentik_url}/if/admin/"
 - Admin Tools:
     - Traefik:
-        href: "https://${TRAEFIK_HOST}"
+        href: "${traefik_url}"
     - Admin UI:
-        href: "https://${ADMIN_UI_HOST}"
+        href: "${admin_ui_url}"
     - n8n:
-        href: "https://${N8N_HOST}"
+        href: "${n8n_url}"
     - Files:
-        href: "https://${FILEBROWSER_HOST}"
+        href: "${filebrowser_url}"
     - VS Code:
-        href: "https://${VSCODE_HOST}"
+        href: "${vscode_url}"
 EOF
 
-                                                cat > "${cfgdir}/homepage/settings.yaml" <<EOF
+                        cat > "${cfgdir}/homepage/settings.yaml" <<EOF
 title: "Admin Links"
 theme: "default"
 EOF
 
-                                                cat > "${cfgdir}/homepage/bookmarks.yaml" <<EOF
+                        cat > "${cfgdir}/homepage/bookmarks.yaml" <<EOF
 - Circl8:
     - Circl8 App:
-        - href: "https://${POSTIZ_HOST}"
+        - href: "${postiz_url}"
 EOF
 
-                                                # widgets.yaml left minimal for user customization
-                                                cat > "${cfgdir}/homepage/widgets.yaml" <<EOF
+                        # widgets.yaml left minimal for user customization
+                        cat > "${cfgdir}/homepage/widgets.yaml" <<EOF
 []
 EOF
                         ;;
-                                2)
-                                                # Glance minimal page configuration
-                                                                                                cat > "${cfgdir}/glance.yml" <<EOF
+                2)
+                        # Glance minimal page configuration
+                        cat > "${cfgdir}/glance.yml" <<EOF
 pages:
   - title: "Admin"
     columns:
@@ -812,20 +832,20 @@ pages:
             title: "Important Links"
             items:
               - title: "Landing Page"
-                url: "https://${LANDING_HOST}"
+                url: "${landing_url}"
               - title: "Circl8 App"
-                url: "https://${POSTIZ_HOST}"
+                url: "${postiz_url}"
               - title: "Authentik"
-                url: "https://${AUTHENTIK_HOST}"
+                url: "${authentik_url}"
 EOF
                         ;;
                 3)
-                    # Homarr: do not invent static links config; ensure appdata exists
-                    mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/homarr"
-                    ;;
+                        # Homarr: do not invent static links config; ensure appdata exists
+                        mkdir -p "${DOCKER_DIR}/appdata/admin-dashboard/homarr"
+                        ;;
                 4)
-                                                mkdir -p "${cfgdir}/dashy"
-                                                                                                cat > "${cfgdir}/dashy/conf.yml" <<EOF
+                        mkdir -p "${cfgdir}/dashy"
+                        cat > "${cfgdir}/dashy/conf.yml" <<EOF
 pageInfo:
   title: "Admin Dashboard"
 sections:
@@ -833,18 +853,19 @@ sections:
     items:
       - title: "Landing Page"
         type: "link"
-        url: "https://${LANDING_HOST}"
+        url: "${landing_url}"
       - title: "Circl8 App"
         type: "link"
-        url: "https://${POSTIZ_HOST}"
+        url: "${postiz_url}"
       - title: "Authentik"
         type: "link"
-        url: "https://${AUTHENTIK_HOST}"
+        url: "${authentik_url}"
 EOF
                         ;;
         esac
-}
 
+        chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/admin-dashboard/config" 2>/dev/null || true
+}
 function render_admin_compose() {
         local sel="$1"
         local template=""
@@ -998,22 +1019,241 @@ function sensitive_line_input() {
     printf '%s' "$val"
 }
 
+function authentik_api_token_value() {
+    local token=""
+
+    token="${AUTHENTIK_API_TOKEN:-}"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+
+    token="$(env_get AUTHENTIK_API_TOKEN)"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+
+    token="$(env_get AUTHENTIK_BOOTSTRAP_TOKEN)"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+
+    return 1
+}
+
+function prompt_filebrowser_oidc_action() {
+    local has_api_token="$1"
+    local choice=""
+
+    tty_println "${BL}Select FileBrowser OIDC setup method:${CL}"
+    if [ "$has_api_token" == "yes" ]; then
+        tty_println "  ${YW}1)${CL} ${GN}Auto-create Authentik provider/application using Authentik API token${CL}"
+        tty_println "  ${YW}2)${CL} ${GN}Paste existing client ID / secret${CL}"
+        tty_println "  ${YW}3)${CL} ${YW}Skip FileBrowser for now${CL}"
+        choice="$(read_menu_choice "Choose FileBrowser OIDC action" "1")"
+        tty_println ""
+        case "$choice" in
+            1) printf '%s\n' "auto" ;;
+            2) printf '%s\n' "paste" ;;
+            3|s|S|skip) printf '%s\n' "skip" ;;
+            *) printf '%s\n' "auto" ;;
+        esac
+    else
+        tty_println "  ${YW}1)${CL} ${GN}Paste existing client ID / secret${CL}"
+        tty_println "  ${YW}2)${CL} ${YW}Skip FileBrowser for now${CL}"
+        choice="$(read_menu_choice "Choose FileBrowser OIDC action" "1")"
+        tty_println ""
+        case "$choice" in
+            1) printf '%s\n' "paste" ;;
+            2|s|S|skip) printf '%s\n' "skip" ;;
+            *) printf '%s\n' "paste" ;;
+        esac
+    fi
+}
+
+function auto_create_filebrowser_oidc_with_authentik() {
+    local api_token="$1"
+    local result_file=""
+    local authentik_base=""
+    local issuer_url=""
+    local callback_url=""
+    local launch_url=""
+
+    authentik_base="$(https_url_for_host "$AUTHENTIK_HOST")"
+    issuer_url="${authentik_base}/application/o/filebrowser-quantum/"
+    callback_url="$(https_url_for_host "$FILEBROWSER_HOST")/api/auth/oidc/callback"
+    launch_url="$(https_url_for_host "$FILEBROWSER_HOST")"
+
+    result_file="$(mktemp)"
+    chmod 600 "$result_file" 2>/dev/null || true
+    TEMP_FILES+=("$result_file")
+
+    msg_info "Creating/updating FileBrowser Authentik OIDC provider"
+    if ! docker_cmd exec \
+        -e AUTHENTIK_API_TOKEN="$api_token" \
+        -e FILEBROWSER_OIDC_ISSUER_URL="$issuer_url" \
+        -e FILEBROWSER_OIDC_CALLBACK_URL="$callback_url" \
+        -e FILEBROWSER_OIDC_LAUNCH_URL="$launch_url" \
+        authentik-server python - > "$result_file" <<'PY_AUTHENTIK_OIDC'
+import json
+import os
+import secrets
+import string
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+BASE = "http://localhost:9000"
+TOKEN = os.environ["AUTHENTIK_API_TOKEN"]
+ISSUER = os.environ["FILEBROWSER_OIDC_ISSUER_URL"]
+CALLBACK = os.environ["FILEBROWSER_OIDC_CALLBACK_URL"]
+LAUNCH = os.environ["FILEBROWSER_OIDC_LAUNCH_URL"]
+NAME = "FileBrowser Quantum"
+SLUG = "filebrowser-quantum"
+
+def req(method, path, data=None):
+    body = None
+    headers = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Accept": "application/json",
+    }
+    if data is not None:
+        body = json.dumps(data).encode()
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(BASE + path, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read().decode()
+            if not raw:
+                return {}
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode(errors="replace")
+        raise SystemExit(f"AUTHENTIK_API_ERROR {method} {path} HTTP {exc.code}: {raw}")
+
+def first_result(path):
+    data = req("GET", path)
+    results = data.get("results", []) if isinstance(data, dict) else []
+    return results[0] if results else None
+
+def find_flow(*slugs):
+    for slug in slugs:
+        flow = first_result("/api/v3/flows/instances/?" + urllib.parse.urlencode({"slug": slug}))
+        if flow:
+            return flow.get("pk")
+    raise SystemExit("AUTHENTIK_API_ERROR could not find required default Authentik flow")
+
+def scope_mapping_pks():
+    data = req("GET", "/api/v3/propertymappings/provider/scope/?page_size=200")
+    results = data.get("results", []) if isinstance(data, dict) else []
+    wanted = ("openid", "email", "profile", "groups")
+    pks = []
+    for item in results:
+        hay = " ".join(str(item.get(k, "")) for k in ("name", "scope_name", "expression")).lower()
+        if any(w in hay for w in wanted):
+            pk = item.get("pk")
+            if pk and pk not in pks:
+                pks.append(pk)
+    return pks
+
+def rand_secret(length=64):
+    alphabet = string.ascii_letters + string.digits + "_-"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+auth_flow = find_flow("default-provider-authorization-explicit-consent", "default-provider-authorization-implicit-consent")
+invalid_flow = find_flow("default-provider-invalidation-flow")
+client_id = "filebrowser_quantum_" + rand_secret(24)
+client_secret = rand_secret(72)
+
+provider = first_result("/api/v3/providers/oauth2/?" + urllib.parse.urlencode({"search": SLUG}))
+provider_mode = "created"
+
+provider_payload = {
+    "name": NAME,
+    "authorization_flow": auth_flow,
+    "invalidation_flow": invalid_flow,
+    "property_mappings": scope_mapping_pks(),
+    "client_type": "confidential",
+    "client_id": client_id,
+    "client_secret": client_secret,
+    "redirect_uris": [{"matching_mode": "strict", "url": CALLBACK}],
+    "signing_key": None,
+    "sub_mode": "hashed_user_id",
+    "issuer_mode": "per_provider",
+    "include_claims_in_id_token": True,
+    "access_code_validity": "minutes=1",
+    "access_token_validity": "minutes=5",
+    "refresh_token_validity": "days=30",
+}
+
+if provider:
+    provider_pk = provider.get("pk")
+    # Existing providers are only updated after the Bash-side confirmation above.
+    # This rotates the FileBrowser OIDC secret so Script 8 can write a matching runtime config.
+    req("PATCH", f"/api/v3/providers/oauth2/{provider_pk}/", provider_payload)
+    provider_mode = "updated"
+else:
+    provider = req("POST", "/api/v3/providers/oauth2/", provider_payload)
+    provider_pk = provider.get("pk")
+
+application = first_result("/api/v3/core/applications/?" + urllib.parse.urlencode({"slug": SLUG}))
+app_payload = {
+    "name": NAME,
+    "slug": SLUG,
+    "provider": provider_pk,
+    "meta_launch_url": LAUNCH,
+    "open_in_new_tab": True,
+}
+
+if application:
+    app_pk = application.get("pk")
+    req("PATCH", f"/api/v3/core/applications/{app_pk}/", app_payload)
+    app_mode = "updated"
+else:
+    application = req("POST", "/api/v3/core/applications/", app_payload)
+    app_pk = application.get("pk")
+    app_mode = "created"
+
+def shq(value):
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+print("FILEBROWSER_OIDC_ISSUER_URL=" + shq(ISSUER))
+print("FILEBROWSER_OIDC_CLIENT_ID=" + shq(client_id))
+print("FILEBROWSER_OIDC_CLIENT_SECRET=" + shq(client_secret))
+print("FILEBROWSER_OIDC_PROVIDER_MODE=" + shq(provider_mode))
+print("FILEBROWSER_OIDC_APPLICATION_MODE=" + shq(app_mode))
+PY_AUTHENTIK_OIDC
+    then
+        echo ""
+        echo -e "${RD}Authentik OIDC automation failed.${CL}"
+        echo -e "${YW}The Authentik API token was not printed. Error output:${CL}"
+        sed -E 's/(token|secret|password)([=: ][^[:space:]]+)/\1=REDACTED/Ig' "$result_file" || true
+        return 1
+    fi
+
+    # shellcheck disable=SC1090
+    . "$result_file"
+
+    [ -n "${FILEBROWSER_OIDC_CLIENT_ID:-}" ] || return 1
+    [ -n "${FILEBROWSER_OIDC_CLIENT_SECRET:-}" ] || return 1
+    [ -n "${FILEBROWSER_OIDC_ISSUER_URL:-}" ] || return 1
+
+    msg_ok "FILEBROWSER AUTHENTIK OIDC PROVIDER READY"
+    detail_line "Provider" "${FILEBROWSER_OIDC_PROVIDER_MODE:-unknown}"
+    detail_line "Application" "${FILEBROWSER_OIDC_APPLICATION_MODE:-unknown}"
+
+    record_generated_secret "FILEBROWSER_OIDC_ISSUER_URL" "$FILEBROWSER_OIDC_ISSUER_URL" "auto-created"
+    record_generated_secret "FILEBROWSER_OIDC_CLIENT_ID" "$FILEBROWSER_OIDC_CLIENT_ID" "auto-created"
+    record_generated_secret "FILEBROWSER_OIDC_CLIENT_SECRET" "$FILEBROWSER_OIDC_CLIENT_SECRET" "auto-created"
+}
+
 function show_filebrowser_quantum_instructions() {
     section "FILEBROWSER OIDC CONFIG"
 
     echo -e "${BL}FileBrowser Quantum requires an Authentik OAuth2/OIDC provider.${CL}"
     echo ""
-    echo -e "${BL}Create/check this in Authentik:${CL}"
+    echo -e "${BL}Required settings:${CL}"
     echo -e " ${YW}-${CL} ${GN}Provider type:${CL} OAuth2/OIDC"
     echo -e " ${YW}-${CL} ${GN}Suggested provider slug:${CL} filebrowser-quantum"
-    echo -e " ${YW}-${CL} ${GN}Callback URI:${CL} https://${FILEBROWSER_HOST}/api/auth/oidc/callback"
+    echo -e " ${YW}-${CL} ${GN}Callback URI:${CL} $(https_url_for_host "${FILEBROWSER_HOST}")/api/auth/oidc/callback"
     echo -e " ${YW}-${CL} ${GN}Scopes:${CL} openid, email, profile, groups"
     echo -e " ${YW}-${CL} ${GN}User identifier:${CL} preferred_username"
     echo ""
-    echo -e "${YW}After creating/reviewing the provider, paste the issuer URL, client ID, and client secret below.${CL}"
-    echo ""
 }
-
 function text_input() {
     local prompt="$1"
     local default="$2"
@@ -1036,33 +1276,63 @@ function collect_filebrowser_oidc_vars() {
 
     local authentik_base=""
     local default_issuer=""
-    local have_creds=""
+    local api_token=""
+    local has_api_token="no"
+    local oidc_action=""
 
     authentik_base="$(https_url_for_host "$AUTHENTIK_HOST")"
     default_issuer="${authentik_base}/application/o/filebrowser-quantum/"
 
     show_filebrowser_quantum_instructions
 
-    have_creds="$(timed_yes_no "Do you already have the FileBrowser OIDC client ID and secret ready to paste?" "n")"
-    if [[ "$have_creds" =~ ^[Nn]$ ]]; then
-        echo ""
-        echo -e "${YW}Create the Authentik OAuth2/OIDC provider first, then rerun Script 8 when the client ID and secret are ready.${CL}"
-        msg_skip "FileBrowser Quantum deployment skipped; OIDC credentials not ready"
-        return 1
+    if api_token="$(authentik_api_token_value)"; then
+        has_api_token="yes"
+        msg_ok "Authentik API token found in environment/.env"
+    else
+        has_api_token="no"
+        msg_warn "Authentik API token not found; auto-create is unavailable"
     fi
 
-    FILEBROWSER_OIDC_ISSUER_URL="$(text_input 'FILEBROWSER_OIDC_ISSUER_URL' "$default_issuer")"
-    FILEBROWSER_OIDC_CLIENT_ID="$(text_input 'FILEBROWSER_OIDC_CLIENT_ID' '')"
-    FILEBROWSER_OIDC_CLIENT_SECRET="$(sensitive_line_input 'FILEBROWSER_OIDC_CLIENT_SECRET (input hidden)')"
+    oidc_action="$(prompt_filebrowser_oidc_action "$has_api_token")"
 
-    FILEBROWSER_OIDC_ISSUER_URL="$(printf '%s' "$FILEBROWSER_OIDC_ISSUER_URL" | sed -E 's#^https://https://#https://#; s#^http://https://#https://#')"
+    case "$oidc_action" in
+        auto)
+            echo ""
+            echo -e "${YW}Auto-create will create the FileBrowser Authentik provider/application if missing.${CL}"
+            echo -e "${YW}If an existing filebrowser-quantum provider is found, Script 8 will update it and rotate the FileBrowser OIDC client secret so the runtime config can be generated.${CL}"
+            echo -e "${YW}Choose no if you want to preserve an existing provider secret and paste saved credentials instead.${CL}"
+            if [[ "$(timed_yes_no 'Continue with FileBrowser OIDC auto-create/update?' 'n')" =~ ^[Nn]$ ]]; then
+                msg_skip "FileBrowser OIDC auto-create skipped by user"
+                return 1
+            fi
+            if ! auto_create_filebrowser_oidc_with_authentik "$api_token"; then
+                msg_error "FileBrowser OIDC auto-create failed. You can rerun Script 8 and choose paste/skip."
+            fi
+            ;;
+        paste)
+            FILEBROWSER_OIDC_ISSUER_URL="$(text_input 'FILEBROWSER_OIDC_ISSUER_URL' "$default_issuer")"
+            FILEBROWSER_OIDC_CLIENT_ID="$(text_input 'FILEBROWSER_OIDC_CLIENT_ID' '')"
+            disable_logging
+            FILEBROWSER_OIDC_CLIENT_SECRET="$(sensitive_line_input 'FILEBROWSER_OIDC_CLIENT_SECRET (input hidden)')"
+            enable_logging
 
-    if [ -z "$FILEBROWSER_OIDC_ISSUER_URL" ] || [ -z "$FILEBROWSER_OIDC_CLIENT_ID" ] || [ -z "$FILEBROWSER_OIDC_CLIENT_SECRET" ]; then
-        echo ""
-        msg_error "OIDC issuer URL, client ID, and client secret are required. Create/review the Authentik provider first, then rerun Script 8."
-    fi
+            FILEBROWSER_OIDC_ISSUER_URL="$(printf '%s' "$FILEBROWSER_OIDC_ISSUER_URL" | sed -E 's#^https://https://#https://#; s#^http://https://#https://#')"
+
+            if [ -z "$FILEBROWSER_OIDC_ISSUER_URL" ] || [ -z "$FILEBROWSER_OIDC_CLIENT_ID" ] || [ -z "$FILEBROWSER_OIDC_CLIENT_SECRET" ]; then
+                echo ""
+                msg_error "OIDC issuer URL, client ID, and client secret are required."
+            fi
+
+            record_generated_secret "FILEBROWSER_OIDC_ISSUER_URL" "$FILEBROWSER_OIDC_ISSUER_URL" "pasted"
+            record_generated_secret "FILEBROWSER_OIDC_CLIENT_ID" "$FILEBROWSER_OIDC_CLIENT_ID" "pasted"
+            record_generated_secret "FILEBROWSER_OIDC_CLIENT_SECRET" "$FILEBROWSER_OIDC_CLIENT_SECRET" "pasted"
+            ;;
+        skip|*)
+            msg_skip "FileBrowser Quantum deployment skipped; OIDC credentials not ready"
+            return 1
+            ;;
+    esac
 }
-
 function prepare_filebrowser_dirs() {
     msg_info "Creating FileBrowser directories"
     mkdir -p "${DOCKER_DIR}/appdata/filebrowser-quantum/data"
@@ -1146,7 +1416,7 @@ function render_filebrowser_compose() {
 function validate_filebrowser_compose() {
     local compose_file="${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
     msg_info "Validating FileBrowser compose"
-    if ! docker compose -f "$compose_file" config >/dev/null 2>&1; then
+    if ! docker_cmd compose -f "$compose_file" config >/dev/null 2>&1; then
         msg_error "docker compose config failed for $compose_file"
     fi
     msg_ok "FileBrowser compose validated"
@@ -1166,8 +1436,8 @@ function deploy_filebrowser_compose() {
 
 function verify_filebrowser_deploy() {
     msg_info "Verifying FileBrowser deployment"
-    docker ps --filter "name=filebrowser" --format 'table {{.Names}}\t{{.Status}}'
-    docker compose -f "${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml" logs --tail 80 || true
+    docker_cmd ps --filter "name=filebrowser" --format 'table {{.Names}}	{{.Status}}'
+    docker_cmd compose -f "${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml" logs --tail 80 || true
     local fb_route_code=""
     fb_route_code="$(http_code_for_url "https://${FILEBROWSER_HOST}/")"
     case "$fb_route_code" in
@@ -1215,7 +1485,6 @@ function prompt_filebrowser_action() {
         fi
     fi
 }
-
 function run_filebrowser_quantum_module() {
     section "FILEBROWSER QUANTUM MODULE"
     : "${DOCKER_DIR:=/home/${DOCKER_USER}/docker}"
@@ -1305,6 +1574,30 @@ function verify_admin_dashboard() {
                 msg_warn "Admin dashboard route not responding at https://${ADMIN_DASHBOARD_HOST}"
                 return 1
         fi
+}
+
+function show_admin_dashboard_recent_logs() {
+        local compose_file="${DOCKER_DIR}/compose/admin-dashboard/compose.yaml"
+        local containers=""
+        local c=""
+
+        msg_warn "Showing recent admin dashboard logs for HTTP 500 diagnosis"
+        containers="$(docker_cmd compose -f "$compose_file" ps --format '{{.Name}}' 2>/dev/null || true)"
+        if [ -z "$containers" ]; then
+            containers="$(docker_cmd ps -a --format '{{.Names}}' | grep '^admin-' || true)"
+        fi
+
+        if [ -z "$containers" ]; then
+            msg_warn "No admin dashboard containers found for log collection"
+            return 0
+        fi
+
+        while IFS= read -r c; do
+            [ -z "$c" ] && continue
+            echo ""
+            echo -e "${BL}Recent logs for ${c}:${CL}"
+            docker_cmd logs --tail=80 "$c" 2>&1 | sed -E 's/(clientSecret|secret|token|password)([=: ][^[:space:]]+)/\1=REDACTED/Ig' || true
+        done <<< "$containers"
 }
 
 function run_admin_dashboard_module() {
@@ -1439,7 +1732,8 @@ function run_admin_dashboard_module() {
                 msg_warn "Browser-based Authentik protection verification is still required."
                 ;;
             500)
-                msg_warn "Admin dashboard route reached the service but returned HTTP 500; check dashboard app config/logs"
+                msg_warn "Admin dashboard route reached the service but returned HTTP 500; checking dashboard app logs"
+                show_admin_dashboard_recent_logs
                 ;;
             *)
                 msg_warn "Admin dashboard route returned HTTP ${admin_route_code:-none}; verify Traefik/router after DNS propagation"
@@ -1497,7 +1791,7 @@ function init_logging() {
 }
 
 function validate_dependencies() {
-    local required_commands=(awk cat chmod cp curl date docker grep id mkdir mktemp openssl python3 rm sed tee tr)
+    local required_commands=(awk cat chmod cp curl date docker envsubst grep head id mkdir mktemp openssl python3 rm sed sort tee tr)
     local cmd=""
     for cmd in "${required_commands[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 || msg_error "Required command not found: ${cmd}"
@@ -2730,15 +3024,17 @@ EOF_MARKER
 }
 
 function show_secret_summary() {
-    section "SAVE THESE NEW OR PASTED SECRETS"
-
     if [ "${#GENERATED_SECRET_LINES[@]}" -eq 0 ]; then
+        section "SAVE THESE NEW OR PASTED SECRETS"
         echo -e "${GN}No new or pasted secrets were created in this run.${CL}"
         echo -e "${YW}Existing secrets were reused and not displayed.${CL}"
         return 0
     fi
 
+    disable_logging
+    section "SAVE THESE NEW OR PASTED SECRETS"
     echo -e "${YW}Store these values in your password manager. Do not commit them to GitHub.${CL}"
+    echo -e "${YW}This secret summary is displayed only on the terminal and is not written to the script log.${CL}"
     echo ""
     local line=""
     local key=""
@@ -2748,6 +3044,7 @@ function show_secret_summary() {
         IFS='|' read -r key value mode <<< "$line"
         detail_line "${key} (${mode})" "$value"
     done
+    enable_logging
 }
 
 function show_final_summary() {
