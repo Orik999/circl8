@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.19"
+SCRIPT_VERSION="v1.0.20"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="authentik-app-exact-slug-lookup"
+SCRIPT_BUILD="authentik-docker-exec-stdin-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1082,7 +1082,7 @@ function auto_create_filebrowser_oidc_with_authentik() {
     TEMP_FILES+=("$result_file")
 
     msg_info "Creating/updating FileBrowser Authentik OIDC provider"
-    if ! docker_cmd exec \
+    if ! docker_cmd exec -i \
         -e AUTHENTIK_API_TOKEN="$api_token" \
         -e FILEBROWSER_OIDC_ISSUER_URL="$issuer_url" \
         -e FILEBROWSER_OIDC_CALLBACK_URL="$callback_url" \
@@ -1231,8 +1231,13 @@ PY_AUTHENTIK_OIDC
     if [ -z "${FILEBROWSER_OIDC_CLIENT_ID:-}" ] || [ -z "${FILEBROWSER_OIDC_CLIENT_SECRET:-}" ] || [ -z "${FILEBROWSER_OIDC_ISSUER_URL:-}" ]; then
         echo ""
         echo -e "${RD}FileBrowser OIDC auto-create returned incomplete output.${CL}"
-        echo -e "${YW}Redacted raw output follows:${CL}"
-        sed -E 's/(client_secret|CLIENT_SECRET|token|secret|password)([=: ][^[:space:]]+)/\1=REDACTED/Ig' "$result_file" || true
+        if [ ! -s "$result_file" ]; then
+            echo -e "${YW}No output was returned by the Authentik automation container command.${CL}"
+            echo -e "${YW}This usually means docker exec did not receive stdin correctly.${CL}"
+        else
+            echo -e "${YW}Redacted raw output follows:${CL}"
+            sed -E 's/(client_secret|CLIENT_SECRET|token|secret|password)([=: ][^[:space:]]+)/\1=REDACTED/Ig' "$result_file" || true
+        fi
         return 1
     fi
 
