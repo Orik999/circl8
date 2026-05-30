@@ -525,7 +525,7 @@ function landing_compose_file() {
 }
 
 function landing_container_running() {
-    docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -Eq '^(crea-landing|landing)$'
+    docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -Eq '^(circl8-landing|crea-landing|landing)$'
 }
 
 function render_landing_compose() {
@@ -540,9 +540,9 @@ function render_landing_compose() {
     else
         cat > "$out_compose" <<EOF_LANDING_COMPOSE
 services:
-  crea-landing:
+  circl8-landing:
     image: nginx:alpine
-    container_name: crea-landing
+    container_name: circl8-landing
     restart: unless-stopped
     volumes:
       - ${DOCKER_DIR}/appdata/landing:/usr/share/nginx/html:ro
@@ -551,11 +551,11 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=t2_proxy"
-      - "traefik.http.routers.crea-landing.rule=Host(\`${LANDING_WWW_HOST}\`) || Host(\`${LANDING_HOST}\`)"
-      - "traefik.http.routers.crea-landing.entrypoints=https"
-      - "traefik.http.routers.crea-landing.tls=true"
-      - "traefik.http.routers.crea-landing.middlewares=chain-secure@file"
-      - "traefik.http.services.crea-landing.loadbalancer.server.port=80"
+      - "traefik.http.routers.circl8-landing.rule=Host(\`${LANDING_WWW_HOST}\`) || Host(\`${LANDING_HOST}\`)"
+      - "traefik.http.routers.circl8-landing.entrypoints=https"
+      - "traefik.http.routers.circl8-landing.tls=true"
+      - "traefik.http.routers.circl8-landing.middlewares=chain-secure@file"
+      - "traefik.http.services.circl8-landing.loadbalancer.server.port=80"
 
 networks:
   t2_proxy:
