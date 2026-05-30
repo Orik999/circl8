@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.18"
+SCRIPT_VERSION="v1.0.19"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="restore-url-helper-route-cleanup"
+SCRIPT_BUILD="authentik-app-exact-slug-lookup"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1124,6 +1124,21 @@ def first_result(path):
     results = data.get("results", []) if isinstance(data, dict) else []
     return results[0] if results else None
 
+def find_application_by_slug(slug):
+    # Authentik's list endpoint may not filter correctly with ?slug=...
+    # Fetch and match the exact slug in Python to avoid updating the wrong app.
+    page = 1
+    while True:
+        data = req("GET", "/api/v3/core/applications/?" + urllib.parse.urlencode({"page": page, "page_size": 100}))
+        results = data.get("results", []) if isinstance(data, dict) else []
+        for item in results:
+            if item.get("slug") == slug:
+                return item
+        pagination = data.get("pagination", {}) if isinstance(data, dict) else {}
+        if not pagination.get("next"):
+            return None
+        page += 1
+
 def find_flow(*slugs):
     for slug in slugs:
         flow = first_result("/api/v3/flows/instances/?" + urllib.parse.urlencode({"slug": slug}))
@@ -1182,15 +1197,14 @@ if provider:
 else:
     provider = req("POST", "/api/v3/providers/oauth2/", provider_payload)
     provider_pk = provider.get("pk")
-application = first_result("/api/v3/core/applications/?" + urllib.parse.urlencode({"slug": SLUG}))
+application = find_application_by_slug(SLUG)
 app_payload = {"name": NAME, "slug": SLUG, "provider": provider_pk, "meta_launch_url": LAUNCH, "open_in_new_tab": True}
 if application:
-    app_pk = application.get("pk")
-    req("PATCH", f"/api/v3/core/applications/{app_pk}/", app_payload)
+    app_slug = application.get("slug") or SLUG
+    req("PATCH", f"/api/v3/core/applications/{app_slug}/", app_payload)
     app_mode = "updated"
 else:
     application = req("POST", "/api/v3/core/applications/", app_payload)
-    app_pk = application.get("pk")
     app_mode = "created"
 print("FILEBROWSER_OIDC_ISSUER_URL=" + shq(ISSUER))
 print("FILEBROWSER_OIDC_CLIENT_ID=" + shq(client_id))
@@ -1214,9 +1228,13 @@ PY_AUTHENTIK_OIDC
     # shellcheck disable=SC1090
     . "$parsed_file"
 
-    [ -n "${FILEBROWSER_OIDC_CLIENT_ID:-}" ] || return 1
-    [ -n "${FILEBROWSER_OIDC_CLIENT_SECRET:-}" ] || return 1
-    [ -n "${FILEBROWSER_OIDC_ISSUER_URL:-}" ] || return 1
+    if [ -z "${FILEBROWSER_OIDC_CLIENT_ID:-}" ] || [ -z "${FILEBROWSER_OIDC_CLIENT_SECRET:-}" ] || [ -z "${FILEBROWSER_OIDC_ISSUER_URL:-}" ]; then
+        echo ""
+        echo -e "${RD}FileBrowser OIDC auto-create returned incomplete output.${CL}"
+        echo -e "${YW}Redacted raw output follows:${CL}"
+        sed -E 's/(client_secret|CLIENT_SECRET|token|secret|password)([=: ][^[:space:]]+)/\1=REDACTED/Ig' "$result_file" || true
+        return 1
+    fi
 
     msg_ok "FILEBROWSER AUTHENTIK OIDC PROVIDER READY"
     detail_line "Provider" "${FILEBROWSER_OIDC_PROVIDER_MODE:-unknown}"
