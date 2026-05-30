@@ -36,7 +36,7 @@ LOG_FILE="/var/log/proxmox-vm-setup.log"
 VERIFY_LOG="/var/log/proxmox-vm-setup-verify.log"
 COMPLETED_MARKER="/root/.proxmox-vm-setup-completed"
 
-DEFAULT_VM_NAME="crea-ubuntu"
+DEFAULT_VM_NAME="circl8-ubuntu"
 DEFAULT_VMID="100"
 DEFAULT_DISK_GB="40"
 DEFAULT_RAM_PERCENT="75"
