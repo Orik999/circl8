@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.2.0"
-SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="audit-untimed-inputs-circl8-vm-storage"
+SCRIPT_VERSION="v1.3.0"
+SCRIPT_UPDATED="2026-05-30"
+SCRIPT_BUILD="destructive-reuse-secondary-storage"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
