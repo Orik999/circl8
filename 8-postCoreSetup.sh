@@ -34,10 +34,10 @@ SCRIPT_BUILD="filebrowser-github-config-compose"
 # --- 2. GLOBAL VARIABLES ---
 T=15
 
-LOG_FILE="/var/log/crea-post-core-setup.log"
+LOG_FILE="/var/log/circl8-post-core-setup.log"
 RUNTIME_LOG_FILE=""
-VERIFY_LOG="/var/log/crea-post-core-setup-verify.log"
-COMPLETED_MARKER="/root/.crea-post-core-setup-completed"
+VERIFY_LOG="/var/log/circl8-post-core-setup-verify.log"
+COMPLETED_MARKER="/root/.circl8-post-core-setup-completed"
 
 DEFAULT_DOCKER_USER="${SUDO_USER:-orik}"
 DOCKER_USER="${DOCKER_USER:-$DEFAULT_DOCKER_USER}"
@@ -1835,7 +1835,7 @@ function init_logging() {
     exec 3>&1
     exec 4>&2
     if [ -n "$SUDO_CMD" ]; then
-        RUNTIME_LOG_FILE="$(mktemp /tmp/crea-post-core-log.XXXXXX)"
+        RUNTIME_LOG_FILE="$(mktemp /tmp/circl8-post-core-log.XXXXXX)"
         TEMP_FILES+=("$RUNTIME_LOG_FILE")
         exec > >(tee -a "$RUNTIME_LOG_FILE") 2>&1
     else
