@@ -67,6 +67,10 @@ PV_PARENT_DISKS=""
 BLOCKED_PARENT_DISKS=""
 SAFE_DISKS=()
 BLOCKED_DISKS=()
+SELECTED_DISK_ENTRY_TYPE="clean"
+SELECTED_DISK_REUSE_REASON=""
+EXISTING_VGS_ON_SELECTED_DISK=""
+EXISTING_PVS_ON_SELECTED_DISK=""
 
 PV_CREATED="no"
 VG_CREATED="no"
@@ -654,7 +658,7 @@ function build_blocked_disk_lists() {
         fi
     done < <(pvs --noheadings -o pv_name 2>/dev/null | xargs -n1 || true)
 
-    for disk in $ROOT_PARENT_DISKS $MOUNTED_PARENT_DISKS $PV_PARENT_DISKS; do
+    for disk in $ROOT_PARENT_DISKS $MOUNTED_PARENT_DISKS; do
         BLOCKED_PARENT_DISKS="$(add_unique_word "$BLOCKED_PARENT_DISKS" "$disk")"
     done
 }
@@ -680,6 +684,140 @@ function get_disk_block_reason() {
     echo "${reason:-unknown}" | xargs
 }
 
+# Returns existing PV devices that belong to the selected parent disk, including child partitions.
+function get_pvs_for_disk() {
+    local disk="$1"
+    local pv=""
+    local parent=""
+
+    while read -r pv; do
+        [ -z "$pv" ] && continue
+        [ -b "$pv" ] || continue
+
+        parent="$(get_parent_disk_name "$pv" || true)"
+        if [ "$parent" == "$(basename "$disk")" ]; then
+            echo "$pv"
+        fi
+    done < <(pvs --noheadings -o pv_name 2>/dev/null | xargs -n1 || true)
+}
+
+# Returns existing VG names that have PVs on the selected parent disk.
+function get_vgs_for_disk() {
+    local disk="$1"
+    local pv=""
+    local vg=""
+    local parent=""
+
+    while IFS='|' read -r pv vg; do
+        pv="$(echo "${pv:-}" | xargs)"
+        vg="$(echo "${vg:-}" | xargs)"
+        [ -z "$pv" ] && continue
+        [ -z "$vg" ] && continue
+        [ -b "$pv" ] || continue
+
+        parent="$(get_parent_disk_name "$pv" || true)"
+        if [ "$parent" == "$(basename "$disk")" ]; then
+            echo "$vg"
+        fi
+    done < <(pvs --noheadings --separator '|' -o pv_name,vg_name 2>/dev/null || true) | sort -u
+}
+
+# Returns parent disks used by every PV in a VG. Used to avoid destroying multi-disk VGs.
+function get_parent_disks_for_vg() {
+    local vg="$1"
+    local pv=""
+    local parent=""
+
+    while read -r pv; do
+        [ -z "$pv" ] && continue
+        [ -b "$pv" ] || continue
+
+        parent="$(get_parent_disk_name "$pv" || true)"
+        [ -n "$parent" ] && echo "$parent"
+    done < <(pvs --noheadings -o pv_name --select "vg_name=${vg}" 2>/dev/null | xargs -n1 || true) | sort -u
+}
+
+# Finds Proxmox storage entries that reference a VG on the selected disk.
+function get_proxmox_storage_refs_for_vgs() {
+    local vg_list="$1"
+    local sid=""
+    local vg=""
+    local cfg=""
+
+    while read -r sid; do
+        [ -z "$sid" ] && continue
+        cfg="$(pvesm config "$sid" 2>/dev/null || true)"
+        [ -z "$cfg" ] && continue
+
+        for vg in $vg_list; do
+            if echo "$cfg" | grep -Eq "^[[:space:]]*vgname[[:space:]]+${vg}$|^[[:space:]]*vgname[[:space:]]+${vg}[[:space:]]"; then
+                echo "$sid -> vgname ${vg}"
+            fi
+        done
+    done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1}' || true)
+}
+
+# Escapes VG/LV components for /dev/mapper paths, matching LVM hyphen escaping.
+function lvm_mapper_escape() {
+    local value="$1"
+    echo "${value//-/--}"
+}
+
+# Finds mounted logical volumes that belong to VG(s) on the selected disk.
+# Destructive reuse must refuse mounted LVs; the script never auto-unmounts.
+function get_mounted_lvs_for_vgs() {
+    local vg_list="$1"
+    local lv_path=""
+    local lv_vg=""
+    local lv_name=""
+    local vg=""
+    local match=""
+    local source=""
+    local canonical=""
+    local mapper_path=""
+    local mountpoint=""
+    local escaped_vg=""
+    local escaped_lv=""
+
+    while IFS='|' read -r lv_path lv_vg lv_name; do
+        lv_path="$(echo "${lv_path:-}" | xargs)"
+        lv_vg="$(echo "${lv_vg:-}" | xargs)"
+        lv_name="$(echo "${lv_name:-}" | xargs)"
+        [ -z "$lv_vg" ] && continue
+        [ -z "$lv_name" ] && continue
+
+        match="no"
+        for vg in $vg_list; do
+            if [ "$lv_vg" == "$vg" ]; then
+                match="yes"
+                break
+            fi
+        done
+        [ "$match" == "yes" ] || continue
+
+        [ -n "$lv_path" ] || lv_path="/dev/${lv_vg}/${lv_name}"
+        escaped_vg="$(lvm_mapper_escape "$lv_vg")"
+        escaped_lv="$(lvm_mapper_escape "$lv_name")"
+        mapper_path="/dev/mapper/${escaped_vg}-${escaped_lv}"
+
+        for source in "$lv_path" "$mapper_path"; do
+            [ -e "$source" ] || continue
+            mountpoint="$(findmnt -rn -S "$source" -o TARGET 2>/dev/null | xargs || true)"
+            if [ -n "$mountpoint" ]; then
+                echo "${lv_vg}/${lv_name} mounted at ${mountpoint} via ${source}"
+            fi
+
+            canonical="$(readlink -f "$source" 2>/dev/null || true)"
+            if [ -n "$canonical" ] && [ "$canonical" != "$source" ]; then
+                mountpoint="$(findmnt -rn -S "$canonical" -o TARGET 2>/dev/null | xargs || true)"
+                if [ -n "$mountpoint" ]; then
+                    echo "${lv_vg}/${lv_name} mounted at ${mountpoint} via ${canonical}"
+                fi
+            fi
+        done
+    done < <(lvs --noheadings --separator '|' -o lv_path,vg_name,lv_name 2>/dev/null || true) | sort -u
+}
+
 # --- 28. DISK DATA RISK REPORT HELPER ---
 # Builds a detailed risk report for existing signatures, partitions, PVs, mdraid and ZFS labels.
 function build_data_risk_report() {
@@ -697,8 +835,14 @@ function build_data_risk_report() {
         report+="child partitions/devices detected (${child_count})"$'\n'
     fi
 
-    if pvs "$disk" >/dev/null 2>&1; then
-        report+="selected disk is an existing LVM PV"$'\n'
+    local lvm_pvs=""
+    local lvm_vgs=""
+    lvm_pvs="$(get_pvs_for_disk "$disk" | xargs || true)"
+    lvm_vgs="$(get_vgs_for_disk "$disk" | xargs || true)"
+    if [ -n "$lvm_vgs" ]; then
+        report+="existing LVM PV/VG metadata detected (VGs: ${lvm_vgs}; PVs: ${lvm_pvs:-unknown})"$'\n'
+    elif [ -n "$lvm_pvs" ]; then
+        report+="existing LVM PV metadata detected (${lvm_pvs})"$'\n'
     fi
 
     if command -v mdadm >/dev/null 2>&1 && mdadm --examine "$disk" >/dev/null 2>&1; then
@@ -740,6 +884,7 @@ function validate_dependencies() {
         mktemp
         pvesm
         pvcreate
+        pvremove
         pvs
         rm
         sed
@@ -752,6 +897,7 @@ function validate_dependencies() {
         touch
         vgcfgbackup
         vgcreate
+        vgremove
         vgs
         wipefs
         xargs
@@ -829,7 +975,8 @@ function check_previous_marker() {
 
 # --- 33. DISK AUDIT BUILDER ---
 # Builds safe and blocked disk lists.
-# Root, mounted and existing PV-backed disks are blocked from selection.
+# Root/boot/proxmox-storage and mounted disks are blocked from selection.
+# Existing LVM PV-backed secondary disks are selectable only as destructive reuse candidates.
 function audit_disks() {
     local name=""
     local size=""
@@ -839,6 +986,8 @@ function audit_disks() {
     local model=""
     local line=""
     local reason=""
+    local risk_report=""
+    local risk_inline=""
 
     section "DISK AUDIT"
 
@@ -867,13 +1016,19 @@ function audit_disks() {
             reason="$(get_disk_block_reason "$name")"
             BLOCKED_DISKS+=("${name}|${size}|${tran:-unknown}|${rota}|${model:-unknown}|${reason}")
         else
-            SAFE_DISKS+=("${name}|${size}|${tran:-unknown}|${rota}|${model:-unknown}")
+            risk_report="$(build_data_risk_report "/dev/${name}" || true)"
+            if [ -n "$risk_report" ]; then
+                risk_inline="$(echo "$risk_report" | paste -sd ';' - | sed 's/;/; /g')"
+                SAFE_DISKS+=("${name}|${size}|${tran:-unknown}|${rota}|${model:-unknown}|destructive-reuse|${risk_inline}")
+            else
+                SAFE_DISKS+=("${name}|${size}|${tran:-unknown}|${rota}|${model:-unknown}|clean|none")
+            fi
         fi
     done < <(lsblk -dn -o NAME,SIZE,TYPE,TRAN,ROTA,MODEL)
 
     if [ "${#SAFE_DISKS[@]}" -eq 0 ]; then
         echo ""
-        echo -e "${RD}No safe unused physical disks were found.${CL}"
+        echo -e "${RD}No selectable physical disks were found.${CL}"
         echo -e "${YW}Blocked disks:${CL}"
 
         for line in "${BLOCKED_DISKS[@]}"; do
@@ -881,7 +1036,7 @@ function audit_disks() {
             echo "  /dev/${name} | ${size} | ${model} | reason=${reason}"
         done
 
-        msg_error "No safe disk candidates available."
+        msg_error "No selectable disk candidates available."
     fi
 
     msg_ok "DISK AUDIT COMPLETE"
@@ -897,12 +1052,14 @@ function show_disk_lists() {
     local model=""
     local reason=""
     local dtype=""
+    local entry_type=""
+    local risk=""
 
     echo ""
-    echo -e "${BL}SAFE SELECTABLE DISKS:${CL}"
+    echo -e "${BL}SELECTABLE DISKS:${CL}"
 
     for i in "${!SAFE_DISKS[@]}"; do
-        IFS='|' read -r name size tran rota model <<< "${SAFE_DISKS[$i]}"
+        IFS='|' read -r name size tran rota model entry_type risk <<< "${SAFE_DISKS[$i]}"
 
         if [ "$rota" == "0" ]; then
             dtype="SSD"
@@ -910,14 +1067,29 @@ function show_disk_lists() {
             dtype="HDD"
         fi
 
-        printf " %b %2d) %-12s %-8s %-4s BUS=%-8s %s\n" \
-            "${BL}━━━━━▶${CL}" \
-            "$((i+1))" \
-            "/dev/${name}" \
-            "${size}" \
-            "${dtype}" \
-            "${tran:-unknown}" \
-            "${model:-unknown}"
+        if [ "$entry_type" == "destructive-reuse" ]; then
+            printf " %b %2d) %-12s %-8s %-4s BUS=%-8s %s %b%s%b\n" \
+                "${YW}━━━━━▶${CL}" \
+                "$((i+1))" \
+                "/dev/${name}" \
+                "${size}" \
+                "${dtype}" \
+                "${tran:-unknown}" \
+                "${model:-unknown}" \
+                "${RD}" \
+                "DESTRUCTIVE REUSE" \
+                "${CL}"
+            echo -e "      ${YW}!${CL} Existing metadata/signatures: ${risk}"
+        else
+            printf " %b %2d) %-12s %-8s %-4s BUS=%-8s %s\n" \
+                "${BL}━━━━━▶${CL}" \
+                "$((i+1))" \
+                "/dev/${name}" \
+                "${size}" \
+                "${dtype}" \
+                "${tran:-unknown}" \
+                "${model:-unknown}"
+        fi
     done
 
     if [ "${#BLOCKED_DISKS[@]}" -gt 0 ]; then
@@ -948,6 +1120,8 @@ function select_disk() {
 
     SELECTED_DISK_NAME="$(echo "${SAFE_DISKS[$((disk_idx-1))]}" | cut -d'|' -f1)"
     SELECTED_DISK="/dev/${SELECTED_DISK_NAME}"
+    SELECTED_DISK_ENTRY_TYPE="$(echo "${SAFE_DISKS[$((disk_idx-1))]}" | cut -d'|' -f6)"
+    SELECTED_DISK_REUSE_REASON="$(echo "${SAFE_DISKS[$((disk_idx-1))]}" | cut -d'|' -f7-)"
 
     if [ ! -b "$SELECTED_DISK" ]; then
         msg_error "Selected disk is not a block device."
@@ -987,6 +1161,8 @@ function inspect_selected_disk() {
         DISK_BUS="UNKNOWN"
     fi
 
+    EXISTING_VGS_ON_SELECTED_DISK="$(get_vgs_for_disk "$SELECTED_DISK" | xargs || true)"
+    EXISTING_PVS_ON_SELECTED_DISK="$(get_pvs_for_disk "$SELECTED_DISK" | xargs || true)"
     DATA_RISK_REPORT="$(build_data_risk_report "$SELECTED_DISK")"
 
     if [ -n "$DATA_RISK_REPORT" ]; then
@@ -1008,6 +1184,7 @@ function show_selected_disk_summary() {
     echo -e " ${BL}━━━━━▶${CL} TYPE/BUS: ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
     echo -e " ${BL}━━━━━▶${CL} SIZE: ${GN}${DISK_SIZE_GB}GB${CL}"
     echo -e " ${BL}━━━━━▶${CL} EXISTING DATA/SIGNATURES: ${GN}${HAS_DATA}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} SELECTION MODE: ${GN}${SELECTED_DISK_ENTRY_TYPE}${CL}"
 
     if [ "$HAS_DATA" == "yes" ]; then
         echo ""
@@ -1024,20 +1201,32 @@ function show_selected_disk_summary() {
 # If disk has data, default is NO. If disk looks empty, default is YES.
 function first_destructive_confirmation() {
     local proceed_yn=""
+    local typed=""
 
     if [ "$HAS_DATA" == "yes" ]; then
         echo ""
-        echo -e "${RD}WARNING: Existing data, partitions, or signatures were detected on ${SELECTED_DISK}.${CL}"
-        proceed_yn="$(timed_yes_no "Destroy all data on ${SELECTED_DISK} and create Proxmox storage?" "n")"
+        echo -e "${RD}WARNING: Existing data, partitions, signatures, or LVM metadata were detected on ${SELECTED_DISK}.${CL}"
+        if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
+            echo -e "${RD}Existing VG(s) on selected disk:${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK}${CL}"
+            echo -e "${RD}Old PV/VG/LV metadata on this disk will be destroyed if you continue.${CL}"
+        fi
+        proceed_yn="$(timed_yes_no "Destructively reuse ${SELECTED_DISK} for new Proxmox storage?" "n")"
+        if [[ "$proceed_yn" =~ ^[Nn] ]]; then
+            msg_error "Aborted by user."
+        fi
+
+        echo ""
+        echo -e "${RD}Type exactly WIPE ${SELECTED_DISK} to confirm destructive reuse.${CL}"
+        read -r typed
+        if [ "$typed" != "WIPE ${SELECTED_DISK}" ]; then
+            msg_error "Destructive reuse confirmation did not match. Aborted."
+        fi
     else
         proceed_yn="$(timed_yes_no "Create Proxmox storage on empty disk ${SELECTED_DISK}?" "y")"
+        if [[ "$proceed_yn" =~ ^[Nn] ]]; then
+            msg_error "Aborted by user."
+        fi
     fi
-
-    if [[ "$proceed_yn" =~ ^[Nn] ]]; then
-        msg_error "Aborted by user."
-    fi
-
-    return 0
 
     return 0
 }
@@ -1049,21 +1238,12 @@ function first_destructive_confirmation() {
 # --- 39. ADAPTIVE STORAGE NAMING ---
 # Generates defaults based on SSD/HDD/NVMe/SATA/USB.
 function set_adaptive_storage_defaults() {
-    if [ "$IS_SSD" == "yes" ]; then
-        STORAGE_ID_DEFAULT="data-ssd"
-        VG_NAME_DEFAULT="vg_data_ssd"
-        THINPOOL_NAME_DEFAULT="data_ssd_thin"
-    else
-        STORAGE_ID_DEFAULT="data-hdd"
-        VG_NAME_DEFAULT="vg_data_hdd"
-        THINPOOL_NAME_DEFAULT="data_hdd_thin"
-    fi
-
-    if [ "$IS_NVME" == "yes" ]; then
-        STORAGE_ID_DEFAULT="data-nvme"
-        VG_NAME_DEFAULT="vg_data_nvme"
-        THINPOOL_NAME_DEFAULT="data_nvme_thin"
-    fi
+    # Keep Project circl8 fresh-deploy defaults stable regardless of disk type.
+    # Snapshot readiness is handled by LVM-thin allocation/free-space reserve below,
+    # not by changing the storage/VG/thinpool names per SSD/HDD/NVMe.
+    VG_NAME_DEFAULT="vg_circl8_vm"
+    THINPOOL_NAME_DEFAULT="circl8_vm_thin"
+    STORAGE_ID_DEFAULT="circl8-vm"
 }
 
 # --- 40. STORAGE NAME INPUTS ---
@@ -1095,23 +1275,68 @@ function collect_storage_names() {
 # --- 41. STORAGE CONFLICT CHECK ---
 # Prevents naming collisions with existing Proxmox storage, VGs or LVs.
 function check_storage_conflicts() {
+    local proxmox_refs=""
+    local vg=""
+    local vg_parent_disks=""
+    local mounted_lvs=""
+
     section "CONFLICT CHECK"
 
     msg_info "Checking for storage conflicts"
 
     if pvesm config "$STORAGE_ID" >/dev/null 2>&1; then
-        msg_error "Proxmox storage ID ${STORAGE_ID} already exists."
+        msg_error "Proxmox storage ID ${STORAGE_ID} already exists. Remove or rename the existing Proxmox storage before reusing this ID."
+    fi
+
+    if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
+        proxmox_refs="$(get_proxmox_storage_refs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK" | xargs || true)"
+        if [ -n "$proxmox_refs" ]; then
+            echo ""
+            echo -e "${RD}Selected disk still backs existing Proxmox storage entries:${CL}"
+            get_proxmox_storage_refs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK" | sed 's/^/  - /'
+            echo ""
+            echo -e "${YW}Remove those Proxmox storage entries first, for example:${CL}"
+            echo -e "  ${GN}pvesm remove <storage-id>${CL}"
+            msg_error "Refusing to wipe a disk referenced by existing Proxmox storage."
+        fi
+
+        for vg in $EXISTING_VGS_ON_SELECTED_DISK; do
+            vg_parent_disks="$(get_parent_disks_for_vg "$vg" | xargs || true)"
+            if [ "$vg_parent_disks" != "${SELECTED_DISK_NAME}" ]; then
+                msg_error "Existing VG ${vg} spans disk(s): ${vg_parent_disks}. Refusing automatic destructive reuse; clean this VG manually first."
+            fi
+        done
+
+        mounted_lvs="$(get_mounted_lvs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK")"
+        if [ -n "$mounted_lvs" ]; then
+            echo ""
+            echo -e "${RD}Selected disk has mounted logical volume(s) in existing VG(s):${CL}"
+            echo "$mounted_lvs" | sed 's/^/  - /'
+            echo ""
+            echo -e "${YW}Unmount/remove old mounts or clean the old VG manually first.${CL}"
+            echo -e "${YW}This script will not auto-unmount mounted logical volumes.${CL}"
+            msg_error "Refusing destructive reuse while selected-disk logical volumes are mounted."
+        fi
+
+        echo ""
+        echo -e "${YW}Destructive reuse warning:${CL} existing VG(s) on ${SELECTED_DISK} will be removed before new storage is created: ${EXISTING_VGS_ON_SELECTED_DISK}"
     fi
 
     if vgs "$VG_NAME" >/dev/null 2>&1; then
-        msg_error "Volume group ${VG_NAME} already exists."
+        if [[ " ${EXISTING_VGS_ON_SELECTED_DISK} " != *" ${VG_NAME} "* ]]; then
+            msg_error "Volume group ${VG_NAME} already exists on another disk or unknown device."
+        fi
+        msg_warn "Target VG ${VG_NAME} already exists on selected disk and will be destroyed/recreated after final confirmation"
     fi
 
     if lvs "${VG_NAME}/${THINPOOL_NAME}" >/dev/null 2>&1; then
-        msg_error "Logical volume ${VG_NAME}/${THINPOOL_NAME} already exists."
+        if [[ " ${EXISTING_VGS_ON_SELECTED_DISK} " != *" ${VG_NAME} "* ]]; then
+            msg_error "Logical volume ${VG_NAME}/${THINPOOL_NAME} already exists outside the selected disk reuse scope."
+        fi
+        msg_warn "Target thinpool ${VG_NAME}/${THINPOOL_NAME} already exists on selected disk and will be destroyed/recreated after final confirmation"
     fi
 
-    msg_ok "NO STORAGE CONFLICTS FOUND"
+    msg_ok "NO BLOCKING STORAGE CONFLICTS FOUND"
 }
 
 
@@ -1152,6 +1377,7 @@ function final_destructive_confirmation() {
     echo -e " ${BL}━━━━━▶${CL} ROOT / BOOT / PVE DISKS: ${GN}${ROOT_PARENT_DISKS:-none}${CL}"
     echo -e " ${BL}━━━━━▶${CL} MOUNTED DISKS: ${GN}${MOUNTED_PARENT_DISKS:-none}${CL}"
     echo -e " ${BL}━━━━━▶${CL} EXISTING LVM PV DISKS: ${GN}${PV_PARENT_DISKS:-none}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} SELECTED DISK EXISTING VG(S): ${GN}${EXISTING_VGS_ON_SELECTED_DISK:-none}${CL}"
     echo ""
     echo -e "${BL}SELECTED STORAGE TARGET:${CL}"
     echo -e " ${BL}━━━━━▶${CL} DISK: ${GN}${SELECTED_DISK}${CL}"
@@ -1174,7 +1400,36 @@ function final_destructive_confirmation() {
 }
 
 
-# --- 45. DISK WIPE ---
+# --- 45. EXISTING LVM CLEANUP ---
+# Removes old VG/PV metadata on the selected disk only after explicit destructive confirmation.
+function destroy_existing_lvm_on_selected_disk() {
+    local vg=""
+    local pv=""
+
+    [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ] || [ -n "$EXISTING_PVS_ON_SELECTED_DISK" ] || return 0
+
+    section "EXISTING LVM CLEANUP"
+
+    echo -e "${RD}Removing old LVM metadata from selected disk only:${CL} ${GN}${SELECTED_DISK}${CL}"
+    echo -e "${YW}Old VG(s):${CL} ${EXISTING_VGS_ON_SELECTED_DISK:-none}"
+    echo -e "${YW}Old PV(s):${CL} ${EXISTING_PVS_ON_SELECTED_DISK:-unknown}"
+
+    for vg in $EXISTING_VGS_ON_SELECTED_DISK; do
+        run_cmd "removing existing volume group ${vg}" vgremove -ff -y "$vg"
+    done
+
+    # Also clear orphan PV metadata where a PV exists on the selected disk but no VG is attached.
+    # This runs only after destructive confirmation and only for PV devices under SELECTED_DISK.
+    for pv in $EXISTING_PVS_ON_SELECTED_DISK; do
+        [ -b "$pv" ] || continue
+        run_optional pvremove -ff -y "$pv"
+    done
+
+    run_optional pvscan --cache
+    msg_ok "OLD LVM METADATA REMOVED"
+}
+
+# --- 46. DISK WIPE ---
 # Clears old filesystem, partition and LVM signatures.
 # Failures are critical and stop the script.
 function wipe_selected_disk() {
@@ -1552,6 +1807,7 @@ function main() {
     collect_content_types
     final_destructive_confirmation
 
+    destroy_existing_lvm_on_selected_disk
     wipe_selected_disk
     create_lvm_physical_volume
     create_lvm_volume_group
