@@ -2621,7 +2621,7 @@ function verify_n8n_routes() {
     local ui_code=""
     local webhook_code=""
     local ui_url="https://${N8N_HOST:-n8n.${DOMAIN}}/"
-    local webhook_url="https://${N8N_HOST:-n8n.${DOMAIN}}/webhook/crea-script8-health-check"
+    local webhook_url="https://${N8N_HOST:-n8n.${DOMAIN}}/webhook/circl8-script8-health-check"
 
     msg_info "Checking protected n8n UI route"
     ui_code="$(http_code_for_url "$ui_url")"
