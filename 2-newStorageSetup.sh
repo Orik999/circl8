@@ -1201,7 +1201,6 @@ function show_selected_disk_summary() {
 # If disk has data, default is NO. If disk looks empty, default is YES.
 function first_destructive_confirmation() {
     local proceed_yn=""
-    local typed=""
 
     if [ "$HAS_DATA" == "yes" ]; then
         echo ""
@@ -1213,13 +1212,6 @@ function first_destructive_confirmation() {
         proceed_yn="$(timed_yes_no "Destructively reuse ${SELECTED_DISK} for new Proxmox storage?" "n")"
         if [[ "$proceed_yn" =~ ^[Nn] ]]; then
             msg_error "Aborted by user."
-        fi
-
-        echo ""
-        echo -e "${RD}Type exactly WIPE ${SELECTED_DISK} to confirm destructive reuse.${CL}"
-        read -r typed
-        if [ "$typed" != "WIPE ${SELECTED_DISK}" ]; then
-            msg_error "Destructive reuse confirmation did not match. Aborted."
         fi
     else
         proceed_yn="$(timed_yes_no "Create Proxmox storage on empty disk ${SELECTED_DISK}?" "y")"
