@@ -1,0 +1,50 @@
+services:
+  filebrowser:
+    image: gtstef/filebrowser:stable
+    container_name: filebrowser
+    restart: unless-stopped
+
+    # Runtime substitution: PUID/PGID/TZ/DOCKER_DIR/FILEBROWSER_HOST provided by Script 8/.env.
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    networks:
+      - t2_proxy
+
+    volumes:
+      # FileBrowser internal config/database/cache.
+      - ${DOCKER_DIR}/appdata/filebrowser-quantum/data:/home/filebrowser/data:rw
+
+      # Dedicated FileBrowser user-safe files area.
+      - ${DOCKER_DIR}/appdata/filebrowser-quantum/files:/srv/files:rw
+
+      # General safe project work areas.
+      - ${DOCKER_DIR}/compose:/srv/compose:rw
+      - ${DOCKER_DIR}/shared:/srv/shared:rw
+      - ${DOCKER_DIR}/backups:/srv/backups:rw
+
+      # Selected editable Traefik files only.
+      # Do NOT mount the full ${DOCKER_DIR}/appdata/traefik directory because it may expose acme.json.
+      - ${DOCKER_DIR}/appdata/traefik/traefik.yml:/srv/traefik-config/traefik.yml:rw
+      - ${DOCKER_DIR}/appdata/traefik/dynamic-config.yml:/srv/traefik-config/dynamic-config.yml:rw
+
+    environment:
+      TZ: "${TZ:-UTC}"
+      FILEBROWSER_CONFIG: "/home/filebrowser/data/config.yaml"
+      FILEBROWSER_DATABASE: "/home/filebrowser/data/database.db"
+
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "t2_proxy"
+      traefik.http.routers.filebrowser.rule: "Host(`${FILEBROWSER_HOST}`)"
+      traefik.http.routers.filebrowser.entrypoints: "https"
+      traefik.http.routers.filebrowser.tls: "true"
+      # NOTE: Do NOT add Authentik forward-auth middleware here.
+      # FileBrowser handles its own OIDC login with Authentik.
+      traefik.http.services.filebrowser.loadbalancer.server.port: "80"
+
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  t2_proxy:
+    external: true

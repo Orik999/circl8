@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.24"
+SCRIPT_VERSION="v1.0.25"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="filebrowser-required-sources"
+SCRIPT_BUILD="filebrowser-github-config-compose"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1368,9 +1368,21 @@ function prepare_filebrowser_dirs() {
     mkdir -p "${DOCKER_DIR}/appdata/filebrowser-quantum/data"
     mkdir -p "${DOCKER_DIR}/appdata/filebrowser-quantum/files"
     mkdir -p "${DOCKER_DIR}/compose/filebrowser-quantum"
+    mkdir -p "${DOCKER_DIR}/shared"
+    mkdir -p "${DOCKER_DIR}/backups"
+
     chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/filebrowser-quantum" 2>/dev/null || true
+    chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/shared" "${DOCKER_DIR}/backups" 2>/dev/null || true
     chmod 750 "${DOCKER_DIR}/appdata/filebrowser-quantum" "${DOCKER_DIR}/appdata/filebrowser-quantum/data" "${DOCKER_DIR}/appdata/filebrowser-quantum/files" 2>/dev/null || true
-    msg_ok "Prepared FileBrowser appdata and compose dirs"
+
+    if [ ! -f "${DOCKER_DIR}/appdata/traefik/traefik.yml" ]; then
+        msg_warn "Traefik file not found for FileBrowser mount: ${DOCKER_DIR}/appdata/traefik/traefik.yml"
+    fi
+    if [ ! -f "${DOCKER_DIR}/appdata/traefik/dynamic-config.yml" ]; then
+        msg_warn "Traefik file not found for FileBrowser mount: ${DOCKER_DIR}/appdata/traefik/dynamic-config.yml"
+    fi
+
+    msg_ok "Prepared FileBrowser appdata, shared, backup and compose dirs"
 }
 
 function backup_filebrowser_appdata() {
@@ -1391,31 +1403,31 @@ function backup_filebrowser_appdata() {
 
 function render_filebrowser_config() {
     local cfg_dir="${DOCKER_DIR}/appdata/filebrowser-quantum/data"
-    local tmpf
-    tmpf="$(mktemp)" || msg_error "Failed to create temporary file for config"
-    umask 077
-    cat > "$tmpf" <<-EOF
-server:
-  port: 80
-  sources:
-    - path: "/srv"
-      name: "Files"
-      config:
-        defaultEnabled: true
-  database: "/home/filebrowser/data/database.db"
-  cacheDir: "/home/filebrowser/data/cache"
+    local remote_url="${GITHUB_RAW_BASE}/filebrowser-q/config.yml"
+    local template_file=""
+    local tmpf=""
 
-auth:
-  methods:
-    oidc:
-      enabled: true
-      issuerUrl: "${FILEBROWSER_OIDC_ISSUER_URL}"
-      clientId: "${FILEBROWSER_OIDC_CLIENT_ID}"
-      clientSecret: "${FILEBROWSER_OIDC_CLIENT_SECRET}"
-      scopes: "openid email profile groups"
-      userIdentifier: "preferred_username"
-EOF
+    template_file="$(mktemp)" || msg_error "Failed to create temp file for remote FileBrowser config template"
+    tmpf="$(mktemp)" || { rm -f "$template_file"; msg_error "Failed to create temporary file for FileBrowser config"; }
+    TEMP_FILES+=("$template_file" "$tmpf")
+    chmod 600 "$template_file" "$tmpf" 2>/dev/null || true
+
+    msg_info "Downloading FileBrowser config template"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -g "$remote_url" -o "$template_file" || { rm -f "$template_file" "$tmpf"; msg_error "Failed to download remote FileBrowser config template"; }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$template_file" "$remote_url" || { rm -f "$template_file" "$tmpf"; msg_error "Failed to download remote FileBrowser config template"; }
+    else
+        rm -f "$template_file" "$tmpf"
+        msg_error "Neither curl nor wget available to fetch remote FileBrowser config template"
+    fi
+    msg_ok "FILEBROWSER CONFIG TEMPLATE DOWNLOADED"
+    detail_line "Config template" "$remote_url"
+
     mkdir -p "$cfg_dir"
+    export FILEBROWSER_OIDC_ISSUER_URL FILEBROWSER_OIDC_CLIENT_ID FILEBROWSER_OIDC_CLIENT_SECRET
+    umask 077
+    envsubst < "$template_file" > "$tmpf" || { rm -f "$tmpf"; msg_error "Failed to render FileBrowser config"; }
     mv "$tmpf" "${cfg_dir}/config.yaml"
     chown "${DOCKER_USER}:${DOCKER_USER}" "${cfg_dir}/config.yaml" 2>/dev/null || true
     chmod 0600 "${cfg_dir}/config.yaml" || true
@@ -1423,29 +1435,29 @@ EOF
 }
 
 function render_filebrowser_compose() {
-    local local_template="${SCRIPT_DIR}/docker/15-filebrowser-quantum-compose.yml"
-    local remote_url="https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main/docker/15-filebrowser-quantum-compose.yml"
+    local remote_url="${GITHUB_RAW_BASE}/filebrowser-q/compose.yml"
     local out_compose="${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
     local template_file=""
-    local downloaded="no"
 
-    if [ -f "$local_template" ]; then
-        template_file="$local_template"
+    mkdir -p "$(dirname "$out_compose")"
+    template_file="$(mktemp)" || msg_error "Failed to create temp file for remote FileBrowser compose template"
+    TEMP_FILES+=("$template_file")
+
+    msg_info "Downloading FileBrowser compose template"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -g "$remote_url" -o "$template_file" || { rm -f "$template_file"; msg_error "Failed to download remote FileBrowser compose template"; }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$template_file" "$remote_url" || { rm -f "$template_file"; msg_error "Failed to download remote FileBrowser compose template"; }
     else
-        template_file="$(mktemp)" || msg_error "Failed to create temp file for remote template"
-        downloaded="yes"
-        if command -v curl >/dev/null 2>&1; then
-            curl -fsSL -g "$remote_url" -o "$template_file" || { rm -f "$template_file"; msg_error "Failed to download remote FileBrowser compose template"; }
-        elif command -v wget >/dev/null 2>&1; then
-            wget -qO "$template_file" "$remote_url" || { rm -f "$template_file"; msg_error "Failed to download remote FileBrowser compose template"; }
-        else
-            rm -f "$template_file"
-            msg_error "Neither curl nor wget available to fetch remote FileBrowser compose template"
-        fi
+        rm -f "$template_file"
+        msg_error "Neither curl nor wget available to fetch remote FileBrowser compose template"
     fi
+    msg_ok "FILEBROWSER COMPOSE TEMPLATE DOWNLOADED"
+    detail_line "Compose template" "$remote_url"
 
-    envsubst < "$template_file" > "$out_compose" || { rm -f "$out_compose"; [ "$downloaded" = "yes" ] && rm -f "$template_file"; msg_error "Failed to render FileBrowser compose"; }
-    [ "$downloaded" = "yes" ] && rm -f "$template_file"
+    envsubst < "$template_file" > "$out_compose" || { rm -f "$out_compose"; msg_error "Failed to render FileBrowser compose"; }
+    chown "${DOCKER_USER}:${DOCKER_USER}" "$out_compose" 2>/dev/null || true
+    chmod 640 "$out_compose" 2>/dev/null || true
     msg_ok "Rendered FileBrowser compose to $out_compose"
 }
 
@@ -1487,20 +1499,29 @@ function verify_filebrowser_deploy() {
         docker_cmd compose -f "${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml" logs --tail 80 2>&1 | redact_secret_output || true
     fi
     local fb_route_code=""
-    fb_route_code="$(http_code_for_url "https://${FILEBROWSER_HOST}/")"
-    case "$fb_route_code" in
-        200|301|302|303|307|308|401|403)
-            msg_ok "FILEBROWSER ROUTE RESPONDED WITH HTTP ${fb_route_code}"
-            ;;
-        *)
-            if [ "$fb_route_code" = "000" ]; then
-                msg_warn "FileBrowser route could not be reached yet; DNS resolver propagation may still be pending"
-            else
-                msg_warn "FileBrowser route returned HTTP ${fb_route_code:-none}; verify Traefik/router after DNS propagation"
-            fi
-            ;;
-    esac
-    detail_line "FileBrowser route" "https://${FILEBROWSER_HOST}/ -> ${fb_route_code:-none}"
+    local fb_route_path=""
+    local fb_route_ok="no"
+
+    for fb_route_path in "/login" "/files/Files" "/"; do
+        fb_route_code="$(http_code_for_url "https://${FILEBROWSER_HOST}${fb_route_path}")"
+        detail_line "FileBrowser route" "https://${FILEBROWSER_HOST}${fb_route_path} -> ${fb_route_code:-none}"
+        case "$fb_route_code" in
+            200|301|302|303|307|308|401|403)
+                fb_route_ok="yes"
+                break
+                ;;
+        esac
+    done
+
+    if [ "$fb_route_ok" = "yes" ]; then
+        msg_ok "FILEBROWSER ROUTE RESPONDED WITH HTTP ${fb_route_code}"
+    else
+        if [ "$fb_route_code" = "000" ]; then
+            msg_warn "FileBrowser route could not be reached yet; DNS resolver propagation may still be pending"
+        else
+            msg_warn "FileBrowser route returned HTTP ${fb_route_code:-none}; verify Traefik/router after DNS propagation"
+        fi
+    fi
     msg_warn "Browser-based OIDC login flow must be tested manually. Visit https://${FILEBROWSER_HOST} and confirm Authentik redirect and successful login."
 }
 
@@ -1574,7 +1595,8 @@ function run_filebrowser_quantum_module() {
     echo " - FileBrowser host: https://${FILEBROWSER_HOST}"
     echo " - Runtime config: ${DOCKER_DIR}/appdata/filebrowser-quantum/data/config.yaml"
     echo " - Runtime compose: ${DOCKER_DIR}/compose/filebrowser-quantum/compose.yaml"
-    echo " - Compose template: ${SCRIPT_DIR}/docker/15-filebrowser-quantum-compose.yml"
+    echo " - GitHub compose template: ${GITHUB_RAW_BASE}/filebrowser-q/compose.yml"
+    echo " - GitHub config template: ${GITHUB_RAW_BASE}/filebrowser-q/config.yml"
     echo ""
     if [[ "$(timed_yes_no 'Proceed and apply FileBrowser Quantum deployment now?' 'Y')" =~ ^[Nn]$ ]]; then
         msg_skip "FileBrowser Quantum deployment skipped by user"
