@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.23"
+SCRIPT_VERSION="v1.0.24"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="filebrowser-oidc-scopes-string"
+SCRIPT_BUILD="filebrowser-required-sources"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1397,6 +1397,11 @@ function render_filebrowser_config() {
     cat > "$tmpf" <<-EOF
 server:
   port: 80
+  sources:
+    - path: "/srv"
+      name: "Files"
+      config:
+        defaultEnabled: true
   database: "/home/filebrowser/data/database.db"
   cacheDir: "/home/filebrowser/data/cache"
 
