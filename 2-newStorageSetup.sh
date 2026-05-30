@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.3.0"
+SCRIPT_VERSION="v1.3.1"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="destructive-reuse-secondary-storage"
+SCRIPT_BUILD="pve923-lvmthin-register-resume"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -737,24 +737,166 @@ function get_parent_disks_for_vg() {
     done < <(pvs --noheadings -o pv_name --select "vg_name=${vg}" 2>/dev/null | xargs -n1 || true) | sort -u
 }
 
+# Returns all Proxmox storage IDs declared in /etc/pve/storage.cfg.
+function get_storage_ids_from_cfg() {
+    [ -r /etc/pve/storage.cfg ] || return 0
+    awk '/^[^[:space:]][^:]*:[[:space:]]/ { sub(/^[^:]+:[[:space:]]*/, ""); print }' /etc/pve/storage.cfg
+}
+
+# Returns the /etc/pve/storage.cfg block for a storage ID.
+function get_storage_cfg_block() {
+    local sid="$1"
+    [ -r /etc/pve/storage.cfg ] || return 0
+
+    awk -v sid="$sid" '
+        /^[^[:space:]][^:]*:[[:space:]]/ {
+            if (in_block) exit
+            line=$0
+            sub(/^[^:]+:[[:space:]]*/, "", line)
+            if (line == sid) {
+                in_block=1
+                print $0
+            }
+            next
+        }
+        in_block && /^[[:space:]]*$/ { exit }
+        in_block { print $0 }
+    ' /etc/pve/storage.cfg
+}
+
+# Returns a single field value from a storage.cfg block.
+function get_storage_cfg_field() {
+    local sid="$1"
+    local field="$2"
+
+    get_storage_cfg_block "$sid" | awk -v field="$field" '$1 == field { $1=""; sub(/^[[:space:]]+/, ""); print; exit }'
+}
+
+# Returns the storage type for a storage.cfg block, for example lvmthin.
+function get_storage_cfg_type() {
+    local sid="$1"
+
+    get_storage_cfg_block "$sid" | awk 'NR == 1 { sub(/:.*/, "", $1); print $1; exit }'
+}
+
+# Checks whether Proxmox status currently lists a storage ID.
+function storage_id_in_pvesm_status() {
+    local sid="$1"
+    pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fxq "$sid"
+}
+
+# Checks whether storage.cfg contains a storage ID block.
+function storage_id_in_cfg() {
+    local sid="$1"
+    [ -n "$(get_storage_cfg_block "$sid" | head -n 1)" ]
+}
+
+# Checks whether storage exists either in pvesm status or storage.cfg.
+function storage_id_exists() {
+    local sid="$1"
+    storage_id_in_pvesm_status "$sid" || storage_id_in_cfg "$sid"
+}
+
+# Checks that a comma-separated content list contains one requested item.
+function storage_content_has_item() {
+    local content="$1"
+    local item="$2"
+
+    echo "$content" | tr ',' '\n' | awk '{$1=$1; print}' | grep -Fxq "$item"
+}
+
+# Returns success only if storage.cfg matches the expected LVM-thin registration.
+function storage_cfg_matches_expected() {
+    local sid="$1"
+    local expected_vg="$2"
+    local expected_thinpool="$3"
+    local expected_content="$4"
+    local stype=""
+    local vgname=""
+    local thinpool=""
+    local content=""
+    local item=""
+
+    stype="$(get_storage_cfg_type "$sid" | xargs || true)"
+    vgname="$(get_storage_cfg_field "$sid" vgname | xargs || true)"
+    thinpool="$(get_storage_cfg_field "$sid" thinpool | xargs || true)"
+    content="$(get_storage_cfg_field "$sid" content | xargs || true)"
+
+    [ "$stype" == "lvmthin" ] || return 1
+    [ "$vgname" == "$expected_vg" ] || return 1
+    [ "$thinpool" == "$expected_thinpool" ] || return 1
+
+    for item in ${expected_content//,/ }; do
+        storage_content_has_item "$content" "$item" || return 1
+    done
+
+    return 0
+}
+
+# Prints the storage.cfg block for troubleshooting mismatches.
+function print_storage_cfg_block() {
+    local sid="$1"
+    local block=""
+
+    block="$(get_storage_cfg_block "$sid")"
+    if [ -n "$block" ]; then
+        echo "$block"
+    else
+        echo "storage.cfg block for ${sid}: not found"
+    fi
+}
+
+# Validates that Proxmox storage is registered and points to the expected VG/thinpool/content.
+function validate_registered_storage() {
+    local sid="${1:-$STORAGE_ID}"
+    local expected_vg="${2:-$VG_NAME}"
+    local expected_thinpool="${3:-$THINPOOL_NAME}"
+    local expected_content="${4:-$CONTENT_TYPES}"
+
+    if ! storage_id_in_pvesm_status "$sid"; then
+        echo ""
+        echo -e "${RD}Proxmox storage ${sid} is not listed by pvesm status.${CL}"
+        pvesm status 2>/dev/null || true
+        msg_error "Proxmox storage ${sid} is not active/registered."
+    fi
+
+    if ! storage_id_in_cfg "$sid"; then
+        echo ""
+        echo -e "${RD}Proxmox storage ${sid} is not present in /etc/pve/storage.cfg.${CL}"
+        msg_error "Proxmox storage ${sid} has no storage.cfg block."
+    fi
+
+    if ! storage_cfg_matches_expected "$sid" "$expected_vg" "$expected_thinpool" "$expected_content"; then
+        echo ""
+        echo -e "${RD}Proxmox storage ${sid} exists but does not match expected settings.${CL}"
+        echo -e "${YW}Expected:${CL} type=lvmthin vgname=${expected_vg} thinpool=${expected_thinpool} content includes ${expected_content}"
+        echo -e "${YW}Actual storage.cfg block:${CL}"
+        print_storage_cfg_block "$sid" | sed 's/^/  /'
+        msg_error "Storage ${sid} mismatch. Refusing to continue."
+    fi
+
+    STORAGE_REGISTERED="yes"
+    msg_ok "PROXMOX STORAGE ${sid} MATCHES EXPECTED CONFIG"
+}
+
 # Finds Proxmox storage entries that reference a VG on the selected disk.
 function get_proxmox_storage_refs_for_vgs() {
     local vg_list="$1"
     local sid=""
     local vg=""
-    local cfg=""
+    local cfg_vg=""
 
     while read -r sid; do
         [ -z "$sid" ] && continue
-        cfg="$(pvesm config "$sid" 2>/dev/null || true)"
-        [ -z "$cfg" ] && continue
+        cfg_vg="$(get_storage_cfg_field "$sid" vgname | xargs || true)"
+        [ -z "$cfg_vg" ] && continue
 
         for vg in $vg_list; do
-            if echo "$cfg" | grep -Eq "^[[:space:]]*vgname[[:space:]]+${vg}$|^[[:space:]]*vgname[[:space:]]+${vg}[[:space:]]"; then
+            if [ "$cfg_vg" == "$vg" ]; then
                 echo "$sid -> vgname ${vg}"
             fi
         done
-    done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1}' || true)
+    done < <(get_storage_ids_from_cfg || true)
 }
 
 # Escapes VG/LV components for /dev/mapper paths, matching LVM hyphen escaping.
@@ -1238,6 +1380,14 @@ function set_adaptive_storage_defaults() {
     STORAGE_ID_DEFAULT="circl8-vm"
 }
 
+function set_default_storage_values_for_resume() {
+    set_adaptive_storage_defaults
+    VG_NAME="$VG_NAME_DEFAULT"
+    THINPOOL_NAME="$THINPOOL_NAME_DEFAULT"
+    STORAGE_ID="$STORAGE_ID_DEFAULT"
+    CONTENT_TYPES="images,rootdir"
+}
+
 # --- 40. STORAGE NAME INPUTS ---
 # Collects VG, thinpool and Proxmox storage ID with validation.
 function collect_storage_names() {
@@ -1276,8 +1426,16 @@ function check_storage_conflicts() {
 
     msg_info "Checking for storage conflicts"
 
-    if pvesm config "$STORAGE_ID" >/dev/null 2>&1; then
-        msg_error "Proxmox storage ID ${STORAGE_ID} already exists. Remove or rename the existing Proxmox storage before reusing this ID."
+    if storage_id_exists "$STORAGE_ID"; then
+        if storage_cfg_matches_expected "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"; then
+            msg_error "Proxmox storage ID ${STORAGE_ID} is already registered correctly. Refusing destructive path; rerun should use resume/success path instead."
+        fi
+
+        echo ""
+        echo -e "${RD}Proxmox storage ID ${STORAGE_ID} already exists but does not match the requested target.${CL}"
+        echo -e "${YW}Existing storage.cfg block:${CL}"
+        print_storage_cfg_block "$STORAGE_ID" | sed 's/^/  /'
+        msg_error "Remove or rename the existing Proxmox storage before reusing this ID."
     fi
 
     if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
@@ -1497,10 +1655,93 @@ function create_lvm_thinpool() {
 }
 
 
-# --- 49. PROXMOX STORAGE REGISTRATION ---
-# Registers the thinpool in Proxmox with selected content types and saferemove enabled.
+# --- 49. EXISTING STORAGE RESUME / IDEMPOTENCY ---
+# Detects and handles the safe post-LVM/pre-registration recovery state.
+function populate_selected_disk_from_expected_vg() {
+    local pv=""
+    local parent=""
+
+    pv="$(pvs --noheadings -o pv_name --select "vg_name=${VG_NAME}" 2>/dev/null | xargs -n1 | head -n 1 || true)"
+    [ -n "$pv" ] || return 0
+
+    parent="$(get_parent_disk_name "$pv" || true)"
+    [ -n "$parent" ] || return 0
+
+    SELECTED_DISK_NAME="$parent"
+    SELECTED_DISK="/dev/${parent}"
+
+    if [ -b "$SELECTED_DISK" ]; then
+        inspect_selected_disk
+    fi
+}
+
+function expected_vg_exists() {
+    vgs "$VG_NAME" >/dev/null 2>&1
+}
+
+function expected_thinpool_exists() {
+    lvs "${VG_NAME}/${THINPOOL_NAME}" >/dev/null 2>&1
+}
+
+function complete_existing_storage_success() {
+    validate_registered_storage "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"
+    populate_selected_disk_from_expected_vg
+    apply_trim_logic
+    apply_io_scheduler_tuning
+    apply_memory_tuning
+    write_completion_marker
+    create_verification_report
+    show_final_summary
+}
+
+function handle_existing_storage_resume() {
+    local recover_yn=""
+
+    section "EXISTING STORAGE RESUME CHECK"
+
+    if storage_id_exists "$STORAGE_ID"; then
+        msg_info "Found existing Proxmox storage ID ${STORAGE_ID}; validating"
+        validate_registered_storage "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"
+        msg_ok "Existing storage ${STORAGE_ID} is already registered correctly. No destructive action required."
+        complete_existing_storage_success
+        exit 0
+    fi
+
+    if expected_vg_exists; then
+        if ! expected_thinpool_exists; then
+            msg_error "VG ${VG_NAME} exists but expected thinpool ${THINPOOL_NAME} is missing. Manual review required before rerun."
+        fi
+
+        echo ""
+        echo -e "${YW}Existing VG/thinpool detected without Proxmox storage registration:${CL}"
+        echo -e " ${BL}━━━━━▶${CL} VG: ${GN}${VG_NAME}${CL}"
+        echo -e " ${BL}━━━━━▶${CL} THINPOOL: ${GN}${THINPOOL_NAME}${CL}"
+        echo -e " ${BL}━━━━━▶${CL} STORAGE ID TO REGISTER: ${GN}${STORAGE_ID}${CL}"
+        echo ""
+        echo -e "${YW}This looks like a previous run completed LVM creation but failed Proxmox registration.${CL}"
+        recover_yn="$(timed_yes_no "Register existing thinpool without wiping any disk?" "y")"
+        if [[ "$recover_yn" =~ ^[Nn] ]]; then
+            msg_error "Registration-only recovery declined. No destructive action taken."
+        fi
+
+        register_proxmox_storage
+        complete_existing_storage_success
+        exit 0
+    fi
+
+    msg_ok "No existing ${STORAGE_ID}/${VG_NAME}/${THINPOOL_NAME} registration state detected; normal disk setup path will continue"
+}
+
+# --- 50. PROXMOX STORAGE REGISTRATION ---
+# Registers the thinpool in Proxmox with selected content types.
 function register_proxmox_storage() {
     section "PROXMOX STORAGE REGISTRATION"
+
+    if storage_id_exists "$STORAGE_ID"; then
+        msg_info "Proxmox storage ${STORAGE_ID} already exists; validating expected config"
+        validate_registered_storage "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"
+        return 0
+    fi
 
     msg_info "Registering storage in Proxmox"
 
@@ -1508,10 +1749,9 @@ function register_proxmox_storage() {
         pvesm add lvmthin "$STORAGE_ID" \
         --vgname "$VG_NAME" \
         --thinpool "$THINPOOL_NAME" \
-        --content "$CONTENT_TYPES" \
-        --saferemove 1
+        --content "$CONTENT_TYPES"
 
-    STORAGE_REGISTERED="yes"
+    validate_registered_storage "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"
 
     msg_ok "STORAGE REGISTERED"
 }
@@ -1684,16 +1924,22 @@ PASS() { echo "✓ PASS - \$1"; }
 WARN() { echo "! WARN - \$1"; }
 FAIL() { echo "✗ FAIL - \$1"; }
 
-if pvesm config "${STORAGE_ID}" >/dev/null 2>&1; then PASS "Proxmox storage config exists"; else FAIL "Proxmox storage config missing"; fi
-if pvesm status 2>/dev/null | awk '{print \$1, \$3}' | grep -q "^${STORAGE_ID} active"; then PASS "Proxmox storage is active"; else WARN "Proxmox storage active state not confirmed"; fi
+if pvesm status 2>/dev/null | awk '{print \$1, \$3}' | grep -q "^${STORAGE_ID} active"; then PASS "Proxmox storage is active"; else FAIL "Proxmox storage active state not confirmed"; fi
+if awk '\$0 == "lvmthin: ${STORAGE_ID}" {found=1} END {exit found ? 0 : 1}' /etc/pve/storage.cfg 2>/dev/null; then PASS "storage.cfg block exists"; else FAIL "storage.cfg block missing"; fi
+if awk '\$0 == "lvmthin: ${STORAGE_ID}" {in_block=1; next} in_block && /^[[:space:]]*$/ {in_block=0} in_block && /^[^[:space:]]/ {in_block=0} in_block && \$1 == "vgname" && \$2 == "${VG_NAME}" {found=1} END {exit found ? 0 : 1}' /etc/pve/storage.cfg 2>/dev/null; then PASS "storage.cfg vgname matches"; else FAIL "storage.cfg vgname mismatch"; fi
+if awk '\$0 == "lvmthin: ${STORAGE_ID}" {in_block=1; next} in_block && /^[[:space:]]*$/ {in_block=0} in_block && /^[^[:space:]]/ {in_block=0} in_block && \$1 == "thinpool" && \$2 == "${THINPOOL_NAME}" {found=1} END {exit found ? 0 : 1}' /etc/pve/storage.cfg 2>/dev/null; then PASS "storage.cfg thinpool matches"; else FAIL "storage.cfg thinpool mismatch"; fi
 if vgs "${VG_NAME}" >/dev/null 2>&1; then PASS "VG exists"; else FAIL "VG missing"; fi
 if lvs "${VG_NAME}/${THINPOOL_NAME}" >/dev/null 2>&1; then PASS "Thinpool exists"; else FAIL "Thinpool missing"; fi
 if lvs -o lv_monitor --noheadings "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | grep -q monitored; then PASS "Thinpool monitoring enabled"; else WARN "Thinpool monitoring not confirmed"; fi
 if [ -f "/etc/lvm/backup/${VG_NAME}" ]; then PASS "LVM metadata backup exists"; else WARN "LVM metadata backup not found"; fi
 
 echo ""
-echo "Proxmox storage config:"
-pvesm config "${STORAGE_ID}" 2>/dev/null || true
+echo "Proxmox storage status:"
+pvesm status 2>/dev/null || true
+
+echo ""
+echo "Proxmox storage.cfg block:"
+awk '\$0 == "lvmthin: ${STORAGE_ID}" {print; in_block=1; next} in_block && /^[[:space:]]*$/ {in_block=0} in_block && /^[^[:space:]]/ {in_block=0} in_block {print}' /etc/pve/storage.cfg 2>/dev/null || true
 
 echo ""
 echo "VG details:"
@@ -1786,6 +2032,9 @@ function show_final_summary() {
 function main() {
     init_script
     check_previous_marker
+
+    set_default_storage_values_for_resume
+    handle_existing_storage_resume
 
     audit_disks
     select_disk
