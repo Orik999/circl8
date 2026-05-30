@@ -1656,7 +1656,7 @@ function show_final_summary() {
 ${YW}Safe Docker cleanup uses host-side /usr/local/sbin/docker-gc-safe and never prunes volumes automatically.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}After reboot and SSH reconnect, run script 6-dockerENVsetup-crea.sh.${CL}"
+    echo -e "${YW}After reboot and SSH reconnect, run script 6-dockerENVsetup-circl8.sh.${CL}"
     echo ""
 }
 

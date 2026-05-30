@@ -26,7 +26,7 @@ FLASH_ON=$'\033[5m'
 FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
-SCRIPT_SOURCE="1-proxmoxSetupCrea.sh"
+SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
 SCRIPT_VERSION="v1.2.0"
 SCRIPT_UPDATED="2026-05-22"
 SCRIPT_BUILD="audit-untimed-inputs-snapshot-storage"

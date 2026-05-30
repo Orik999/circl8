@@ -24,7 +24,7 @@ WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
-SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
+SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
 SCRIPT_VERSION="v1.5.10"
 SCRIPT_UPDATED="2026-05-29"
 SCRIPT_BUILD="postgres-pgdata-permission-repair"
