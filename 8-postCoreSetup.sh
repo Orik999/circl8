@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.21"
+SCRIPT_VERSION="v1.0.22"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="filebrowser-db-redacted-logs"
+SCRIPT_BUILD="authentik-provider-exact-name-lookup"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1124,6 +1124,25 @@ def first_result(path):
     results = data.get("results", []) if isinstance(data, dict) else []
     return results[0] if results else None
 
+def find_provider_by_name_or_assignment(name, slug):
+    # Authentik's search endpoint may not find providers by application slug/name reliably.
+    # Fetch providers and match exact provider name or assigned application metadata.
+    page = 1
+    while True:
+        data = req("GET", "/api/v3/providers/oauth2/?" + urllib.parse.urlencode({"page": page, "page_size": 100}))
+        results = data.get("results", []) if isinstance(data, dict) else []
+        for item in results:
+            if item.get("name") == name:
+                return item
+            if item.get("assigned_application_slug") == slug:
+                return item
+            if item.get("assigned_application_name") == name:
+                return item
+        pagination = data.get("pagination", {}) if isinstance(data, dict) else {}
+        if not pagination.get("next"):
+            return None
+        page += 1
+
 def find_application_by_slug(slug):
     # Authentik's list endpoint may not filter correctly with ?slug=...
     # Fetch and match the exact slug in Python to avoid updating the wrong app.
@@ -1171,7 +1190,7 @@ auth_flow = find_flow("default-provider-authorization-explicit-consent", "defaul
 invalid_flow = find_flow("default-provider-invalidation-flow")
 client_id = "filebrowser_quantum_" + rand_secret(24)
 client_secret = rand_secret(72)
-provider = first_result("/api/v3/providers/oauth2/?" + urllib.parse.urlencode({"search": SLUG}))
+provider = find_provider_by_name_or_assignment(NAME, SLUG)
 provider_mode = "created"
 provider_payload = {
     "name": NAME,
