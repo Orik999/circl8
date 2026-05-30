@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.22"
+SCRIPT_VERSION="v1.0.23"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="authentik-provider-exact-name-lookup"
+SCRIPT_BUILD="filebrowser-oidc-scopes-string"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1407,11 +1407,7 @@ auth:
       issuerUrl: "${FILEBROWSER_OIDC_ISSUER_URL}"
       clientId: "${FILEBROWSER_OIDC_CLIENT_ID}"
       clientSecret: "${FILEBROWSER_OIDC_CLIENT_SECRET}"
-      scopes:
-        - openid
-        - email
-        - profile
-        - groups
+      scopes: "openid email profile groups"
       userIdentifier: "preferred_username"
 EOF
     mkdir -p "$cfg_dir"
@@ -2998,7 +2994,7 @@ function show_secret_summary() {
     enable_logging
 }
 function show_final_summary() {
-    section_flash_success "     ━━━━━━━━━━━━━━━━━    POST-CORE SETUP FINISHED    ━━━━━━━━━━━━━━━━━"
+    section_flash_success "━━━━━━━━━━━━━━    POST-CORE SETUP FINISHED    ━━━━━━━━━━━━━━"
 
     detail_line "DOMAIN" "$DOMAIN"
     detail_line "ADMIN UI" "$ADMIN_UI"
