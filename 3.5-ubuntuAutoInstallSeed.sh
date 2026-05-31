@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.9"
+SCRIPT_VERSION="v1.2.10"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-preflight-iso-tools"
+SCRIPT_BUILD="script35-preflight-vm-actions"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -58,6 +58,9 @@ SSH_COMMAND=""
 TARGET_VMID=""
 TARGET_VM_NAME=""
 TARGET_VM_STATUS=""
+VM_STATUS_AT_PREFLIGHT="unknown"
+VM_SHUTDOWN_APPROVED="not-needed"
+ATTACH_START_APPROVED="unset"
 TARGET_VM_MAC=""
 TARGET_USERNAME=""
 TARGET_TIMEZONE=""
@@ -1201,6 +1204,32 @@ install_missing_tools_display() {
     fi
 }
 
+vm_shutdown_display() {
+    if [ "$VM_SHUTDOWN_APPROVED" == "not-needed" ]; then
+        echo "not-needed"
+    else
+        yn_word "$VM_SHUTDOWN_APPROVED"
+    fi
+}
+
+attach_start_display() {
+    yn_word "$ATTACH_START_APPROVED"
+}
+
+collect_attach_start_decision() {
+    local attach_yn=""
+
+    attach_yn="$(timed_yes_no "Attach generated autoinstall ISO and start VM after preparation?" "y")"
+
+    if [[ "$attach_yn" =~ ^[Nn] ]]; then
+        ATTACH_START_APPROVED="no"
+    else
+        ATTACH_START_APPROVED="yes"
+    fi
+
+    detail_line "Attach and start after preparation" "$(attach_start_display)"
+}
+
 collect_missing_iso_tools_decision() {
     local install_yn=""
 
@@ -1491,10 +1520,40 @@ select_vm() {
     detail_line "Selected VM" "${TARGET_VMID} / ${TARGET_VM_NAME} / ${TARGET_VM_STATUS}"
 }
 
-# --- 39A. VM STOP SAFETY BEFORE APPLY ---
+# --- 39A. VM SHUTDOWN DECISION PREFLIGHT ---
+# Collects shutdown approval before ISO preparation or VM apply actions.
+collect_vm_shutdown_decision() {
+    local shutdown_yn=""
+    local current_status=""
+
+    current_status="$(get_vm_status "$TARGET_VMID" || true)"
+    VM_STATUS_AT_PREFLIGHT="${current_status:-unknown}"
+    TARGET_VM_STATUS="$VM_STATUS_AT_PREFLIGHT"
+
+    detail_line "VM status before apply" "$VM_STATUS_AT_PREFLIGHT"
+
+    if [ "$VM_STATUS_AT_PREFLIGHT" == "running" ]; then
+        msg_warn "Selected VM is currently running."
+        echo -e "${YW}The VM must be stopped before attaching installer media safely.${CL}"
+        echo ""
+
+        shutdown_yn="$(timed_yes_no "Selected VM is currently running. Shutdown VM before apply?" "y")"
+
+        if [[ "$shutdown_yn" =~ ^[Nn] ]]; then
+            VM_SHUTDOWN_APPROVED="no"
+        else
+            VM_SHUTDOWN_APPROVED="yes"
+        fi
+    else
+        VM_SHUTDOWN_APPROVED="not-needed"
+    fi
+
+    detail_line "Shutdown before apply" "$(vm_shutdown_display)"
+}
+
+# --- 39B. VM STOP SAFETY BEFORE APPLY ---
 # Stops the selected VM only after all prechecks, ISO decisions and final confirmation are complete.
 ensure_vm_stopped_before_apply() {
-    local shutdown_yn=""
     local current_status=""
 
     current_status="$(get_vm_status "$TARGET_VMID")"
@@ -1510,21 +1569,19 @@ ensure_vm_stopped_before_apply() {
     echo -e "${YW}The VM must be stopped before attaching installer media safely.${CL}"
     echo ""
 
-    shutdown_yn="$(timed_yes_no "Shutdown VM now?" "y")"
-
-    if [[ "$shutdown_yn" =~ ^[Yy] ]]; then
-        msg_info "Shutting down VM ${TARGET_VMID}"
-        if qm shutdown "$TARGET_VMID" --timeout 60 >/dev/null 2>&1; then
-            msg_ok "VM SHUTDOWN COMPLETE"
-        else
-            msg_warn "Graceful shutdown failed or timed out; forcing stop"
-            run_cmd "stopping VM ${TARGET_VMID}" qm stop "$TARGET_VMID"
-            msg_ok "VM STOPPED"
-        fi
-        TARGET_VM_STATUS="stopped"
-    else
-        msg_error "VM must be stopped before attaching install media safely."
+    if [ "$VM_SHUTDOWN_APPROVED" != "yes" ]; then
+        msg_error "VM is still running and shutdown was not approved during preflight. Refusing to attach installer media."
     fi
+
+    msg_info "Shutting down VM ${TARGET_VMID}"
+    if qm shutdown "$TARGET_VMID" --timeout 60 >/dev/null 2>&1; then
+        msg_ok "VM SHUTDOWN COMPLETE"
+    else
+        msg_warn "Graceful shutdown failed or timed out; forcing stop"
+        run_cmd "stopping VM ${TARGET_VMID}" qm stop "$TARGET_VMID"
+        msg_ok "VM STOPPED"
+    fi
+    TARGET_VM_STATUS="stopped"
 }
 
 # --- 40. VM MAC DETECTION ---
@@ -1987,6 +2044,8 @@ show_apply_summary() {
     echo -e "${BL}VM:${CL}"
     echo -e "  ${GN}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
     echo -e "  MAC: ${GN}${TARGET_VM_MAC}${CL}"
+    echo -e "  status before apply: ${GN}${VM_STATUS_AT_PREFLIGHT}${CL}"
+    echo -e "  shutdown before apply: ${GN}$(vm_shutdown_display)${CL}"
     echo ""
 
     echo -e "${BL}Ubuntu:${CL}"
@@ -2021,6 +2080,7 @@ show_apply_summary() {
     echo -e "  timeout: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
     echo -e "  start VM after cleanup: ${GN}$(yn_word "$POST_INSTALL_START_VM")${CL}"
     echo -e "  IP detection timeout: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
+    echo -e "  attach and start after preparation: ${GN}$(attach_start_display)${CL}"
     echo ""
 
     echo -e "${BL}Cleanup:${CL}"
@@ -2291,6 +2351,9 @@ setup_ui_demo_sample_data() {
     TARGET_VM_NAME="circl8-ubuntu"
     TARGET_VMID="108"
     TARGET_VM_MAC="BC:24:11:12:B1:8B"
+    VM_STATUS_AT_PREFLIGHT="running"
+    VM_SHUTDOWN_APPROVED="yes"
+    ATTACH_START_APPROVED="yes"
     ASSIGNED_IPV4="192.168.1.108"
     TARGET_USERNAME="orik"
     TARGET_HOSTNAME="circl8-ubuntu"
@@ -2388,6 +2451,9 @@ demo_preflight_questions() {
     demo_line "generated ISO action: ${GENERATED_ISO_ACTION}"
     demo_line "missing ISO tools: $(missing_iso_tools_display)"
     demo_line "install missing ISO tools: $(install_missing_tools_display)"
+    demo_line "VM status before apply: ${VM_STATUS_AT_PREFLIGHT}"
+    demo_line "shutdown before apply: $(vm_shutdown_display)"
+    demo_line "attach and start after preparation: $(attach_start_display)"
 }
 
 demo_autoinstall_iso_preparation() {
@@ -2407,6 +2473,8 @@ demo_ready_to_apply() {
     echo -e "${BL}VM:${CL}"
     echo -e "  ${GN}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
     echo -e "  MAC: ${GN}${TARGET_VM_MAC}${CL}"
+    echo -e "  status before apply: ${GN}${VM_STATUS_AT_PREFLIGHT}${CL}"
+    echo -e "  shutdown before apply: ${GN}$(vm_shutdown_display)${CL}"
     echo ""
 
     echo -e "${BL}Ubuntu:${CL}"
@@ -2433,6 +2501,7 @@ demo_ready_to_apply() {
     echo -e "  timeout: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
     echo -e "  start VM after cleanup: ${GN}$(yn_word "$POST_INSTALL_START_VM")${CL}"
     echo -e "  IP detection timeout: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
+    echo -e "  attach and start after preparation: ${GN}$(attach_start_display)${CL}"
     echo ""
 
     echo -e "${BL}Cleanup:${CL}"
@@ -2509,7 +2578,6 @@ run_ui_demo() {
 
 main() {
     local start_yn=""
-    local attach_yn=""
 
     init_script
 
@@ -2533,8 +2601,12 @@ main() {
     show_ubuntu_pro_note
 
     section "PREFLIGHT QUESTIONS"
+    collect_vm_shutdown_decision
     collect_generated_iso_action
     collect_missing_iso_tools_decision
+    collect_attach_start_decision
+
+    show_apply_summary
 
     section "AUTOINSTALL ISO PREPARATION"
     ISO_PREP_GROUPED_OUTPUT="yes"
@@ -2547,10 +2619,7 @@ main() {
     generate_autoinstall_iso
     ISO_PREP_GROUPED_OUTPUT="no"
 
-    show_apply_summary
-    attach_yn="$(timed_yes_no "Attach generated autoinstall ISO and start VM now?" "y")"
-
-    if [[ "$attach_yn" =~ ^[Nn] ]]; then
+    if [ "$ATTACH_START_APPROVED" != "yes" ]; then
         show_generated_iso_only_summary
         exit 0
     fi
