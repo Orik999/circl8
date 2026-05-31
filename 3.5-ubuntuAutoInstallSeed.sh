@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.2"
+SCRIPT_VERSION="v1.2.3"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-final-ui-cleanup"
+SCRIPT_BUILD="script35-flow-ui-cleanup"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -86,10 +86,15 @@ STATIC_GATEWAY=""
 STATIC_DNS="1.1.1.1,1.0.0.1"
 
 INSTALL_POWERED_OFF="no"
+INSTALL_DURATION_SECONDS=""
+INSTALL_DURATION_TEXT=""
 
 CLEANUP_INSTALLED_TOOLS="yes"
 CLEANUP_TEMP_WORKFILES="yes"
+ISO_TOOL_CLEANUP_DONE="no"
+TEMP_WORKSPACE_CLEANUP_DONE="no"
 INSTALLED_TOOL_PACKAGES=()
+ISO_CLEANUP_TOOL_PACKAGES=(xorriso p7zip-full)
 TEMP_FILES=()
 
 REUSE_EXISTING_AUTOINSTALL_ISO="no"
@@ -175,10 +180,73 @@ tty_println() {
 # =========================================================
 
 # --- 6. CLEANUP FUNCTION ---
-# Cleans temporary working files and uninstalls packages that were installed by this script.
+# Cleans temporary working files and optionally removes ISO-generation-only tools.
+cleanup_temp_workspace_runtime() {
+    if [ "$CLEANUP_TEMP_WORKFILES" == "yes" ] && [ "${DEBUG_KEEP_WORKDIR:-0}" != "1" ] && [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
+        rm -rf "$WORK_DIR" 2>/dev/null || true
+        TEMP_WORKSPACE_CLEANUP_DONE="yes"
+        msg_ok "Temporary workspace removed."
+    elif [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
+        TEMP_WORKSPACE_CLEANUP_DONE="yes"
+        msg_ok "Temporary workspace kept by user choice: ${WORK_DIR}"
+    else
+        TEMP_WORKSPACE_CLEANUP_DONE="yes"
+        msg_ok "Temporary workspace already absent."
+    fi
+}
+
+cleanup_iso_generation_tools_runtime() {
+    local pkg=""
+    local removed=()
+    local absent=()
+    local failed=()
+
+    if [ "$CLEANUP_INSTALLED_TOOLS" != "yes" ]; then
+        ISO_TOOL_CLEANUP_DONE="yes"
+        msg_ok "ISO generation tools kept by user choice."
+        return 0
+    fi
+
+    for pkg in "${ISO_CLEANUP_TOOL_PACKAGES[@]}"; do
+        [ -z "$pkg" ] && continue
+
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            absent+=("$pkg")
+            continue
+        fi
+
+        if DEBIAN_FRONTEND=noninteractive apt-get purge -y "$pkg" >/dev/null 2>&1; then
+            if dpkg -s "$pkg" >/dev/null 2>&1; then
+                failed+=("$pkg")
+            else
+                removed+=("$pkg")
+            fi
+        else
+            failed+=("$pkg")
+        fi
+    done
+
+    if ! DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >/dev/null 2>&1; then
+        msg_warn "apt autoremove failed during ISO tool cleanup; review manually if needed."
+    fi
+
+    ISO_TOOL_CLEANUP_DONE="yes"
+
+    if [ "${#removed[@]}" -gt 0 ]; then
+        msg_ok "ISO generation tools removed: ${removed[*]}"
+    fi
+
+    if [ "${#absent[@]}" -gt 0 ]; then
+        msg_ok "ISO generation tools already absent: ${absent[*]}"
+    fi
+
+    if [ "${#failed[@]}" -gt 0 ]; then
+        msg_warn "ISO generation tools failed to remove: ${failed[*]}"
+    fi
+}
+
 cleanup() {
     local exit_code="$?"
-    local pkg=""
     local file=""
 
     # Always remove small internal temporary files such as captured stderr logs.
@@ -192,24 +260,19 @@ cleanup() {
         fi
     done
 
-    if [ "$CLEANUP_TEMP_WORKFILES" == "yes" ] && [ "${DEBUG_KEEP_WORKDIR:-0}" != "1" ] && [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
-        rm -rf "$WORK_DIR" 2>/dev/null || true
-    elif [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
-        echo ""
-        echo -e "${YW}Temporary ISO workspace kept for inspection:${CL} ${GN}${WORK_DIR}${CL}"
+    if [ "$TEMP_WORKSPACE_CLEANUP_DONE" != "yes" ]; then
+        if [ "$CLEANUP_TEMP_WORKFILES" == "yes" ] && [ "${DEBUG_KEEP_WORKDIR:-0}" != "1" ] && [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
+            rm -rf "$WORK_DIR" 2>/dev/null || true
+        elif [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
+            echo ""
+            echo -e "${YW}Temporary ISO workspace kept for inspection:${CL} ${GN}${WORK_DIR}${CL}"
+        fi
     fi
 
-    if [ "$CLEANUP_INSTALLED_TOOLS" == "yes" ] && [ "${#INSTALLED_TOOL_PACKAGES[@]}" -gt 0 ]; then
+    if [ "$ISO_TOOL_CLEANUP_DONE" != "yes" ] && [ "$CLEANUP_INSTALLED_TOOLS" == "yes" ]; then
         echo ""
-        echo -e "${YW}Cleaning up tools installed by this script...${CL}"
-
-        for pkg in "${INSTALLED_TOOL_PACKAGES[@]}"; do
-            [ -z "$pkg" ] && continue
-            DEBIAN_FRONTEND=noninteractive apt-get purge -y "$pkg" >/dev/null 2>&1 || true
-        done
-
-        DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >/dev/null 2>&1 || true
-        echo -e "${GN}✓ TEMPORARY TOOL CLEANUP COMPLETE${CL}"
+        echo -e "${YW}Cleaning up ISO generation tools...${CL}"
+        cleanup_iso_generation_tools_runtime
     fi
 
     exit "$exit_code"
@@ -655,11 +718,13 @@ wait_for_vm_poweroff() {
 
     section "INSTALL MONITORING"
 
-    echo -e "${BL}Ubuntu autoinstall is running inside VM ${vmid}.${CL}"
-    echo -e "${YW}Waiting for VM to power off after installation...${CL}"
-    echo -e "${YW}Timeout: ${timeout_minutes} minutes.${CL}"
+    echo -e "${BL}Ubuntu autoinstall is running inside:${CL}"
+    echo -e "  VM: ${GN}${TARGET_VM_NAME} (${vmid})${CL}"
+    echo ""
+    echo -e "${YW}Waiting for the VM to power off after installation.${CL}"
     echo -e "${YW}Do not manually restart the VM during this stage.${CL}"
     echo ""
+    echo -e "${BL}Progress:${CL}"
 
     while true; do
         now_time="$(date +%s)"
@@ -670,8 +735,11 @@ wait_for_vm_poweroff() {
         status="$(get_vm_status "$vmid")"
 
         if [ "$status" == "stopped" ]; then
+            INSTALL_DURATION_SECONDS="$elapsed"
+            INSTALL_DURATION_TEXT="${elapsed_min}m ${elapsed_sec}s"
             tty_print "${BFR}"
-            msg_ok "VM ${vmid} POWERED OFF AFTER AUTOINSTALL (${elapsed_min}m ${elapsed_sec}s)"
+            msg_ok "Ubuntu autoinstall completed. (${INSTALL_DURATION_TEXT})"
+            msg_ok "VM ${vmid} powered off after install."
             return 0
         fi
 
@@ -681,7 +749,7 @@ wait_for_vm_poweroff() {
             return 1
         fi
 
-        tty_print "${BFR}${YW}Waiting for VM ${vmid} to power off... elapsed ${elapsed_min}m ${elapsed_sec}s / ${timeout_minutes}m, status=${status:-unknown}${CL}"
+        tty_print "${BFR}${YW}  elapsed: ${elapsed_min}m ${elapsed_sec}s / ${timeout_minutes}m    status: ${status:-unknown}${CL}"
         sleep 10
     done
 }
@@ -1019,7 +1087,7 @@ validate_proxmox() {
 }
 
 # --- 35. TOOL INSTALLATION ---
-# Installs required temporary ISO tooling only if missing, then cleanup removes only packages installed by this script.
+# Installs required ISO tooling only if missing; optional cleanup removes ISO-generation-only tools.
 ensure_tools() {
     local missing_packages=()
     local pkg=""
@@ -1041,8 +1109,7 @@ ensure_tools() {
     if [ "${#missing_packages[@]}" -gt 0 ]; then
         msg_warn "Missing required tools: ${missing_packages[*]}"
         echo ""
-        echo -e "${YW}These packages are required only when creating or verifying a generated autoinstall ISO.${CL}"
-        echo -e "${YW}Packages already installed before this script will not be removed by cleanup.${CL}"
+        echo -e "${YW}These packages are required to create or verify the generated autoinstall ISO.${CL}"
         echo ""
 
         install_yn="$(timed_yes_no "Install missing ISO tools now?" "y")"
@@ -1062,7 +1129,6 @@ ensure_tools() {
         msg_ok "MISSING ISO TOOLS INSTALLED"
     else
         msg_ok "REQUIRED ISO TOOLS ALREADY INSTALLED"
-        detail_line "Tool cleanup" "not needed; no packages installed by this script"
     fi
 
     command -v xorriso >/dev/null 2>&1 || msg_error "xorriso is required."
@@ -1079,10 +1145,13 @@ collect_early_cleanup_preferences() {
     section "CLEANUP PREFERENCES"
 
     echo -e "${YW}These choices are collected before any package install, temporary workspace, generated ISO, or VM change.${CL}"
-    echo -e "${YW}Already-installed ISO tools will never be removed. Only tools installed by this run are eligible for cleanup.${CL}"
+    echo -e "${BL}Remove ISO generation tools after finish?${CL}"
+    echo -e "  Tools: ${GN}xorriso p7zip-full${CL}"
+    echo -e "  ${YW}Recommended: yes for clean Proxmox host.${CL}"
+    echo -e "  ${YW}rsync is never removed by this script.${CL}"
     echo ""
 
-    tool_cleanup_yn="$(timed_yes_no "Remove ISO tools installed by this script when finished?" "y")"
+    tool_cleanup_yn="$(timed_yes_no "Remove ISO generation tools after finish?" "y")"
     if [[ "$tool_cleanup_yn" =~ ^[Nn] ]]; then
         CLEANUP_INSTALLED_TOOLS="no"
     else
@@ -1103,7 +1172,7 @@ collect_early_cleanup_preferences() {
         DELETE_GENERATED_ISO_AFTER_INSTALL="y"
     fi
 
-    detail_line "Cleanup installed tools" "$CLEANUP_INSTALLED_TOOLS"
+    detail_line "Remove ISO generation tools after finish" "$CLEANUP_INSTALLED_TOOLS"
     detail_line "Cleanup temporary workspace" "$CLEANUP_TEMP_WORKFILES"
     detail_line "Delete generated ISO after install" "$DELETE_GENERATED_ISO_AFTER_INSTALL"
 }
@@ -1747,37 +1816,48 @@ generate_autoinstall_iso() {
 show_apply_summary() {
     section "READY TO APPLY"
 
-    echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
-    echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
-    echo -e "VM STATUS: ${GN}${TARGET_VM_STATUS}${CL}"
-    echo -e "VM MAC: ${GN}${TARGET_VM_MAC}${CL}"
-    echo -e "UBUNTU HOSTNAME: ${GN}${TARGET_HOSTNAME}${CL}"
-    echo -e "UBUNTU USER: ${GN}${TARGET_USERNAME}${CL}"
-    echo -e "TIMEZONE: ${GN}${TARGET_TIMEZONE}${CL}"
-    echo -e "LOCALE: ${GN}${TARGET_LOCALE}${CL}"
-    echo -e "VERIFY LOG: ${GN}${VERIFY_LOG}${CL}"
-    echo -e "KEYBOARD LAYOUT: ${GN}${TARGET_KEYBOARD_LAYOUT}${CL}"
-    if [ -n "$TARGET_KEYBOARD_VARIANT" ]; then
-        echo -e "KEYBOARD VARIANT: ${GN}${TARGET_KEYBOARD_VARIANT}${CL}"
-    fi
-    echo -e "NETWORK MODE: ${GN}${NETWORK_MODE}${CL}"
-
-    if [ "$NETWORK_MODE" == "static" ]; then
-        echo -e "STATIC IP/CIDR: ${GN}${STATIC_IP_CIDR}${CL}"
-        echo -e "GATEWAY: ${GN}${STATIC_GATEWAY}${CL}"
-        echo -e "DNS: ${GN}${STATIC_DNS}${CL}"
-    fi
-
-    echo -e "SOURCE ISO: ${GN}${INSTALL_ISO_REF}${CL}"
-    echo -e "GENERATED AUTOINSTALL ISO: ${GN}${AUTOINSTALL_ISO_REF}${CL}"
-    echo -e "REUSE EXISTING ISO: ${GN}${REUSE_EXISTING_AUTOINSTALL_ISO}${CL}"
-    echo -e "WAIT TIMEOUT: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
-    echo -e "DELETE GENERATED ISO AFTER INSTALL: ${GN}${DELETE_GENERATED_ISO_AFTER_INSTALL}${CL}"
-    echo -e "CLEANUP TEMP WORKSPACE: ${GN}${CLEANUP_TEMP_WORKFILES}${CL}"
-    echo -e "CLEANUP INSTALLED TOOLS: ${GN}${CLEANUP_INSTALLED_TOOLS}${CL}"
-    echo -e "START INSTALLED VM AFTER CLEANUP: ${GN}${POST_INSTALL_START_VM}${CL}"
-    echo -e "IP DETECTION TIMEOUT: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
+    echo -e "${BL}VM:${CL}"
+    echo -e "  ${GN}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
+    echo -e "  MAC: ${GN}${TARGET_VM_MAC}${CL}"
     echo ""
+
+    echo -e "${BL}Ubuntu:${CL}"
+    echo -e "  hostname: ${GN}${TARGET_HOSTNAME}${CL}"
+    echo -e "  user: ${GN}${TARGET_USERNAME}${CL}"
+    echo -e "  timezone: ${GN}${TARGET_TIMEZONE}${CL}"
+    echo -e "  locale: ${GN}${TARGET_LOCALE}${CL}"
+    echo -e "  keyboard: ${GN}${TARGET_KEYBOARD_LAYOUT}${CL}"
+    if [ -n "$TARGET_KEYBOARD_VARIANT" ]; then
+        echo -e "  keyboard variant: ${GN}${TARGET_KEYBOARD_VARIANT}${CL}"
+    fi
+    echo ""
+
+    echo -e "${BL}Network:${CL}"
+    echo -e "  mode: ${GN}${NETWORK_MODE}${CL}"
+    if [ "$NETWORK_MODE" == "static" ]; then
+        echo -e "  static IP/CIDR: ${GN}${STATIC_IP_CIDR}${CL}"
+        echo -e "  gateway: ${GN}${STATIC_GATEWAY}${CL}"
+        echo -e "  DNS: ${GN}${STATIC_DNS}${CL}"
+    fi
+    echo ""
+
+    echo -e "${BL}ISO:${CL}"
+    echo -e "  source: ${GN}${INSTALL_ISO_REF}${CL}"
+    echo -e "  generated: ${GN}${AUTOINSTALL_ISO_REF}${CL}"
+    echo ""
+
+    echo -e "${BL}Install:${CL}"
+    echo -e "  timeout: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
+    echo -e "  start VM after cleanup: ${GN}${POST_INSTALL_START_VM}${CL}"
+    echo -e "  IP detection timeout: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
+    echo ""
+
+    echo -e "${BL}Cleanup:${CL}"
+    echo -e "  delete generated ISO after install: ${GN}${DELETE_GENERATED_ISO_AFTER_INSTALL}${CL}"
+    echo -e "  remove temporary workspace: ${GN}${CLEANUP_TEMP_WORKFILES}${CL}"
+    echo -e "  remove ISO generation tools after finish: ${GN}${CLEANUP_INSTALLED_TOOLS}${CL}"
+    echo ""
+
     echo -e "${RD}WARNING:${CL} Starting this VM can begin Ubuntu autoinstall and wipe its VM disk."
     echo ""
     echo -e "${YW}After install, Ubuntu should power off. This script will then detach installer media and boot from disk.${CL}"
@@ -1805,8 +1885,6 @@ attach_iso_and_start_install() {
 
 # --- 59. POST-INSTALL CLEANUP ---
 post_install_cleanup() {
-    section "POST-INSTALL CLEANUP"
-
     if wait_for_vm_poweroff "$TARGET_VMID" "$INSTALL_WAIT_MINUTES"; then
         INSTALL_POWERED_OFF="yes"
     else
@@ -1826,21 +1904,26 @@ post_install_cleanup() {
         exit 1
     fi
 
+    section "CLEANUP"
+
     msg_info "Detaching generated autoinstall ISO from VM"
     run_cmd "detaching installer ISO from VM" qm set "$TARGET_VMID" --delete ide2
-    msg_ok "INSTALLER ISO DETACHED FROM VM"
+    msg_ok "Installer media detached."
 
     msg_info "Setting VM boot order to installed disk"
     run_cmd "setting VM boot order to installed disk" qm set "$TARGET_VMID" --boot "order=scsi0"
-    msg_ok "VM BOOT ORDER SET TO INSTALLED DISK"
+    msg_ok "VM boot order set to installed disk."
 
     if [ "$DELETE_GENERATED_ISO_AFTER_INSTALL" == "y" ]; then
         msg_info "Deleting generated autoinstall ISO"
         rm -f "$AUTOINSTALL_ISO_PATH"
-        msg_ok "GENERATED AUTOINSTALL ISO DELETED"
+        msg_ok "Generated autoinstall ISO deleted."
     else
-        msg_warn "Generated autoinstall ISO kept at ${AUTOINSTALL_ISO_PATH}"
+        msg_ok "Generated autoinstall ISO kept by user choice."
     fi
+
+    cleanup_temp_workspace_runtime
+    cleanup_iso_generation_tools_runtime
 }
 
 # --- 60. START INSTALLED VM AND DETECT IP ---
@@ -1882,6 +1965,7 @@ Network Mode: $NETWORK_MODE
 Source ISO: $INSTALL_ISO_REF
 Generated ISO: $AUTOINSTALL_ISO_REF
 Install Powered Off: $INSTALL_POWERED_OFF
+Install Duration: ${INSTALL_DURATION_TEXT:-not-recorded}
 Installer Detached: yes
 Boot Order: scsi0
 Generated ISO Deleted: $DELETE_GENERATED_ISO_AFTER_INSTALL
@@ -1890,8 +1974,10 @@ Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
 Verify Log: $VERIFY_LOG
 Tools Installed By Script: ${INSTALLED_TOOL_PACKAGES[*]:-none}
-Tools Cleanup Enabled: ${CLEANUP_INSTALLED_TOOLS}
+ISO Generation Tools Cleanup Enabled: ${CLEANUP_INSTALLED_TOOLS}
+ISO Generation Tools Cleanup Done: ${ISO_TOOL_CLEANUP_DONE}
 Temporary Workspace Cleanup Enabled: ${CLEANUP_TEMP_WORKFILES}
+Temporary Workspace Cleanup Done: ${TEMP_WORKSPACE_CLEANUP_DONE}
 EOF
 }
 
@@ -1911,6 +1997,7 @@ VM MAC: $TARGET_VM_MAC
 Source ISO: $INSTALL_ISO_REF
 Generated ISO: $AUTOINSTALL_ISO_REF
 Install Powered Off: $INSTALL_POWERED_OFF
+Install Duration: ${INSTALL_DURATION_TEXT:-not-recorded}
 Post Install Start VM: $POST_INSTALL_START_VM
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
@@ -1967,8 +2054,13 @@ show_generated_iso_only_summary() {
 show_final_output() {
     section_flash_success "     ━━━━━━━━━━━━━  INSTALL COMPLETE / NEXT STEPS  ━━━━━━━━━━━━━"
 
-    echo -e "${CM} ${GN}Ubuntu autoinstall completed.${CL}"
+    if [ -n "${INSTALL_DURATION_TEXT:-}" ]; then
+        echo -e "${CM} ${GN}Ubuntu autoinstall completed. (${INSTALL_DURATION_TEXT})${CL}"
+    else
+        echo -e "${CM} ${GN}Ubuntu autoinstall completed.${CL}"
+    fi
     echo -e "${CM} ${GN}Installer media detached.${CL}"
+    echo -e "${CM} ${GN}VM boot order set to installed disk.${CL}"
 
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
         echo -e "${CM} ${GN}Installed Ubuntu VM started.${CL}"
