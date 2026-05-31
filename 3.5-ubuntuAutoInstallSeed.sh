@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.5"
+SCRIPT_VERSION="v1.2.6"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-qemu-output-fix"
+SCRIPT_BUILD="script35-ui-demo-mode"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -102,6 +102,7 @@ GENERATED_ISO_EXISTS="no"
 TOOLS_CHECKED="no"
 MISSING_TOOL_PACKAGES=()
 ISO_PREP_GROUPED_OUTPUT="no"
+SCRIPT35_UI_DEMO_ACTIVE="no"
 
 BOOT_PARAM='autoinstall ds=nocloud\;s=/cdrom/nocloud/ subiquity.autoinstallpath=cdrom/autoinstall.yaml'
 
@@ -2122,6 +2123,250 @@ show_final_output() {
     echo ""
 }
 
+
+# =========================================================
+#  UI DEMO MODE
+# =========================================================
+
+# --- 65. UI DEMO MODE DETECTION ---
+# Supports a pure rendering-only demo path before root/Proxmox validation.
+is_ui_demo_mode() {
+    local arg=""
+
+    [ "${SCRIPT35_UI_DEMO:-0}" = "1" ] && return 0
+
+    for arg in "$@"; do
+        [ "$arg" = "--ui-demo" ] && return 0
+    done
+
+    return 1
+}
+
+# --- 66. UI DEMO SAMPLE DATA ---
+# Fixed sample values only; no host, VM, ISO, package or filesystem checks.
+setup_ui_demo_sample_data() {
+    SCRIPT35_UI_DEMO_ACTIVE="yes"
+    TARGET_VM_NAME="circl8-ubuntu"
+    TARGET_VMID="108"
+    TARGET_VM_MAC="BC:24:11:12:B1:8B"
+    ASSIGNED_IPV4="192.168.1.108"
+    TARGET_USERNAME="orik"
+    TARGET_HOSTNAME="circl8-ubuntu"
+    TARGET_TIMEZONE="Europe/London"
+    TARGET_LOCALE="en_GB.UTF-8"
+    TARGET_KEYBOARD_LAYOUT="gb"
+    TARGET_KEYBOARD_VARIANT=""
+    NETWORK_MODE="dhcp"
+    INSTALL_ISO_REF="local:iso/ubuntu-26.04-live-server-amd64.iso"
+    AUTOINSTALL_ISO_REF="local:iso/ubuntu-26.04-autoinstall-vm108.iso"
+    INSTALL_WAIT_MINUTES="30"
+    SSH_IP_DETECT_TIMEOUT_SECONDS="90"
+    POST_INSTALL_START_VM="y"
+    DELETE_GENERATED_ISO_AFTER_INSTALL="y"
+    CLEANUP_TEMP_WORKFILES="yes"
+    CLEANUP_INSTALLED_TOOLS="yes"
+    INSTALL_POWERED_OFF="yes"
+    INSTALL_DURATION_TEXT="6m 34s"
+    SSH_COMMAND="ssh orik@192.168.1.108"
+}
+
+# --- 67. UI DEMO RENDER HELPERS ---
+demo_line() {
+    echo -e "  ${DGN}sample:${CL} $1"
+}
+
+demo_section_note() {
+    echo -e "${YW}UI DEMO MODE:${CL} rendering sample output only. No system changes will be made."
+}
+
+demo_cleanup_preferences() {
+    section "CLEANUP PREFERENCES"
+    demo_line "Remove ISO generation tools after finish: $(yn_word "$CLEANUP_INSTALLED_TOOLS")"
+    demo_line "Tools: xorriso p7zip-full"
+    demo_line "rsync is never removed by this script."
+    demo_line "Delete generated autoinstall ISO after successful install: $(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")"
+    demo_line "Remove temporary workspace after finish: $(yn_word "$CLEANUP_TEMP_WORKFILES")"
+}
+
+demo_vm_selection() {
+    section "VM SELECTION"
+    msg_ok "Selected VM: ${TARGET_VM_NAME} (${TARGET_VMID})"
+    demo_line "VM MAC address: ${TARGET_VM_MAC}"
+    demo_line "Router reservation recommended for this MAC."
+}
+
+demo_identity_locale() {
+    section "IDENTITY / LOCALE"
+    demo_line "hostname: ${TARGET_HOSTNAME}"
+    demo_line "user: ${TARGET_USERNAME}"
+    demo_line "timezone: ${TARGET_TIMEZONE}"
+    demo_line "locale: ${TARGET_LOCALE}"
+    demo_line "keyboard: ${TARGET_KEYBOARD_LAYOUT}"
+}
+
+demo_ssh_key_detection() {
+    section "SSH KEY DETECTION"
+    msg_ok "SSH public key sample detected for ${TARGET_USERNAME}."
+}
+
+demo_network_configuration() {
+    section "NETWORK CONFIGURATION"
+    demo_line "mode: ${NETWORK_MODE}"
+    demo_line "VM MAC address: ${TARGET_VM_MAC}"
+}
+
+demo_post_install_options() {
+    section "POST-INSTALL OPTIONS"
+    demo_line "autoinstall wait timeout: ${INSTALL_WAIT_MINUTES} minutes"
+    demo_line "start installed VM after cleanup: $(yn_word "$POST_INSTALL_START_VM")"
+    demo_line "IP detection timeout: ${SSH_IP_DETECT_TIMEOUT_SECONDS}s"
+}
+
+demo_iso_selection() {
+    section "ISO SELECTION"
+    demo_line "source ISO: ${INSTALL_ISO_REF}"
+    demo_line "generated ISO: ${AUTOINSTALL_ISO_REF}"
+}
+
+demo_ubuntu_pro_note() {
+    echo ""
+    echo -e "${BL}Ubuntu Pro:${CL}"
+    demo_line "Not attached by this script."
+    demo_line "Script 4 can offer Ubuntu Pro attachment inside the VM."
+    demo_line "Manual command: sudo pro attach <token>"
+}
+
+demo_autoinstall_iso_preparation() {
+    section "AUTOINSTALL ISO PREPARATION"
+    msg_ok "Existing generated ISO check complete."
+    msg_ok "Required ISO tools available."
+    msg_ok "Autoinstall configuration created."
+    msg_ok "Ubuntu boot configuration extracted."
+    msg_ok "Autoinstall boot parameters patched."
+    msg_ok "Generated autoinstall ISO created."
+    msg_ok "Generated autoinstall ISO verified."
+}
+
+demo_ready_to_apply() {
+    section "READY TO APPLY"
+
+    echo -e "${BL}VM:${CL}"
+    echo -e "  ${GN}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
+    echo -e "  MAC: ${GN}${TARGET_VM_MAC}${CL}"
+    echo ""
+
+    echo -e "${BL}Ubuntu:${CL}"
+    echo -e "  hostname: ${GN}${TARGET_HOSTNAME}${CL}"
+    echo -e "  user: ${GN}${TARGET_USERNAME}${CL}"
+    echo -e "  timezone: ${GN}${TARGET_TIMEZONE}${CL}"
+    echo -e "  locale: ${GN}${TARGET_LOCALE}${CL}"
+    echo -e "  keyboard: ${GN}${TARGET_KEYBOARD_LAYOUT}${CL}"
+    echo ""
+
+    echo -e "${BL}Network:${CL}"
+    echo -e "  mode: ${GN}${NETWORK_MODE}${CL}"
+    echo ""
+
+    echo -e "${BL}ISO:${CL}"
+    echo -e "  source: ${GN}${INSTALL_ISO_REF}${CL}"
+    echo -e "  generated: ${GN}${AUTOINSTALL_ISO_REF}${CL}"
+    echo ""
+
+    echo -e "${BL}Install:${CL}"
+    echo -e "  timeout: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
+    echo -e "  start VM after cleanup: ${GN}$(yn_word "$POST_INSTALL_START_VM")${CL}"
+    echo -e "  IP detection timeout: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
+    echo ""
+
+    echo -e "${BL}Cleanup:${CL}"
+    echo -e "  delete generated ISO after install: ${GN}$(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")${CL}"
+    echo -e "  remove temporary workspace: ${GN}$(yn_word "$CLEANUP_TEMP_WORKFILES")${CL}"
+    echo -e "  remove ISO generation tools after finish: ${GN}$(yn_word "$CLEANUP_INSTALLED_TOOLS")${CL}"
+    echo ""
+
+    echo -e "${RD}WARNING:${CL} Starting this VM can begin Ubuntu autoinstall and wipe its VM disk."
+}
+
+demo_preparing_system() {
+    section "PREPARING SYSTEM"
+    msg_ok "sample: VM ${TARGET_VMID} shutdown complete."
+    msg_ok "sample: Installer ISO attached."
+    msg_ok "sample: VM boot order configured."
+    msg_ok "sample: VM started for autoinstall."
+}
+
+demo_install_monitoring() {
+    section "INSTALL MONITORING"
+    echo -e "${BL}Ubuntu autoinstall is running inside:${CL}"
+    echo -e "  VM: ${GN}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
+    echo ""
+    echo -e "${YW}Waiting for the VM to power off after installation.${CL}"
+    echo -e "${YW}Do not manually restart the VM during this stage.${CL}"
+    echo ""
+    echo -e "${YW}Waiting for VM poweroff: elapsed ${INSTALL_DURATION_TEXT} / ${INSTALL_WAIT_MINUTES}m | status: stopped${CL}"
+    msg_ok "Ubuntu autoinstall completed. (${INSTALL_DURATION_TEXT})"
+    msg_ok "VM ${TARGET_VMID} powered off after install."
+}
+
+demo_cleanup() {
+    section "CLEANUP"
+    msg_ok "sample: Installer media detached."
+    msg_ok "sample: VM boot order set to installed disk."
+    msg_ok "sample: Generated autoinstall ISO deleted."
+    msg_ok "sample: Temporary workspace removed."
+    msg_ok "sample: ISO generation tools removed: xorriso p7zip-full"
+}
+
+demo_start_installed_vm() {
+    section "START INSTALLED VM"
+    msg_ok "sample: Installed Ubuntu VM started."
+}
+
+demo_qemu_ip_detection() {
+    section "QEMU GUEST AGENT / IP DETECTION"
+    msg_ok "QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}"
+}
+
+demo_host_verification() {
+    section "HOST VERIFICATION"
+    msg_ok "sample: VM config exists."
+    msg_ok "sample: Boot order is installed disk first."
+    msg_ok "sample: Installer ISO is detached."
+    msg_ok "sample: SSH command generated: ${SSH_COMMAND}"
+}
+
+demo_final_output() {
+    show_final_output
+}
+
+# --- 68. UI DEMO ORCHESTRATION ---
+# Renders sample output only. It must stay independent of real workflow functions.
+run_ui_demo() {
+    setup_ui_demo_sample_data
+    header_info
+    show_script_version
+    echo ""
+    demo_section_note
+
+    demo_cleanup_preferences
+    demo_vm_selection
+    demo_identity_locale
+    demo_ssh_key_detection
+    demo_network_configuration
+    demo_post_install_options
+    demo_iso_selection
+    demo_ubuntu_pro_note
+    demo_autoinstall_iso_preparation
+    demo_ready_to_apply
+    demo_preparing_system
+    demo_install_monitoring
+    demo_cleanup
+    demo_start_installed_vm
+    demo_qemu_ip_detection
+    demo_host_verification
+    demo_final_output
+}
+
 # =========================================================
 #  MAIN ORCHESTRATION
 # =========================================================
@@ -2177,5 +2422,10 @@ main() {
     create_host_verification_report
     show_final_output
 }
+
+if is_ui_demo_mode "$@"; then
+    run_ui_demo
+    exit 0
+fi
 
 main "$@"
