@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.6"
+SCRIPT_VERSION="v1.2.7"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-ui-demo-mode"
+SCRIPT_BUILD="script35-demo-ui-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -2082,7 +2082,7 @@ show_generated_iso_only_summary() {
 
 # --- 64. FINAL OUTPUT ---
 show_final_output() {
-    section_flash_success "     ━━━━━━━━━━━━━  INSTALL COMPLETE / NEXT STEPS  ━━━━━━━━━━━━━"
+    section "INSTALL COMPLETE / NEXT STEPS"
 
     if [ -n "${INSTALL_DURATION_TEXT:-}" ]; then
         echo -e "${CM} ${GN}Ubuntu autoinstall completed. (${INSTALL_DURATION_TEXT})${CL}"
@@ -2172,7 +2172,7 @@ setup_ui_demo_sample_data() {
 
 # --- 67. UI DEMO RENDER HELPERS ---
 demo_line() {
-    echo -e "  ${DGN}sample:${CL} $1"
+    echo -e "  ${DGN}━━━━━▶${CL} $1"
 }
 
 demo_section_note() {
@@ -2289,10 +2289,10 @@ demo_ready_to_apply() {
 
 demo_preparing_system() {
     section "PREPARING SYSTEM"
-    msg_ok "sample: VM ${TARGET_VMID} shutdown complete."
-    msg_ok "sample: Installer ISO attached."
-    msg_ok "sample: VM boot order configured."
-    msg_ok "sample: VM started for autoinstall."
+    msg_ok "VM ${TARGET_VMID} shutdown complete."
+    msg_ok "Installer ISO attached."
+    msg_ok "VM boot order configured."
+    msg_ok "VM started for autoinstall."
 }
 
 demo_install_monitoring() {
@@ -2303,23 +2303,22 @@ demo_install_monitoring() {
     echo -e "${YW}Waiting for the VM to power off after installation.${CL}"
     echo -e "${YW}Do not manually restart the VM during this stage.${CL}"
     echo ""
-    echo -e "${YW}Waiting for VM poweroff: elapsed ${INSTALL_DURATION_TEXT} / ${INSTALL_WAIT_MINUTES}m | status: stopped${CL}"
     msg_ok "Ubuntu autoinstall completed. (${INSTALL_DURATION_TEXT})"
     msg_ok "VM ${TARGET_VMID} powered off after install."
 }
 
 demo_cleanup() {
     section "CLEANUP"
-    msg_ok "sample: Installer media detached."
-    msg_ok "sample: VM boot order set to installed disk."
-    msg_ok "sample: Generated autoinstall ISO deleted."
-    msg_ok "sample: Temporary workspace removed."
-    msg_ok "sample: ISO generation tools removed: xorriso p7zip-full"
+    msg_ok "Installer media detached."
+    msg_ok "VM boot order set to installed disk."
+    msg_ok "Generated autoinstall ISO deleted."
+    msg_ok "Temporary workspace removed."
+    msg_ok "ISO generation tools removed: xorriso p7zip-full"
 }
 
 demo_start_installed_vm() {
     section "START INSTALLED VM"
-    msg_ok "sample: Installed Ubuntu VM started."
+    msg_ok "Installed Ubuntu VM started."
 }
 
 demo_qemu_ip_detection() {
@@ -2329,10 +2328,10 @@ demo_qemu_ip_detection() {
 
 demo_host_verification() {
     section "HOST VERIFICATION"
-    msg_ok "sample: VM config exists."
-    msg_ok "sample: Boot order is installed disk first."
-    msg_ok "sample: Installer ISO is detached."
-    msg_ok "sample: SSH command generated: ${SSH_COMMAND}"
+    msg_ok "VM config exists."
+    msg_ok "Boot order is installed disk first."
+    msg_ok "Installer ISO is detached."
+    msg_ok "SSH command generated: ${SSH_COMMAND}"
 }
 
 demo_final_output() {
