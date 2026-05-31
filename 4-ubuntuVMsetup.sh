@@ -36,9 +36,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.1"
+SCRIPT_VERSION="v2.1.2"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script4-host-guard"
+SCRIPT_BUILD="script4-host-guard-ssh-hint"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -655,6 +655,87 @@ function get_detected_os_id() {
     echo "${os_id:-unknown}"
 }
 
+function extract_first_ipv4() {
+    printf '%s\n' "$*" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1 || true
+}
+
+function extract_first_ssh_command() {
+    printf '%s\n' "$*" | grep -Eo '^ssh[[:space:]]+[^[:space:]@]+@([0-9]{1,3}\.){3}[0-9]{1,3}$|ssh[[:space:]]+[^[:space:]@]+@([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1 || true
+}
+
+function marker_value() {
+    local label="$1"
+    local file="$2"
+
+    [ -r "$file" ] || return 0
+    awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }' "$file" 2>/dev/null | xargs || true
+}
+
+function build_ssh_hint_from_marker() {
+    local marker="/root/.ubuntu-autoinstall-seed-completed"
+    local marker_text=""
+    local username=""
+    local assigned_raw=""
+    local ssh_raw=""
+    local ssh_command=""
+    local assigned_ipv4=""
+    local vmid=""
+    local vm_name=""
+
+    SCRIPT4_SSH_HINT_COMMAND="ssh <ubuntu-user>@<vm-ip>"
+    SCRIPT4_SSH_HINT_SOURCE="none"
+    SCRIPT4_SSH_HINT_VMID=""
+    SCRIPT4_SSH_HINT_VM_NAME=""
+    SCRIPT4_SSH_HINT_IP=""
+
+    [ -r "$marker" ] || return 0
+
+    marker_text="$(cat "$marker" 2>/dev/null || true)"
+    username="$(marker_value "Username" "$marker")"
+    assigned_raw="$(marker_value "Assigned IPv4" "$marker")"
+    ssh_raw="$(marker_value "SSH Command" "$marker")"
+    vmid="$(marker_value "VMID" "$marker")"
+    vm_name="$(marker_value "VM Name" "$marker")"
+
+    ssh_command="$(extract_first_ssh_command "$ssh_raw")"
+    assigned_ipv4="$(extract_first_ipv4 "$assigned_raw")"
+
+    if [ -z "$assigned_ipv4" ]; then
+        assigned_ipv4="$(extract_first_ipv4 "$marker_text")"
+    fi
+
+    if [ -z "$ssh_command" ] && [ -n "$username" ] && [ -n "$assigned_ipv4" ]; then
+        ssh_command="ssh ${username}@${assigned_ipv4}"
+    fi
+
+    if [ -n "$ssh_command" ]; then
+        SCRIPT4_SSH_HINT_COMMAND="$ssh_command"
+        SCRIPT4_SSH_HINT_SOURCE="Script 3.5 completion marker"
+        SCRIPT4_SSH_HINT_VMID="$vmid"
+        SCRIPT4_SSH_HINT_VM_NAME="$vm_name"
+        SCRIPT4_SSH_HINT_IP="$assigned_ipv4"
+    fi
+}
+
+function print_proxmox_correct_location_hint() {
+    build_ssh_hint_from_marker
+
+    echo -e "${BL}Correct location:${CL}"
+    echo -e "  SSH into the Ubuntu VM first:"
+    echo -e "    ${GN}${SCRIPT4_SSH_HINT_COMMAND}${CL}"
+
+    if [ "$SCRIPT4_SSH_HINT_SOURCE" == "Script 3.5 completion marker" ]; then
+        echo ""
+        echo -e "${BL}Detected from Script 3.5 completion marker:${CL}"
+        if [ -n "$SCRIPT4_SSH_HINT_VM_NAME" ] || [ -n "$SCRIPT4_SSH_HINT_VMID" ]; then
+            echo -e "  VM:  ${GN}${SCRIPT4_SSH_HINT_VM_NAME:-unknown} (${SCRIPT4_SSH_HINT_VMID:-unknown})${CL}"
+        fi
+        if [ -n "$SCRIPT4_SSH_HINT_IP" ]; then
+            echo -e "  IP:  ${GN}${SCRIPT4_SSH_HINT_IP}${CL}"
+        fi
+    fi
+}
+
 function guard_script4_environment() {
     local os_id=""
 
@@ -664,9 +745,7 @@ function guard_script4_environment() {
         echo -e "${RD}Detected Proxmox/PVE environment.${CL}"
         echo -e "${YW}Stop here.${CL}"
         echo ""
-        echo -e "${BL}Correct location:${CL}"
-        echo -e "  SSH into the Ubuntu VM first:"
-        echo -e "    ${GN}ssh <ubuntu-user>@<vm-ip>${CL}"
+        print_proxmox_correct_location_hint
         echo ""
         echo -e "Then run:"
         echo -e "  ${GN}4-ubuntuVMsetup.sh${CL}"
