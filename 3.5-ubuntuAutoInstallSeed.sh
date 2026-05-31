@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.7"
+SCRIPT_VERSION="v1.2.8"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-demo-ui-polish"
+SCRIPT_BUILD="script35-final-display-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -88,6 +88,9 @@ STATIC_DNS="1.1.1.1,1.0.0.1"
 INSTALL_POWERED_OFF="no"
 INSTALL_DURATION_SECONDS=""
 INSTALL_DURATION_TEXT=""
+INSTALLED_VM_STARTED_STATUS=""
+QEMU_IPV4_STATUS=""
+HOST_VERIFICATION_STATUS=""
 
 CLEANUP_INSTALLED_TOOLS="yes"
 CLEANUP_TEMP_WORKFILES="yes"
@@ -710,6 +713,74 @@ yn_word() {
     fi
 }
 
+# Extracts the first IPv4 from possibly polluted multiline text.
+extract_first_ipv4() {
+    printf '%s
+' "$*" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1 || true
+}
+
+# Extracts the first clean SSH command with an IPv4 target from possibly polluted text.
+extract_first_ssh_command() {
+    printf '%s
+' "$*" | grep -Eo 'ssh[[:space:]]+[^[:space:]]+@([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1 || true
+}
+
+# Reads a single known marker value line without allowing multiline pollution into UI output.
+marker_value() {
+    local label="$1"
+    local file="$2"
+
+    awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }' "$file" 2>/dev/null | xargs || true
+}
+
+previous_marker_line() {
+    local label="$1"
+    local value="${2:-not-recorded}"
+    printf '  %b%-30s%b %b%s%b
+' "${BL}" "${label}:" "${CL}" "${GN}" "${value:-not-recorded}" "${CL}"
+}
+
+show_previous_marker_summary() {
+    local marker="$1"
+    local completed="" vmid="" vm_name="" vm_mac="" username=""
+    local assigned_ipv4="" ssh_command="" raw_ssh=""
+    local generated_deleted="" installed_started="" tools_cleanup_enabled=""
+    local tools_cleanup_done="" temp_cleanup=""
+
+    completed="$(marker_value "Ubuntu Auto Install completed on" "$marker")"
+    vmid="$(marker_value "VMID" "$marker")"
+    vm_name="$(marker_value "VM Name" "$marker")"
+    vm_mac="$(marker_value "VM MAC" "$marker")"
+    username="$(marker_value "Username" "$marker")"
+    assigned_ipv4="$(extract_first_ipv4 "$(cat "$marker" 2>/dev/null || true)")"
+    raw_ssh="$(cat "$marker" 2>/dev/null || true)"
+    ssh_command="$(extract_first_ssh_command "$raw_ssh")"
+
+    if [ -z "$ssh_command" ] && [ -n "$username" ] && [ -n "$assigned_ipv4" ]; then
+        ssh_command="ssh ${username}@${assigned_ipv4}"
+    fi
+
+    generated_deleted="$(yn_word "$(marker_value "Generated ISO Deleted" "$marker")")"
+    installed_started="$(yn_word "$(marker_value "Installed VM Started" "$marker")")"
+    tools_cleanup_enabled="$(yn_word "$(marker_value "ISO Generation Tools Cleanup Enabled" "$marker")")"
+    tools_cleanup_done="$(yn_word "$(marker_value "ISO Generation Tools Cleanup Done" "$marker")")"
+    temp_cleanup="$(yn_word "$(marker_value "Temporary Workspace Cleanup Done" "$marker")")"
+
+    echo -e "${YW}Previous Ubuntu Auto Install marker detected:${CL}"
+    echo ""
+    previous_marker_line "Completed" "${completed:-not-recorded}"
+    previous_marker_line "VMID" "${vmid:-not-recorded}"
+    previous_marker_line "VM name" "${vm_name:-not-recorded}"
+    previous_marker_line "VM MAC" "${vm_mac:-not-recorded}"
+    previous_marker_line "Assigned IPv4" "${assigned_ipv4:-not-detected}"
+    previous_marker_line "SSH command" "${ssh_command:-not-generated}"
+    previous_marker_line "Generated ISO deleted" "$generated_deleted"
+    previous_marker_line "Installed VM started" "$installed_started"
+    previous_marker_line "ISO tools cleanup enabled" "$tools_cleanup_enabled"
+    previous_marker_line "ISO tools cleanup done" "$tools_cleanup_done"
+    previous_marker_line "Temporary workspace cleanup" "$temp_cleanup"
+}
+
 # --- 24. VM STATUS HELPER ---
 get_vm_status() {
     local vmid="$1"
@@ -1121,9 +1192,6 @@ ensure_tools() {
     if [ "${#missing_packages[@]}" -gt 0 ]; then
         msg_warn "Missing required tools: ${missing_packages[*]}"
         echo ""
-        echo -e "${YW}These packages are required to create or verify the generated autoinstall ISO.${CL}"
-        echo ""
-
         install_yn="$(timed_yes_no "Install missing ISO tools now?" "y")"
 
         if [[ "$install_yn" =~ ^[Nn] ]]; then
@@ -1159,7 +1227,6 @@ collect_early_cleanup_preferences() {
     echo -e "${BL}Remove ISO generation tools after finish?${CL}"
     echo -e "  Tools: ${GN}xorriso p7zip-full${CL}"
     echo -e "  ${YW}Recommended: yes for clean Proxmox host.${CL}"
-    echo -e "  ${YW}rsync is never removed by this script.${CL}"
     echo ""
 
     tool_cleanup_yn="$(timed_yes_no "Remove ISO generation tools after finish?" "y")"
@@ -1183,9 +1250,9 @@ collect_early_cleanup_preferences() {
         DELETE_GENERATED_ISO_AFTER_INSTALL="y"
     fi
 
-    detail_line "Remove ISO generation tools after finish" "$CLEANUP_INSTALLED_TOOLS"
-    detail_line "Cleanup temporary workspace" "$CLEANUP_TEMP_WORKFILES"
-    detail_line "Delete generated ISO after install" "$DELETE_GENERATED_ISO_AFTER_INSTALL"
+    detail_line "Remove ISO generation tools after finish" "$(yn_word "$CLEANUP_INSTALLED_TOOLS")"
+    detail_line "Cleanup temporary workspace" "$(yn_word "$CLEANUP_TEMP_WORKFILES")"
+    detail_line "Delete generated ISO after install" "$(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")"
 }
 
 # --- 35B. GENERATED ISO PATH PREPARATION ---
@@ -1247,9 +1314,9 @@ check_previous_marker() {
     if [ -f "$COMPLETED_MARKER" ]; then
         section "PREVIOUS UBUNTU AUTO INSTALL MARKER DETECTED"
 
-        echo -e "${YW}A previous Ubuntu Auto Install marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
+        show_previous_marker_summary "$COMPLETED_MARKER"
         echo ""
-        cat "$COMPLETED_MARKER" 2>/dev/null || true
+        echo -e "${YW}Marker file:${CL} ${GN}${COMPLETED_MARKER}${CL}"
         echo ""
 
         continue_yn="$(timed_yes_no "Continue anyway?" "n")"
@@ -1490,11 +1557,7 @@ collect_network_inputs() {
 
     section "NETWORK CONFIGURATION"
 
-    echo -e "${BL}VM MAC address:${CL}"
-    echo -e "  ${GN}${TARGET_VM_MAC}${CL}"
-    echo ""
-    echo -e "${BL}Recommendation:${CL}"
-    echo -e "  ${YW}Use DHCP here and reserve this MAC in your router for the desired static IP.${CL}"
+    echo -e "${YW}Recommended: use DHCP and keep your router reservation from the VM selection step.${CL}"
     echo ""
 
     dhcp_yn="$(timed_yes_no "Use DHCP networking inside Ubuntu?" "y")"
@@ -1956,24 +2019,23 @@ post_install_cleanup() {
 
 # --- 60. START INSTALLED VM AND DETECT IP ---
 start_installed_vm_and_detect_ip() {
-    section "START INSTALLED VM"
-
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
         msg_info "Starting installed Ubuntu VM"
         run_cmd "starting installed Ubuntu VM" qm start "$TARGET_VMID"
-        msg_ok "INSTALLED UBUNTU VM STARTED"
+        INSTALLED_VM_STARTED_STATUS="Installed Ubuntu VM started."
 
-        section "QEMU GUEST AGENT / IP DETECTION"
         ASSIGNED_IPV4="$(wait_for_vm_ipv4 "$TARGET_VMID" "$SSH_IP_DETECT_TIMEOUT_SECONDS" "$SSH_IP_CHECK_INTERVAL_SECONDS" || true)"
         ASSIGNED_IPV4="$(printf '%s\n' "$ASSIGNED_IPV4" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | head -n 1 || true)"
 
         if [ -n "$ASSIGNED_IPV4" ]; then
             SSH_COMMAND="ssh ${TARGET_USERNAME}@${ASSIGNED_IPV4}"
-            msg_ok "QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}"
+            QEMU_IPV4_STATUS="QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}"
         else
-            msg_warn "VM started but IPv4 was not reported by QEMU Guest Agent within ${SSH_IP_DETECT_TIMEOUT_SECONDS}s"
+            QEMU_IPV4_STATUS="QEMU Guest Agent did not report an IPv4 address within ${SSH_IP_DETECT_TIMEOUT_SECONDS}s"
+            msg_warn "${QEMU_IPV4_STATUS}"
         fi
     else
+        INSTALLED_VM_STARTED_STATUS="Installed Ubuntu VM left powered off by user choice."
         msg_warn "Installed Ubuntu VM was left powered off because user selected no"
     fi
 }
@@ -1998,24 +2060,22 @@ Install Powered Off: $INSTALL_POWERED_OFF
 Install Duration: ${INSTALL_DURATION_TEXT:-not-recorded}
 Installer Detached: yes
 Boot Order: scsi0
-Generated ISO Deleted: $DELETE_GENERATED_ISO_AFTER_INSTALL
-Installed VM Started: $POST_INSTALL_START_VM
+Generated ISO Deleted: $(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")
+Installed VM Started: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
 Verify Log: $VERIFY_LOG
 Tools Installed By Script: ${INSTALLED_TOOL_PACKAGES[*]:-none}
-ISO Generation Tools Cleanup Enabled: ${CLEANUP_INSTALLED_TOOLS}
-ISO Generation Tools Cleanup Done: ${ISO_TOOL_CLEANUP_DONE}
-Temporary Workspace Cleanup Enabled: ${CLEANUP_TEMP_WORKFILES}
-Temporary Workspace Cleanup Done: ${TEMP_WORKSPACE_CLEANUP_DONE}
+ISO Generation Tools Cleanup Enabled: $(yn_word "$CLEANUP_INSTALLED_TOOLS")
+ISO Generation Tools Cleanup Done: $(yn_word "$ISO_TOOL_CLEANUP_DONE")
+Temporary Workspace Cleanup Enabled: $(yn_word "$CLEANUP_TEMP_WORKFILES")
+Temporary Workspace Cleanup Done: $(yn_word "$TEMP_WORKSPACE_CLEANUP_DONE")
 EOF
 }
 
 # --- 62. HOST VERIFICATION REPORT ---
 # Writes a host-side verification report after install cleanup and optional VM start.
 create_host_verification_report() {
-    section "HOST VERIFICATION"
-
     msg_info "Creating host verification report"
 
     cat > "$VERIFY_LOG" <<EOF
@@ -2028,7 +2088,7 @@ Source ISO: $INSTALL_ISO_REF
 Generated ISO: $AUTOINSTALL_ISO_REF
 Install Powered Off: $INSTALL_POWERED_OFF
 Install Duration: ${INSTALL_DURATION_TEXT:-not-recorded}
-Post Install Start VM: $POST_INSTALL_START_VM
+Post Install Start VM: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
 
@@ -2063,7 +2123,7 @@ EOF
         if [ -f "$COMPLETED_MARKER" ]; then PASS "Completion marker exists"; else WARN "Completion marker missing at verification time"; fi
     } >> "$VERIFY_LOG"
 
-    msg_ok "HOST VERIFICATION REPORT CREATED"
+    HOST_VERIFICATION_STATUS="Host verification report created."
 }
 
 # --- 63. GENERATED ISO ONLY SUMMARY ---
@@ -2093,14 +2153,18 @@ show_final_output() {
     echo -e "${CM} ${GN}VM boot order set to installed disk.${CL}"
 
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
-        echo -e "${CM} ${GN}Installed Ubuntu VM started.${CL}"
+        echo -e "${CM} ${GN}${INSTALLED_VM_STARTED_STATUS:-Installed Ubuntu VM started.}${CL}"
         if [ -n "$ASSIGNED_IPV4" ]; then
-            echo -e "${CM} ${GN}QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}${CL}"
+            echo -e "${CM} ${GN}${QEMU_IPV4_STATUS:-QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}}${CL}"
         else
-            echo -e "${WARN} ${YW}QEMU Guest Agent did not report an IPv4 address yet.${CL}"
+            echo -e "${WARN} ${YW}${QEMU_IPV4_STATUS:-QEMU Guest Agent did not report an IPv4 address yet.}${CL}"
         fi
     else
-        echo -e "${WARN} ${YW}Installed Ubuntu VM was left powered off by user choice.${CL}"
+        echo -e "${WARN} ${YW}${INSTALLED_VM_STARTED_STATUS:-Installed Ubuntu VM was left powered off by user choice.}${CL}"
+    fi
+
+    if [ -n "${HOST_VERIFICATION_STATUS:-}" ]; then
+        echo -e "${CM} ${GN}${HOST_VERIFICATION_STATUS}${CL}"
     fi
 
     echo ""
@@ -2167,6 +2231,9 @@ setup_ui_demo_sample_data() {
     CLEANUP_INSTALLED_TOOLS="yes"
     INSTALL_POWERED_OFF="yes"
     INSTALL_DURATION_TEXT="6m 34s"
+    INSTALLED_VM_STARTED_STATUS="Installed Ubuntu VM started."
+    QEMU_IPV4_STATUS="QEMU Guest Agent reported IPv4 address: 192.168.1.108"
+    HOST_VERIFICATION_STATUS="Host verification report created."
     SSH_COMMAND="ssh orik@192.168.1.108"
 }
 
@@ -2183,7 +2250,6 @@ demo_cleanup_preferences() {
     section "CLEANUP PREFERENCES"
     demo_line "Remove ISO generation tools after finish: $(yn_word "$CLEANUP_INSTALLED_TOOLS")"
     demo_line "Tools: xorriso p7zip-full"
-    demo_line "rsync is never removed by this script."
     demo_line "Delete generated autoinstall ISO after successful install: $(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")"
     demo_line "Remove temporary workspace after finish: $(yn_word "$CLEANUP_TEMP_WORKFILES")"
 }
@@ -2212,7 +2278,7 @@ demo_ssh_key_detection() {
 demo_network_configuration() {
     section "NETWORK CONFIGURATION"
     demo_line "mode: ${NETWORK_MODE}"
-    demo_line "VM MAC address: ${TARGET_VM_MAC}"
+    demo_line "Use DHCP and keep the router reservation from VM selection."
 }
 
 demo_post_install_options() {
@@ -2316,24 +2382,6 @@ demo_cleanup() {
     msg_ok "ISO generation tools removed: xorriso p7zip-full"
 }
 
-demo_start_installed_vm() {
-    section "START INSTALLED VM"
-    msg_ok "Installed Ubuntu VM started."
-}
-
-demo_qemu_ip_detection() {
-    section "QEMU GUEST AGENT / IP DETECTION"
-    msg_ok "QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}"
-}
-
-demo_host_verification() {
-    section "HOST VERIFICATION"
-    msg_ok "VM config exists."
-    msg_ok "Boot order is installed disk first."
-    msg_ok "Installer ISO is detached."
-    msg_ok "SSH command generated: ${SSH_COMMAND}"
-}
-
 demo_final_output() {
     show_final_output
 }
@@ -2360,9 +2408,6 @@ run_ui_demo() {
     demo_preparing_system
     demo_install_monitoring
     demo_cleanup
-    demo_start_installed_vm
-    demo_qemu_ip_detection
-    demo_host_verification
     demo_final_output
 }
 
