@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.2.2"
+SCRIPT_VERSION="v1.3.0"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-storage-layout-fix"
+SCRIPT_BUILD="script1-storage-layout-builder"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -87,6 +87,18 @@ NUMLOCK_CONFIGURED="no"
 STORAGE_LAYOUT_MODE="unselected"
 ROOT_DISK_SIZE_GB="0"
 LOCAL_LVM_EXISTS="no"
+LOCAL_LVM_STORAGE_EXISTS="no"
+LOCAL_LVM_CFG_EXISTS="no"
+PVE_DATA_EXISTS="no"
+PVE_DATA_IS_THINPOOL="no"
+CURRENT_ROOT_SIZE_GB="0"
+CURRENT_PVE_FREE_GB="0"
+TARGET_ROOT_SIZE_GB="100"
+ROOT_GROWTH_GB="0"
+PVE_FREE_RESERVE_GB="1"
+CREATE_LOCAL_LVM="y"
+LOCAL_LVM_SIZE_GB="0"
+LOCAL_LVM_DEFAULT_SIZE_GB="0"
 
 TEMP_FILES=()
 
@@ -754,13 +766,14 @@ function validate_dependencies() {
         hostname
         ip
         lsblk
+        lvcreate
         lvdisplay
-        lvremove
-        lvresize
+        lvextend
         lvs
         mkdir
         pct
         pvesm
+        pvs
         qm
         reboot
         resize2fs
@@ -1025,6 +1038,14 @@ function pve_root_lv_exists() {
     return 1
 }
 
+function pve_data_lv_exists() {
+    if lvdisplay /dev/pve/data >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 1
+}
+
 function pve_data_thinpool_exists() {
     local lv_attr=""
 
@@ -1034,10 +1055,6 @@ function pve_data_thinpool_exists() {
             t*) return 0 ;;
             *) return 1 ;;
         esac
-    fi
-
-    if lvdisplay /dev/pve/data >/dev/null 2>&1; then
-        return 0
     fi
 
     return 1
@@ -1056,88 +1073,248 @@ function detect_installer_local_lvm_layout() {
     return 1
 }
 
-# --- STORAGE LAYOUT DETECTION HELPER ---
-# Detects whether the installer-created local + local-lvm layout exists and estimates the root disk size.
-function detect_storage_layout_options() {
-    local root_source=""
-    local root_real=""
-    local parent_disk=""
-    local pv_name=""
-    local root_size_bytes="0"
+function get_lvm_size_gb_ceil() {
+    local lv_path="$1"
+    local raw=""
 
+    raw="$(lvs --noheadings --units g --nosuffix -o lv_size "$lv_path" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        awk -v value="$raw" 'BEGIN { rounded=int(value); if (value > rounded) rounded++; print rounded }'
+    else
+        echo "0"
+    fi
+}
+
+function get_pve_free_gb_floor() {
+    local raw=""
+
+    raw="$(vgs --noheadings --units g --nosuffix -o vg_free pve 2>/dev/null | awk 'NF {print $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        awk -v value="$raw" 'BEGIN { print int(value) }'
+    else
+        echo "0"
+    fi
+}
+
+function read_storage_gb_input() {
+    local prompt="$1"
+    local default_value="$2"
+    local allow_zero="${3:-no}"
+    local value=""
+
+    while true; do
+        tty_print "${YW}${prompt} [${default_value}]: ${CL}"
+        if [ -r /dev/tty ]; then
+            IFS= read -r value < /dev/tty || true
+        else
+            IFS= read -r value || true
+        fi
+
+        value="${value:-$default_value}"
+        value="$(printf '%s' "$value" | xargs || true)"
+
+        if [[ "$value" =~ ^[0-9]+$ ]]; then
+            if [ "$allow_zero" == "yes" ] || [ "$value" -gt 0 ]; then
+                echo "$value"
+                return 0
+            fi
+        fi
+
+        tty_println "${RD}Enter a whole number greater than zero.${CL}"
+    done
+}
+
+# --- STORAGE LAYOUT DETECTION HELPER ---
+# Detects installer-created local-lvm state and reads current pve/root and pve VG free sizes.
+function detect_storage_layout_options() {
     LOCAL_LVM_EXISTS="no"
+    LOCAL_LVM_STORAGE_EXISTS="no"
+    LOCAL_LVM_CFG_EXISTS="no"
+    PVE_DATA_EXISTS="no"
+    PVE_DATA_IS_THINPOOL="no"
     ROOT_DISK_SIZE_GB="0"
+    CURRENT_ROOT_SIZE_GB="0"
+    CURRENT_PVE_FREE_GB="0"
+
+    if storage_id_in_pvesm_status "local-lvm"; then
+        LOCAL_LVM_STORAGE_EXISTS="yes"
+    fi
+
+    if storage_cfg_has_local_lvm; then
+        LOCAL_LVM_CFG_EXISTS="yes"
+    fi
+
+    if pve_data_lv_exists; then
+        PVE_DATA_EXISTS="yes"
+    fi
+
+    if pve_data_thinpool_exists; then
+        PVE_DATA_IS_THINPOOL="yes"
+    fi
 
     if detect_installer_local_lvm_layout; then
         LOCAL_LVM_EXISTS="yes"
     fi
 
-    root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-    if [ -n "$root_source" ]; then
-        root_real="$(readlink -f "$root_source" 2>/dev/null || printf '%s\n' "$root_source")"
-    fi
+    CURRENT_ROOT_SIZE_GB="$(get_lvm_size_gb_ceil /dev/pve/root)"
+    CURRENT_PVE_FREE_GB="$(get_pve_free_gb_floor)"
+    ROOT_DISK_SIZE_GB="$CURRENT_ROOT_SIZE_GB"
 
-    if [ -n "$root_real" ]; then
-        parent_disk="$(lsblk -no PKNAME "$root_real" 2>/dev/null | awk 'NF {print; exit}' || true)"
-    fi
-
-    if [ -z "$parent_disk" ] && command -v pvs >/dev/null 2>&1; then
-        pv_name="$(pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk '$2 == "pve" {print $1; exit}' || true)"
-        if [ -n "$pv_name" ]; then
-            parent_disk="$(lsblk -no PKNAME "$pv_name" 2>/dev/null | awk 'NF {print; exit}' || true)"
-            if [ -z "$parent_disk" ]; then
-                parent_disk="$(basename "$pv_name" 2>/dev/null || true)"
-            fi
-        fi
-    fi
-
-    if [ -n "$parent_disk" ] && [ -b "/dev/${parent_disk}" ]; then
-        root_size_bytes="$(lsblk -b -dn -o SIZE "/dev/${parent_disk}" 2>/dev/null | awk 'NF {print $1; exit}' || echo 0)"
-        if [[ "$root_size_bytes" =~ ^[0-9]+$ ]] && [ "$root_size_bytes" -gt 0 ]; then
-            ROOT_DISK_SIZE_GB="$(( (root_size_bytes + 1073741823) / 1073741824 ))"
-        fi
-    fi
-
-    [ -z "$ROOT_DISK_SIZE_GB" ] && ROOT_DISK_SIZE_GB="0"
     return 0
 }
 
+function validate_storage_conflict_state() {
+    if [ "$LOCAL_LVM_EXISTS" == "yes" ]; then
+        return 0
+    fi
+
+    if [ "$LOCAL_LVM_STORAGE_EXISTS" == "yes" ] || [ "$LOCAL_LVM_CFG_EXISTS" == "yes" ]; then
+        msg_error "local-lvm storage config exists but the expected pve/data thinpool was not detected. Manual storage review required."
+    fi
+
+    if [ "$PVE_DATA_EXISTS" == "yes" ]; then
+        msg_error "/dev/pve/data exists but local-lvm is not registered as the expected installer layout. Manual storage review required."
+    fi
+}
+
+function calculate_storage_plan() {
+    ROOT_GROWTH_GB="0"
+    LOCAL_LVM_DEFAULT_SIZE_GB="0"
+
+    if [ "$TARGET_ROOT_SIZE_GB" -gt "$CURRENT_ROOT_SIZE_GB" ]; then
+        ROOT_GROWTH_GB="$(( TARGET_ROOT_SIZE_GB - CURRENT_ROOT_SIZE_GB ))"
+    fi
+
+    LOCAL_LVM_DEFAULT_SIZE_GB="$(( CURRENT_PVE_FREE_GB - ROOT_GROWTH_GB - PVE_FREE_RESERVE_GB ))"
+    if [ "$LOCAL_LVM_DEFAULT_SIZE_GB" -lt 0 ]; then
+        LOCAL_LVM_DEFAULT_SIZE_GB="0"
+    fi
+}
+
+function validate_storage_builder_plan() {
+    local total_required="0"
+
+    if [ "$PVE_FREE_RESERVE_GB" -lt 0 ]; then
+        msg_error "Requested pve VG reserve cannot be negative."
+    fi
+
+    if [ "$CREATE_LOCAL_LVM" == "y" ] && [ "$LOCAL_LVM_SIZE_GB" -le 0 ]; then
+        msg_error "local-lvm size must be greater than zero when local-lvm creation is selected."
+    fi
+
+    total_required="$(( ROOT_GROWTH_GB + PVE_FREE_RESERVE_GB ))"
+    if [ "$CREATE_LOCAL_LVM" == "y" ]; then
+        total_required="$(( total_required + LOCAL_LVM_SIZE_GB ))"
+    fi
+
+    if [ "$total_required" -gt "$CURRENT_PVE_FREE_GB" ]; then
+        msg_error "Storage plan needs ${total_required}GB but only ${CURRENT_PVE_FREE_GB}GB pve VG free space is available."
+    fi
+}
+
+function show_storage_plan() {
+    echo ""
+    echo -e "${BL}Storage plan:${CL}"
+    detail_line "storage mode" "$STORAGE_LAYOUT_MODE"
+
+    case "$STORAGE_LAYOUT_MODE" in
+        preserve_local_lvm)
+            detail_line "local-lvm detected" "yes"
+            detail_line "root/local expansion" "skipped"
+            detail_line "local-lvm creation" "skipped"
+            ;;
+        build_local_lvm)
+            detail_line "current root/local" "${CURRENT_ROOT_SIZE_GB}GB"
+            detail_line "target root/local" "${TARGET_ROOT_SIZE_GB}GB"
+            detail_line "root growth needed" "${ROOT_GROWTH_GB}GB"
+            detail_line "current pve free" "${CURRENT_PVE_FREE_GB}GB"
+            detail_line "reserve free VG space" "${PVE_FREE_RESERVE_GB}GB"
+            detail_line "create local-lvm" "yes"
+            detail_line "local-lvm size" "${LOCAL_LVM_SIZE_GB}GB"
+            ;;
+        extend_root_only)
+            detail_line "current root/local" "${CURRENT_ROOT_SIZE_GB}GB"
+            detail_line "target root/local" "${TARGET_ROOT_SIZE_GB}GB"
+            detail_line "root growth needed" "${ROOT_GROWTH_GB}GB"
+            detail_line "create local-lvm" "no"
+            detail_line "reserve free VG space" "${PVE_FREE_RESERVE_GB}GB"
+            ;;
+        skip_root_expansion)
+            detail_line "root/local expansion" "skipped"
+            detail_line "local-lvm creation" "skipped"
+            ;;
+    esac
+}
+
 # --- STORAGE LAYOUT OPTION COLLECTOR ---
-# Preserves installer-created local-lvm when present. Root expansion is opt-in and defaults to no.
+# Preserves installer-created local-lvm or builds the requested root/local + local-lvm layout from free pve VG space.
 function collect_storage_layout_option() {
-    local expand_root_yn=""
+    local create_lvm_yn=""
+    local default_target="100"
 
     section "STORAGE LAYOUT OPTION"
 
     detect_storage_layout_options
 
-    detail_line "Root disk size" "${ROOT_DISK_SIZE_GB}GB"
-    detail_line "installer local-lvm layout detected" "$LOCAL_LVM_EXISTS"
+    detail_line "Current root/local size" "${CURRENT_ROOT_SIZE_GB}GB"
+    detail_line "Current pve VG free" "${CURRENT_PVE_FREE_GB}GB"
+    detail_line "local-lvm detected" "$LOCAL_LVM_EXISTS"
 
     if [ "$LOCAL_LVM_EXISTS" == "yes" ]; then
         STORAGE_LAYOUT_MODE="preserve_local_lvm"
         msg_ok "Detected installer-created local-lvm storage"
         echo -e "${YW}Preserving Proxmox installer disk layout.${CL}"
         echo -e "${YW}Root/local will not be expanded to 100%FREE.${CL}"
-        detail_line "Storage layout mode" "$STORAGE_LAYOUT_MODE"
+        show_storage_plan
+        return 0
+    fi
+
+    validate_storage_conflict_state
+
+    if [ "$CURRENT_PVE_FREE_GB" -le 0 ]; then
+        STORAGE_LAYOUT_MODE="skip_root_expansion"
+        msg_warn "No free pve VG space detected. Root/local expansion and local-lvm creation will be skipped."
+        show_storage_plan
         return 0
     fi
 
     echo ""
     echo -e "${YW}No installer-created local-lvm storage was detected.${CL}"
-    echo ""
-    echo -e "${YW}Expanding root/local to use all remaining pve VG space will consume free space and prevent using it for local-lvm later.${CL}"
+    echo -e "${YW}Script 1 can build root/local target sizing and snapshot-ready local-lvm from free pve VG space.${CL}"
     echo ""
 
-    expand_root_yn="$(timed_yes_no "Expand Proxmox root/local to 100%FREE?" "n")"
+    if [ "$CURRENT_ROOT_SIZE_GB" -gt "$default_target" ]; then
+        default_target="$CURRENT_ROOT_SIZE_GB"
+    fi
 
-    if [[ "$expand_root_yn" =~ ^[Yy] ]]; then
-        STORAGE_LAYOUT_MODE="merge_all"
+    TARGET_ROOT_SIZE_GB="$(read_storage_gb_input "Set Proxmox root/local target size in GB" "$default_target" "no")"
+    PVE_FREE_RESERVE_GB="$(read_storage_gb_input "Reserve free pve VG space in GB" "1" "yes")"
+
+    calculate_storage_plan
+
+    create_lvm_yn="$(timed_yes_no "Create snapshot-ready local-lvm from remaining free space?" "y")"
+    if [[ "$create_lvm_yn" =~ ^[Nn] ]]; then
+        CREATE_LOCAL_LVM="n"
+        LOCAL_LVM_SIZE_GB="0"
+    else
+        CREATE_LOCAL_LVM="y"
+        if [ "$LOCAL_LVM_DEFAULT_SIZE_GB" -le 0 ]; then
+            msg_error "No pve VG space remains for local-lvm after root target growth and reserve. Reduce target root size or reserve, or choose not to create local-lvm."
+        fi
+        LOCAL_LVM_SIZE_GB="$(read_storage_gb_input "Allocate local-lvm size in GB [all available: ${LOCAL_LVM_DEFAULT_SIZE_GB}GB]" "$LOCAL_LVM_DEFAULT_SIZE_GB" "no")"
+    fi
+
+    validate_storage_builder_plan
+
+    if [ "$CREATE_LOCAL_LVM" == "y" ]; then
+        STORAGE_LAYOUT_MODE="build_local_lvm"
+    elif [ "$ROOT_GROWTH_GB" -gt 0 ]; then
+        STORAGE_LAYOUT_MODE="extend_root_only"
     else
         STORAGE_LAYOUT_MODE="skip_root_expansion"
     fi
 
-    detail_line "Storage layout mode" "$STORAGE_LAYOUT_MODE"
+    show_storage_plan
     return 0
 }
 
@@ -1186,7 +1363,42 @@ function final_start_prompt() {
     echo -e "SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
     echo -e "ROOT FS: ${GN}${ROOT_FS_TYPE:-unknown}${CL}"
     echo -e "STORAGE: ${GN}${STORAGE_SUMMARY:-unknown}${CL}"
-    echo -e "STORAGE LAYOUT: ${GN}${STORAGE_LAYOUT_MODE:-merge_all}${CL}"
+    echo ""
+    echo -e "${BL}Storage:${CL}"
+    case "${STORAGE_LAYOUT_MODE:-unselected}" in
+        preserve_local_lvm)
+            echo -e "  storage mode: ${GN}preserve_local_lvm${CL}"
+            echo -e "  local-lvm detected: ${GN}yes${CL}"
+            echo -e "  root/local expansion: ${GN}skipped${CL}"
+            echo -e "  local-lvm creation: ${GN}skipped${CL}"
+            ;;
+        build_local_lvm)
+            echo -e "  current root/local: ${GN}${CURRENT_ROOT_SIZE_GB}GB${CL}"
+            echo -e "  target root/local: ${GN}${TARGET_ROOT_SIZE_GB}GB${CL}"
+            echo -e "  root growth needed: ${GN}${ROOT_GROWTH_GB}GB${CL}"
+            echo -e "  current pve free: ${GN}${CURRENT_PVE_FREE_GB}GB${CL}"
+            echo -e "  reserve free VG space: ${GN}${PVE_FREE_RESERVE_GB}GB${CL}"
+            echo -e "  create local-lvm: ${GN}yes${CL}"
+            echo -e "  local-lvm size: ${GN}${LOCAL_LVM_SIZE_GB}GB${CL}"
+            echo -e "  storage mode: ${GN}build_local_lvm${CL}"
+            ;;
+        extend_root_only)
+            echo -e "  storage mode: ${GN}extend_root_only${CL}"
+            echo -e "  current root/local: ${GN}${CURRENT_ROOT_SIZE_GB}GB${CL}"
+            echo -e "  target root/local: ${GN}${TARGET_ROOT_SIZE_GB}GB${CL}"
+            echo -e "  root growth needed: ${GN}${ROOT_GROWTH_GB}GB${CL}"
+            echo -e "  create local-lvm: ${GN}no${CL}"
+            ;;
+        skip_root_expansion)
+            echo -e "  storage mode: ${GN}skip_root_expansion${CL}"
+            echo -e "  root/local expansion: ${GN}skipped${CL}"
+            echo -e "  local-lvm creation: ${GN}skipped${CL}"
+            ;;
+        *)
+            echo -e "  storage mode: ${GN}${STORAGE_LAYOUT_MODE:-unselected}${CL}"
+            ;;
+    esac
+    echo ""
     echo -e "DEFAULT IFACE: ${GN}${DEFAULT_IFACE:-unknown}${CL}"
     echo -e "LAN CIDR ALLOWED FOR SSH/WEBUI: ${GN}${LAN_CIDR:-not-detected}${CL}"
     echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_PASSTHROUGH}${CL}"
@@ -1213,11 +1425,60 @@ function final_start_prompt() {
 # =========================================================
 
 # --- 37. STORAGE LAYOUT APPLY ---
-# Preserves installer-created local-lvm by default and only runs legacy root expansion when explicitly approved.
-# Supports ext filesystems through resize2fs and XFS through xfs_growfs on the legacy expansion path.
-function apply_storage_merge() {
-    local pve_free_extents=""
+# Applies the selected storage plan without destructive local-lvm removal.
+# Root/local is only extended to an explicit target size; +100%FREE is never used.
+function resize_root_filesystem() {
+    ROOT_FS_TYPE="$(findmnt -n -o FSTYPE / 2>/dev/null || true)"
 
+    case "$ROOT_FS_TYPE" in
+        ext2|ext3|ext4)
+            msg_info "Resizing root ext filesystem"
+            run_cmd "resizing ext root filesystem" resize2fs /dev/mapper/pve-root
+            msg_ok "Root filesystem resized"
+            ;;
+        xfs)
+            if command -v xfs_growfs >/dev/null 2>&1; then
+                msg_info "Resizing root XFS filesystem"
+                run_cmd "resizing XFS root filesystem" xfs_growfs /
+                msg_ok "Root XFS filesystem resized"
+            else
+                msg_warn "Root filesystem is XFS but xfs_growfs is unavailable; filesystem resize skipped"
+            fi
+            ;;
+        *)
+            msg_warn "Unknown root filesystem type (${ROOT_FS_TYPE:-unknown}); filesystem resize skipped"
+            ;;
+    esac
+}
+
+function apply_root_target_growth() {
+    if [ "${ROOT_GROWTH_GB:-0}" -le 0 ]; then
+        msg_ok "Root/local already at or above target size"
+        return 0
+    fi
+
+    msg_info "Extending root/local to ${TARGET_ROOT_SIZE_GB}GB"
+    run_cmd "extending root/local to ${TARGET_ROOT_SIZE_GB}GB" lvextend -L "${TARGET_ROOT_SIZE_GB}G" /dev/pve/root
+    msg_ok "Root/local extended to target size"
+
+    resize_root_filesystem
+}
+
+function create_local_lvm_thinpool() {
+    if storage_id_in_pvesm_status "local-lvm" || storage_cfg_has_local_lvm || pve_data_lv_exists; then
+        msg_error "local-lvm or /dev/pve/data already exists. Refusing to create or reuse storage automatically."
+    fi
+
+    msg_info "Creating local-lvm thinpool"
+    run_cmd "creating local-lvm thinpool" lvcreate --type thin-pool -L "${LOCAL_LVM_SIZE_GB}G" -n data pve
+    msg_ok "local-lvm thinpool created"
+
+    msg_info "Registering local-lvm in Proxmox"
+    run_cmd "registering local-lvm storage" pvesm add lvmthin local-lvm --vgname pve --thinpool data --content images,rootdir
+    msg_ok "local-lvm registered in Proxmox"
+}
+
+function apply_storage_merge() {
     section "STORAGE LAYOUT APPLY"
 
     case "${STORAGE_LAYOUT_MODE:-unselected}" in
@@ -1227,77 +1488,35 @@ function apply_storage_merge() {
             echo -e "${YW}Root/local expansion skipped to preserve Proxmox installer disk layout.${CL}"
             return 0
             ;;
+        build_local_lvm)
+            apply_root_target_growth
+            create_local_lvm_thinpool
+            msg_ok "Requested free VG reserve preserved"
+            ;;
+        extend_root_only)
+            apply_root_target_growth
+            msg_ok "local-lvm creation skipped by user choice"
+            msg_ok "Requested free VG reserve preserved"
+            ;;
         skip_root_expansion)
-            msg_ok "Root/local expansion skipped by user"
+            msg_ok "Root/local expansion skipped"
+            msg_ok "local-lvm creation skipped"
             return 0
             ;;
         merge_all)
-            msg_warn "LEGACY STORAGE MERGE APPROVED BY USER"
+            msg_error "Legacy destructive merge_all mode is disabled in normal Script 1 flow. Refusing storage changes."
             ;;
         *)
             msg_error "Storage layout mode was not selected. Refusing storage changes."
             ;;
     esac
 
-    msg_info "Checking Proxmox local-lvm storage configuration"
-    if grep -q "^lvmthin: local-lvm" /etc/pve/storage.cfg 2>/dev/null; then
-        run_optional pvesm remove local-lvm
-        msg_ok "LOCAL-LVM REMOVED FROM PROXMOX STORAGE CONFIG"
-    else
-        msg_ok "LOCAL-LVM STORAGE CONFIG NOT PRESENT"
-    fi
-
-    msg_info "Checking whether local-lvm thin data volume exists"
-    if lvdisplay /dev/pve/data >/dev/null 2>&1; then
-        run_cmd "removing local-lvm thin data volume" lvremove -fy /dev/pve/data
-        msg_ok "LOCAL-LVM THIN DATA VOLUME REMOVED"
-    else
-        msg_ok "LOCAL-LVM THIN DATA VOLUME NOT PRESENT"
-    fi
-
-    msg_info "Checking free space in pve volume group"
-    pve_free_extents="$(vgs --noheadings -o vg_free_count pve 2>/dev/null | awk '{print $1}' || echo 0)"
-
-    if [[ "$pve_free_extents" =~ ^[0-9]+$ ]] && [ "$pve_free_extents" -gt 0 ]; then
-        msg_ok "FREE PVE VOLUME GROUP SPACE DETECTED"
-
-        msg_info "Expanding root logical volume with all free pve space"
-        run_cmd "expanding root logical volume" lvresize -l +100%FREE /dev/pve/root
-        msg_ok "ROOT LOGICAL VOLUME EXPANDED WITH FREE SPACE"
-
-        ROOT_FS_TYPE="$(findmnt -n -o FSTYPE / 2>/dev/null || true)"
-
-        case "$ROOT_FS_TYPE" in
-            ext2|ext3|ext4)
-                msg_info "Resizing root ext filesystem"
-                run_cmd "resizing ext root filesystem" resize2fs /dev/mapper/pve-root
-                msg_ok "ROOT EXT FILESYSTEM RESIZED"
-                ;;
-            xfs)
-                if command -v xfs_growfs >/dev/null 2>&1; then
-                    msg_info "Resizing root XFS filesystem"
-                    run_cmd "resizing XFS root filesystem" xfs_growfs /
-                    msg_ok "ROOT XFS FILESYSTEM RESIZED"
-                else
-                    msg_warn "Root filesystem is XFS but xfs_growfs is unavailable; filesystem resize skipped"
-                fi
-                ;;
-            *)
-                msg_warn "Unknown root filesystem type (${ROOT_FS_TYPE:-unknown}); filesystem resize skipped"
-                ;;
-        esac
-    else
-        msg_ok "NO FREE PVE VOLUME GROUP SPACE FOUND TO MERGE"
-    fi
-
-    msg_info "Verifying local storage path after merge"
+    msg_info "Verifying local storage path"
     if df -h /var/lib/vz &>/dev/null; then
         msg_ok "LOCAL STORAGE PATH VERIFIED (/var/lib/vz)"
     else
         msg_warn "Local storage path /var/lib/vz could not be verified"
     fi
-
-    msg_ok "LOCAL-LVM STORAGE SUCCESSFULLY MERGED TO OS"
 }
 
 # --- 38. DNS REDUNDANCY ---
@@ -1943,6 +2162,11 @@ INSTALL_REALTEK_IFACE="$REALTEK_IFACE"
 INSTALL_REALTEK_OPTIMIZED="$REALTEK_OPTIMIZED"
 INSTALL_NUMLOCK_CONFIGURED="$NUMLOCK_CONFIGURED"
 INSTALL_STORAGE_LAYOUT_MODE="$STORAGE_LAYOUT_MODE"
+INSTALL_CURRENT_ROOT_SIZE_GB="$CURRENT_ROOT_SIZE_GB"
+INSTALL_TARGET_ROOT_SIZE_GB="$TARGET_ROOT_SIZE_GB"
+INSTALL_ROOT_GROWTH_GB="$ROOT_GROWTH_GB"
+INSTALL_CREATE_LOCAL_LVM="$CREATE_LOCAL_LVM"
+INSTALL_LOCAL_LVM_SIZE_GB="$LOCAL_LVM_SIZE_GB"
 INSTALL_DEFAULT_IFACE="$DEFAULT_IFACE"
 INSTALL_LAN_CIDR="$LAN_CIDR"
 INSTALL_SSH_ROOT_KEY_FILE="$SSH_ROOT_KEY_FILE"
@@ -2012,12 +2236,19 @@ case "\$INSTALL_STORAGE_LAYOUT_MODE" in
         if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then PASS "local-lvm preserved in Proxmox storage config"; else FAIL "local-lvm missing from Proxmox storage config"; fi
         if lvdisplay /dev/pve/data >/dev/null 2>&1; then PASS "/dev/pve/data preserved for local-lvm"; else FAIL "/dev/pve/data missing after preserve mode"; fi
         ;;
-    merge_all)
-        if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then WARN "local-lvm still exists in storage.cfg"; else PASS "local-lvm removed from Proxmox storage config"; fi
-        if lvdisplay /dev/pve/data >/dev/null 2>&1; then WARN "/dev/pve/data still exists"; else PASS "/dev/pve/data not present"; fi
+    build_local_lvm)
+        if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then PASS "local-lvm present in Proxmox storage config"; else FAIL "local-lvm missing from Proxmox storage config"; fi
+        if pvesm status 2>/dev/null | awk 'NR>1 && \$1 == "local-lvm" {found=1} END {exit found ? 0 : 1}'; then PASS "pvesm lists local-lvm"; else FAIL "pvesm does not list local-lvm"; fi
+        if lvdisplay /dev/pve/data >/dev/null 2>&1; then PASS "/dev/pve/data exists for local-lvm"; else FAIL "/dev/pve/data missing after build mode"; fi
+        if lvs --noheadings -o lv_attr pve/data 2>/dev/null | awk 'NF {exit substr(\$1,1,1)=="t" ? 0 : 1}'; then PASS "pve/data is a thinpool"; else WARN "pve/data thinpool attribute not confirmed"; fi
+        INFO "Root target during install: \${INSTALL_TARGET_ROOT_SIZE_GB}GB; local-lvm size: \${INSTALL_LOCAL_LVM_SIZE_GB}GB"
+        ;;
+    extend_root_only)
+        INFO "Root/local extension selected without local-lvm creation"
+        INFO "Root target during install: \${INSTALL_TARGET_ROOT_SIZE_GB}GB; root growth requested: \${INSTALL_ROOT_GROWTH_GB}GB"
         ;;
     skip_root_expansion)
-        INFO "Root/local expansion was skipped by user; local-lvm state was not changed by Script 1"
+        INFO "Root/local expansion skipped; local-lvm creation skipped; storage state intentionally unchanged by Script 1"
         ;;
     *)
         WARN "Unknown storage layout mode: \$INSTALL_STORAGE_LAYOUT_MODE"
@@ -2250,6 +2481,12 @@ Effective KbdInteractiveAuthentication: ${SSH_EFFECTIVE_KBD_AUTH:-unknown}
 Proxmox Firewall: $PVE_FIREWALL_APPLIED
 Realtek Optimized: $REALTEK_OPTIMIZED
 NumLock: $NUMLOCK_CONFIGURED
+Storage Layout Mode: $STORAGE_LAYOUT_MODE
+Current Root Size GB: $CURRENT_ROOT_SIZE_GB
+Target Root Size GB: $TARGET_ROOT_SIZE_GB
+Root Growth GB: $ROOT_GROWTH_GB
+Create Local LVM: $CREATE_LOCAL_LVM
+Local LVM Size GB: $LOCAL_LVM_SIZE_GB
 EOF
 
     msg_ok "PVE9 POST-INSTALL COMPLETION MARKER WRITTEN"
