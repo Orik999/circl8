@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.0"
+SCRIPT_VERSION="v1.3.1"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-storage-layout-builder"
+SCRIPT_BUILD="script1-network-ssh-size-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -75,6 +75,7 @@ ALLOW_PUBLIC_WEB="n"
 
 SSH_HARDENING_APPLIED="no"
 SSH_ROOT_KEY_FILE=""
+SSH_ROOT_KEY_COUNT="0"
 SSH_EFFECTIVE_AUTHORIZED_KEYS=""
 SSH_EFFECTIVE_PERMIT_ROOT=""
 SSH_EFFECTIVE_PASSWORD_AUTH=""
@@ -91,14 +92,23 @@ LOCAL_LVM_STORAGE_EXISTS="no"
 LOCAL_LVM_CFG_EXISTS="no"
 PVE_DATA_EXISTS="no"
 PVE_DATA_IS_THINPOOL="no"
+DECIMAL_GB_BYTES=1000000000
+MIB_BYTES=1048576
 CURRENT_ROOT_SIZE_GB="0"
+CURRENT_ROOT_SIZE_MIB="0"
 CURRENT_PVE_FREE_GB="0"
+CURRENT_PVE_FREE_MIB="0"
 TARGET_ROOT_SIZE_GB="100"
+TARGET_ROOT_SIZE_MIB="0"
 ROOT_GROWTH_GB="0"
+ROOT_GROWTH_MIB="0"
 PVE_FREE_RESERVE_GB="1"
+PVE_FREE_RESERVE_MIB="0"
 CREATE_LOCAL_LVM="y"
 LOCAL_LVM_SIZE_GB="0"
+LOCAL_LVM_SIZE_MIB="0"
 LOCAL_LVM_DEFAULT_SIZE_GB="0"
+LOCAL_LVM_DEFAULT_SIZE_MIB="0"
 
 TEMP_FILES=()
 
@@ -682,6 +692,51 @@ function build_storage_summary() {
     echo "$out" | xargs
 }
 
+
+# --- LAN CIDR HELPER ---
+# Converts a host IPv4/prefix such as 192.168.1.11/24 into the real network CIDR 192.168.1.0/24.
+function calculate_ipv4_network_cidr() {
+    local host_cidr="$1"
+    local ip=""
+    local prefix=""
+    local o1=""
+    local o2=""
+    local o3=""
+    local o4=""
+    local ip_int=""
+    local mask=""
+    local network=""
+
+    ip="${host_cidr%/*}"
+    prefix="${host_cidr#*/}"
+
+    IFS='.' read -r o1 o2 o3 o4 <<< "$ip"
+
+    if ! [[ "$o1" =~ ^[0-9]+$ && "$o2" =~ ^[0-9]+$ && "$o3" =~ ^[0-9]+$ && "$o4" =~ ^[0-9]+$ && "$prefix" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+
+    if [ "$o1" -gt 255 ] || [ "$o2" -gt 255 ] || [ "$o3" -gt 255 ] || [ "$o4" -gt 255 ] || [ "$prefix" -lt 0 ] || [ "$prefix" -gt 32 ]; then
+        return 1
+    fi
+
+    ip_int=$(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 ))
+
+    if [ "$prefix" -eq 0 ]; then
+        mask=0
+    else
+        mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+    fi
+
+    network=$(( ip_int & mask ))
+    printf '%d.%d.%d.%d/%d\n' \
+        $(( (network >> 24) & 255 )) \
+        $(( (network >> 16) & 255 )) \
+        $(( (network >> 8) & 255 )) \
+        $(( network & 255 )) \
+        "$prefix"
+}
+
 # --- 25. MACHINE/GPU LABEL HELPER ---
 # Builds adaptive system-aware GPU detection labels.
 function detected_machine_gpu_label() {
@@ -772,6 +827,7 @@ function validate_dependencies() {
         lvs
         mkdir
         pct
+        pve-firewall
         pvesm
         pvs
         qm
@@ -853,6 +909,8 @@ function show_fresh_install_warning() {
 # --- 31. PRE-INSTALL HARDWARE AUDIT ---
 # Detects CPU vendor, chassis/system type, virtual machine state, SSD presence, LAN CIDR and storage summary.
 function audit_hardware() {
+    local local_host_cidr=""
+
     section "PRE-INSTALL HARDWARE AUDIT"
 
     msg_info "Auditing host hardware"
@@ -888,7 +946,10 @@ function audit_hardware() {
     DEFAULT_IFACE="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}' || true)"
 
     if [ -n "$DEFAULT_IFACE" ]; then
-        LAN_CIDR="$(ip -o -4 addr show dev "$DEFAULT_IFACE" | awk '{print $4; exit}' || true)"
+        local_host_cidr="$(ip -o -4 addr show dev "$DEFAULT_IFACE" | awk '{print $4; exit}' || true)"
+        if [ -n "$local_host_cidr" ]; then
+            LAN_CIDR="$(calculate_ipv4_network_cidr "$local_host_cidr" || true)"
+        fi
     fi
 
     STORAGE_SUMMARY="$(build_storage_summary)"
@@ -1073,26 +1134,55 @@ function detect_installer_local_lvm_layout() {
     return 1
 }
 
-function get_lvm_size_gb_ceil() {
+function get_lvm_size_bytes() {
     local lv_path="$1"
     local raw=""
 
-    raw="$(lvs --noheadings --units g --nosuffix -o lv_size "$lv_path" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
-    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        awk -v value="$raw" 'BEGIN { rounded=int(value); if (value > rounded) rounded++; print rounded }'
+    raw="$(lvs --noheadings --units b --nosuffix -o lv_size "$lv_path" 2>/dev/null | awk 'NF { gsub(/[^0-9]/, "", $1); print $1; exit }' || true)"
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        echo "$raw"
     else
         echo "0"
     fi
 }
 
-function get_pve_free_gb_floor() {
+function get_pve_free_bytes() {
     local raw=""
 
-    raw="$(vgs --noheadings --units g --nosuffix -o vg_free pve 2>/dev/null | awk 'NF {print $1; exit}' || true)"
-    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        awk -v value="$raw" 'BEGIN { print int(value) }'
+    raw="$(vgs --noheadings --units b --nosuffix -o vg_free pve 2>/dev/null | awk 'NF { gsub(/[^0-9]/, "", $1); print $1; exit }' || true)"
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        echo "$raw"
     else
         echo "0"
+    fi
+}
+
+function decimal_gb_to_mib_floor() {
+    local gb="$1"
+    echo $(( (gb * DECIMAL_GB_BYTES) / MIB_BYTES ))
+}
+
+function mib_to_decimal_gb_floor() {
+    local mib="$1"
+    echo $(( (mib * MIB_BYTES) / DECIMAL_GB_BYTES ))
+}
+
+function bytes_to_mib_floor() {
+    local bytes="$1"
+    echo $(( bytes / MIB_BYTES ))
+}
+
+function bytes_to_decimal_gb_floor() {
+    local bytes="$1"
+    echo $(( bytes / DECIMAL_GB_BYTES ))
+}
+
+function bytes_to_decimal_gb_ceil() {
+    local bytes="$1"
+    if [ "$bytes" -le 0 ]; then
+        echo "0"
+    else
+        echo $(( (bytes + DECIMAL_GB_BYTES - 1) / DECIMAL_GB_BYTES ))
     fi
 }
 
@@ -1134,7 +1224,9 @@ function detect_storage_layout_options() {
     PVE_DATA_IS_THINPOOL="no"
     ROOT_DISK_SIZE_GB="0"
     CURRENT_ROOT_SIZE_GB="0"
+    CURRENT_ROOT_SIZE_MIB="0"
     CURRENT_PVE_FREE_GB="0"
+    CURRENT_PVE_FREE_MIB="0"
 
     if storage_id_in_pvesm_status "local-lvm"; then
         LOCAL_LVM_STORAGE_EXISTS="yes"
@@ -1156,8 +1248,16 @@ function detect_storage_layout_options() {
         LOCAL_LVM_EXISTS="yes"
     fi
 
-    CURRENT_ROOT_SIZE_GB="$(get_lvm_size_gb_ceil /dev/pve/root)"
-    CURRENT_PVE_FREE_GB="$(get_pve_free_gb_floor)"
+    local root_size_bytes=""
+    local pve_free_bytes=""
+
+    root_size_bytes="$(get_lvm_size_bytes /dev/pve/root)"
+    pve_free_bytes="$(get_pve_free_bytes)"
+
+    CURRENT_ROOT_SIZE_MIB="$(bytes_to_mib_floor "$root_size_bytes")"
+    CURRENT_ROOT_SIZE_GB="$(bytes_to_decimal_gb_ceil "$root_size_bytes")"
+    CURRENT_PVE_FREE_MIB="$(bytes_to_mib_floor "$pve_free_bytes")"
+    CURRENT_PVE_FREE_GB="$(bytes_to_decimal_gb_floor "$pve_free_bytes")"
     ROOT_DISK_SIZE_GB="$CURRENT_ROOT_SIZE_GB"
 
     return 0
@@ -1178,37 +1278,46 @@ function validate_storage_conflict_state() {
 }
 
 function calculate_storage_plan() {
+    TARGET_ROOT_SIZE_MIB="$(decimal_gb_to_mib_floor "$TARGET_ROOT_SIZE_GB")"
+    PVE_FREE_RESERVE_MIB="$(decimal_gb_to_mib_floor "$PVE_FREE_RESERVE_GB")"
+    ROOT_GROWTH_MIB="0"
     ROOT_GROWTH_GB="0"
+    LOCAL_LVM_DEFAULT_SIZE_MIB="0"
     LOCAL_LVM_DEFAULT_SIZE_GB="0"
 
-    if [ "$TARGET_ROOT_SIZE_GB" -gt "$CURRENT_ROOT_SIZE_GB" ]; then
-        ROOT_GROWTH_GB="$(( TARGET_ROOT_SIZE_GB - CURRENT_ROOT_SIZE_GB ))"
+    if [ "$TARGET_ROOT_SIZE_MIB" -gt "$CURRENT_ROOT_SIZE_MIB" ]; then
+        ROOT_GROWTH_MIB="$(( TARGET_ROOT_SIZE_MIB - CURRENT_ROOT_SIZE_MIB ))"
+        ROOT_GROWTH_GB="$(mib_to_decimal_gb_floor "$ROOT_GROWTH_MIB")"
     fi
 
-    LOCAL_LVM_DEFAULT_SIZE_GB="$(( CURRENT_PVE_FREE_GB - ROOT_GROWTH_GB - PVE_FREE_RESERVE_GB ))"
-    if [ "$LOCAL_LVM_DEFAULT_SIZE_GB" -lt 0 ]; then
-        LOCAL_LVM_DEFAULT_SIZE_GB="0"
+    LOCAL_LVM_DEFAULT_SIZE_MIB="$(( CURRENT_PVE_FREE_MIB - ROOT_GROWTH_MIB - PVE_FREE_RESERVE_MIB ))"
+    if [ "$LOCAL_LVM_DEFAULT_SIZE_MIB" -lt 0 ]; then
+        LOCAL_LVM_DEFAULT_SIZE_MIB="0"
     fi
+    LOCAL_LVM_DEFAULT_SIZE_GB="$(mib_to_decimal_gb_floor "$LOCAL_LVM_DEFAULT_SIZE_MIB")"
 }
 
 function validate_storage_builder_plan() {
-    local total_required="0"
+    local total_required_mib="0"
+    local total_required_gb="0"
 
     if [ "$PVE_FREE_RESERVE_GB" -lt 0 ]; then
         msg_error "Requested pve VG reserve cannot be negative."
     fi
 
-    if [ "$CREATE_LOCAL_LVM" == "y" ] && [ "$LOCAL_LVM_SIZE_GB" -le 0 ]; then
-        msg_error "local-lvm size must be greater than zero when local-lvm creation is selected."
-    fi
-
-    total_required="$(( ROOT_GROWTH_GB + PVE_FREE_RESERVE_GB ))"
+    LOCAL_LVM_SIZE_MIB="0"
     if [ "$CREATE_LOCAL_LVM" == "y" ]; then
-        total_required="$(( total_required + LOCAL_LVM_SIZE_GB ))"
+        if [ "$LOCAL_LVM_SIZE_GB" -le 0 ]; then
+            msg_error "local-lvm size must be greater than zero when local-lvm creation is selected."
+        fi
+        LOCAL_LVM_SIZE_MIB="$(decimal_gb_to_mib_floor "$LOCAL_LVM_SIZE_GB")"
     fi
 
-    if [ "$total_required" -gt "$CURRENT_PVE_FREE_GB" ]; then
-        msg_error "Storage plan needs ${total_required}GB but only ${CURRENT_PVE_FREE_GB}GB pve VG free space is available."
+    total_required_mib="$(( ROOT_GROWTH_MIB + PVE_FREE_RESERVE_MIB + LOCAL_LVM_SIZE_MIB ))"
+    total_required_gb="$(mib_to_decimal_gb_floor "$total_required_mib")"
+
+    if [ "$total_required_mib" -gt "$CURRENT_PVE_FREE_MIB" ]; then
+        msg_error "Storage plan needs about ${total_required_gb}GB decimal but only ${CURRENT_PVE_FREE_GB}GB decimal pve VG free space is available."
     fi
 }
 
@@ -1457,8 +1566,8 @@ function apply_root_target_growth() {
         return 0
     fi
 
-    msg_info "Extending root/local to ${TARGET_ROOT_SIZE_GB}GB"
-    run_cmd "extending root/local to ${TARGET_ROOT_SIZE_GB}GB" lvextend -L "${TARGET_ROOT_SIZE_GB}G" /dev/pve/root
+    msg_info "Extending root/local to ${TARGET_ROOT_SIZE_GB}GB decimal"
+    run_cmd "extending root/local to ${TARGET_ROOT_SIZE_GB}GB decimal" lvextend -L "${TARGET_ROOT_SIZE_MIB}M" /dev/pve/root
     msg_ok "Root/local extended to target size"
 
     resize_root_filesystem
@@ -1469,8 +1578,8 @@ function create_local_lvm_thinpool() {
         msg_error "local-lvm or /dev/pve/data already exists. Refusing to create or reuse storage automatically."
     fi
 
-    msg_info "Creating local-lvm thinpool"
-    run_cmd "creating local-lvm thinpool" lvcreate --type thin-pool -L "${LOCAL_LVM_SIZE_GB}G" -n data pve
+    msg_info "Creating local-lvm thinpool (${LOCAL_LVM_SIZE_GB}GB decimal)"
+    run_cmd "creating local-lvm thinpool" lvcreate --type thin-pool -L "${LOCAL_LVM_SIZE_MIB}M" -n data pve
     msg_ok "local-lvm thinpool created"
 
     msg_info "Registering local-lvm in Proxmox"
@@ -1733,6 +1842,26 @@ EOF
     msg_ok "GPU ISOLATED"
 }
 
+
+function resolve_authorized_keys_path() {
+    local pattern="$1"
+
+    case "$pattern" in
+        /*) echo "$pattern" ;;
+        *) echo "/root/${pattern}" ;;
+    esac
+}
+
+function count_authorized_key_lines() {
+    local file="$1"
+
+    if [ -s "$file" ]; then
+        grep -Ev '^[[:space:]]*(#|$)' "$file" 2>/dev/null | wc -l | xargs || echo "0"
+    else
+        echo "0"
+    fi
+}
+
 # --- 44. SSH SECURITY ---
 # Performs a non-invasive SSH safety audit only.
 #
@@ -1760,6 +1889,11 @@ function apply_ssh_security() {
     local effective_password_auth=""
     local effective_pubkey_auth=""
     local effective_kbd_auth=""
+    local key_pattern=""
+    local key_file=""
+    local key_count="0"
+    local total_key_count="0"
+    local first_key_file=""
 
     section "SSH SECURITY"
 
@@ -1774,17 +1908,45 @@ function apply_ssh_security() {
     effective_pubkey_auth="$(awk '$1=="pubkeyauthentication" {print $2; exit}' <<< "$effective_config")"
     effective_kbd_auth="$(awk '$1=="kbdinteractiveauthentication" {print $2; exit}' <<< "$effective_config")"
 
-    SSH_ROOT_KEY_FILE="not-modified"
-    SSH_EFFECTIVE_AUTHORIZED_KEYS="${effective_authorized_keys:-unknown}"
+    SSH_EFFECTIVE_AUTHORIZED_KEYS="${effective_authorized_keys:-.ssh/authorized_keys .ssh/authorized_keys2}"
     SSH_EFFECTIVE_PERMIT_ROOT="${effective_permit_root:-unknown}"
     SSH_EFFECTIVE_PASSWORD_AUTH="${effective_password_auth:-unknown}"
     SSH_EFFECTIVE_PUBKEY_AUTH="${effective_pubkey_auth:-unknown}"
     SSH_EFFECTIVE_KBD_AUTH="${effective_kbd_auth:-unknown}"
+
+    echo ""
+    echo -e "${BL}Root SSH key check:${CL}"
+    for key_pattern in $SSH_EFFECTIVE_AUTHORIZED_KEYS; do
+        key_file="$(resolve_authorized_keys_path "$key_pattern")"
+        key_count="$(count_authorized_key_lines "$key_file")"
+        if [ "$key_count" -gt 0 ]; then
+            echo -e "  ${GN}${key_file}: present (${key_count} key line(s))${CL}"
+            total_key_count="$(( total_key_count + key_count ))"
+            [ -z "$first_key_file" ] && first_key_file="$key_file"
+        else
+            echo -e "  ${YW}${key_file}: missing/empty${CL}"
+        fi
+    done
+    echo -e "  ${BL}key lines detected:${CL} ${GN}${total_key_count}${CL}"
+
+    SSH_ROOT_KEY_COUNT="$total_key_count"
+    if [ "$total_key_count" -gt 0 ]; then
+        SSH_ROOT_KEY_FILE="$first_key_file"
+    else
+        SSH_ROOT_KEY_FILE="not-detected"
+    fi
+
     SSH_HARDENING_APPLIED="audit-only"
 
     msg_ok "SSH CONFIG VALIDATED"
     echo -e "  ${DGN}ROOT SSH CONFIG LEFT UNCHANGED${CL}"
     echo -e "  ${DGN}SSH LOCKOUT RISK AVOIDED${CL}"
+
+    if [ "$total_key_count" -gt 0 ]; then
+        msg_ok "ROOT SSH KEYS DETECTED (${total_key_count} key line(s))"
+    else
+        msg_warn "No root SSH authorized keys detected; SSH policy hardening remains audit-only to avoid lockout"
+    fi
 
     if [ "${effective_pubkey_auth:-unknown}" != "yes" ]; then
         msg_warn "PubkeyAuthentication is not currently yes; root key login may depend on existing Proxmox defaults"
@@ -1895,6 +2057,8 @@ EOF
 # Enables Proxmox firewall with LAN-only SSH/WebUI access.
 # Public 80/443 is optional and disabled by default for VM-reverse-proxy architecture.
 function apply_proxmox_firewall() {
+    local firewall_status=""
+
     section "PROXMOX FIREWALL BASELINE"
 
     msg_info "Creating or verifying Proxmox node firewall directory"
@@ -1903,7 +2067,7 @@ function apply_proxmox_firewall() {
 
     if [ -z "$LAN_CIDR" ]; then
         PVE_FIREWALL_APPLIED="no"
-        msg_warn "Could not detect LAN CIDR. Proxmox firewall rules skipped to avoid lockout."
+        msg_warn "Could not calculate LAN network CIDR. Proxmox firewall rules skipped to avoid invalid config or lockout."
         return 0
     fi
 
@@ -1919,8 +2083,6 @@ function apply_proxmox_firewall() {
     cat <<EOF > "/etc/pve/nodes/${HOSTNAME_SHORT}/host.fw"
 [OPTIONS]
 enable: 1
-policy_in: DROP
-policy_out: ACCEPT
 
 [RULES]
 IN ACCEPT -source ${LAN_CIDR} -p tcp -dport 22 -log nolog
@@ -1938,9 +2100,30 @@ EOF
         msg_ok "NODE FIREWALL RULES WRITTEN WITHOUT PUBLIC 80/443"
     fi
 
+    msg_info "Validating Proxmox firewall configuration"
+    firewall_status="$(pve-firewall status 2>&1 || true)"
+    if echo "$firewall_status" | grep -qiE "can't parse|errors in rule parameters|invalid IP address|syntax error"; then
+        echo ""
+        echo -e "${RD}Proxmox firewall validation reported parser errors:${CL}"
+        echo "$firewall_status"
+        PVE_FIREWALL_APPLIED="no"
+        msg_error "Proxmox firewall config validation failed. Refusing to enable invalid firewall rules."
+    fi
+    msg_ok "PROXMOX FIREWALL CONFIG VALIDATED"
+
     msg_info "Enabling and restarting pve-firewall"
     run_optional systemctl enable --now pve-firewall
     run_optional systemctl restart pve-firewall
+
+    firewall_status="$(pve-firewall status 2>&1 || true)"
+    if echo "$firewall_status" | grep -qiE "can't parse|errors in rule parameters|invalid IP address|syntax error"; then
+        echo ""
+        echo -e "${RD}Proxmox firewall status reported parser errors after restart:${CL}"
+        echo "$firewall_status"
+        PVE_FIREWALL_APPLIED="no"
+        msg_error "Proxmox firewall did not validate after restart."
+    fi
+
     msg_ok "PVE-FIREWALL SERVICE ENABLED"
 
     PVE_FIREWALL_APPLIED="yes"
@@ -2170,6 +2353,7 @@ INSTALL_LOCAL_LVM_SIZE_GB="$LOCAL_LVM_SIZE_GB"
 INSTALL_DEFAULT_IFACE="$DEFAULT_IFACE"
 INSTALL_LAN_CIDR="$LAN_CIDR"
 INSTALL_SSH_ROOT_KEY_FILE="$SSH_ROOT_KEY_FILE"
+INSTALL_SSH_ROOT_KEY_COUNT="$SSH_ROOT_KEY_COUNT"
 INSTALL_SSH_EFFECTIVE_AUTHORIZED_KEYS="$SSH_EFFECTIVE_AUTHORIZED_KEYS"
 INSTALL_SSH_EFFECTIVE_PERMIT_ROOT="$SSH_EFFECTIVE_PERMIT_ROOT"
 INSTALL_SSH_EFFECTIVE_PASSWORD_AUTH="$SSH_EFFECTIVE_PASSWORD_AUTH"
@@ -2298,7 +2482,7 @@ else
     INFO "CPU performance governor was not selected, check skipped"
 fi
 
-# SSH hardening checks.
+# SSH audit checks.
 if [ "\$INSTALL_SSH_HARDENING_APPLIED" == "yes" ]; then
     ROOT_SSHD_EFFECTIVE="\$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
     ROOT_AUTH_KEYS="\$(echo "\$ROOT_SSHD_EFFECTIVE" | awk '\$1=="authorizedkeysfile" {for (i=2; i<=NF; i++) printf "%s ", \$i}')"
@@ -2308,14 +2492,15 @@ if [ "\$INSTALL_SSH_HARDENING_APPLIED" == "yes" ]; then
     if echo "\$ROOT_SSHD_EFFECTIVE" | grep -q "^pubkeyauthentication yes"; then PASS "Root public-key authentication enabled"; else FAIL "Root public-key authentication not enabled"; fi
     if echo "\$ROOT_SSHD_EFFECTIVE" | grep -q "^kbdinteractiveauthentication no"; then PASS "Keyboard-interactive SSH authentication disabled"; else WARN "Keyboard-interactive SSH authentication not confirmed disabled"; fi
     if [ -n "\$ROOT_AUTH_KEYS" ]; then PASS "AuthorizedKeysFile effective path present: \$ROOT_AUTH_KEYS"; else FAIL "AuthorizedKeysFile effective path missing"; fi
-
-    if [ -n "\$INSTALL_SSH_ROOT_KEY_FILE" ] && [ "\$INSTALL_SSH_ROOT_KEY_FILE" != "not-detected" ] && [ -s "\$INSTALL_SSH_ROOT_KEY_FILE" ]; then
-        PASS "Detected root SSH key file still exists"
+elif [ "\$INSTALL_SSH_HARDENING_APPLIED" == "audit-only" ]; then
+    INFO "SSH policy was intentionally left audit-only during Script 1 to avoid lockout"
+    if [ "\${INSTALL_SSH_ROOT_KEY_COUNT:-0}" -gt 0 ] && [ -n "\$INSTALL_SSH_ROOT_KEY_FILE" ] && [ "\$INSTALL_SSH_ROOT_KEY_FILE" != "not-detected" ]; then
+        PASS "Root SSH authorized keys detected during install: \${INSTALL_SSH_ROOT_KEY_COUNT} key line(s) in \$INSTALL_SSH_ROOT_KEY_FILE"
     else
-        WARN "Detected root SSH key file not found after reboot: \${INSTALL_SSH_ROOT_KEY_FILE:-unknown}"
+        WARN "No root SSH authorized keys were detected during install; SSH policy remained audit-only"
     fi
 else
-    WARN "SSH hardening was skipped because root SSH keys were missing"
+    WARN "SSH hardening status unknown: \$INSTALL_SSH_HARDENING_APPLIED"
 fi
 
 # Realtek NIC optimization checks.
@@ -2473,6 +2658,7 @@ Default Interface: ${DEFAULT_IFACE:-unknown}
 LAN CIDR Allowed For SSH/WebUI: ${LAN_CIDR:-not-detected}
 SSH Hardening: $SSH_HARDENING_APPLIED
 Root SSH Key File: ${SSH_ROOT_KEY_FILE:-not-detected}
+Root SSH Key Lines: ${SSH_ROOT_KEY_COUNT:-0}
 Effective AuthorizedKeysFile: ${SSH_EFFECTIVE_AUTHORIZED_KEYS:-unknown}
 Effective PermitRootLogin: ${SSH_EFFECTIVE_PERMIT_ROOT:-unknown}
 Effective PasswordAuthentication: ${SSH_EFFECTIVE_PASSWORD_AUTH:-unknown}
