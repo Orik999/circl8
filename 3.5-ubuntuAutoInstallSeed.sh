@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.3"
+SCRIPT_VERSION="v1.2.4"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-flow-ui-cleanup"
+SCRIPT_BUILD="script35-iso-prep-ui-cleanup"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -101,6 +101,7 @@ REUSE_EXISTING_AUTOINSTALL_ISO="no"
 GENERATED_ISO_EXISTS="no"
 TOOLS_CHECKED="no"
 MISSING_TOOL_PACKAGES=()
+ISO_PREP_GROUPED_OUTPUT="no"
 
 BOOT_PARAM='autoinstall ds=nocloud\;s=/cdrom/nocloud/ subiquity.autoinstallpath=cdrom/autoinstall.yaml'
 
@@ -749,7 +750,8 @@ wait_for_vm_poweroff() {
             return 1
         fi
 
-        tty_print "${BFR}${YW}  elapsed: ${elapsed_min}m ${elapsed_sec}s / ${timeout_minutes}m    status: ${status:-unknown}${CL}"
+        tty_println "${YW}  elapsed: ${elapsed_min}m ${elapsed_sec}s / ${timeout_minutes}m${CL}"
+        tty_println "${YW}  status:  ${status:-unknown}${CL}"
         sleep 10
     done
 }
@@ -778,9 +780,10 @@ wait_for_vm_ipv4() {
 
     start_time="$(date +%s)"
 
-    tty_println ""
-    tty_println "${YW}Waiting for VM ${vmid} to report an IPv4 address through QEMU Guest Agent...${CL}"
-    tty_println "${YW}This continues immediately when an IPv4 address appears. Timeout: ${timeout_seconds}s.${CL}"
+    echo -e "${BL}Waiting for IPv4 from QEMU Guest Agent:${CL}"
+    echo -e "  timeout: ${GN}${timeout_seconds}s${CL}"
+    echo ""
+    echo -e "${BL}Progress:${CL}"
 
     while true; do
         now_time="$(date +%s)"
@@ -800,7 +803,7 @@ wait_for_vm_ipv4() {
             return 1
         fi
 
-        tty_print "${BFR}${YW}Waiting for assigned IPv4... elapsed ${elapsed}s / ${timeout_seconds}s${CL}"
+        tty_println "${YW}  elapsed: ${elapsed}s / ${timeout_seconds}s${CL}"
         sleep "$interval_seconds"
     done
 }
@@ -1093,7 +1096,9 @@ ensure_tools() {
     local pkg=""
     local install_yn=""
 
-    section "ISO TOOL CHECK"
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "ISO TOOL CHECK"
+    fi
 
     msg_info "Checking required ISO tools"
 
@@ -1126,9 +1131,9 @@ ensure_tools() {
             INSTALLED_TOOL_PACKAGES+=("$pkg")
         done
 
-        msg_ok "MISSING ISO TOOLS INSTALLED"
+        msg_ok "Required ISO tools available."
     else
-        msg_ok "REQUIRED ISO TOOLS ALREADY INSTALLED"
+        msg_ok "Required ISO tools available."
     fi
 
     command -v xorriso >/dev/null 2>&1 || msg_error "xorriso is required."
@@ -1193,7 +1198,9 @@ precheck_generated_iso_reuse() {
 
     set_autoinstall_iso_paths
 
-    section "RERUN / GENERATED ISO PREFLIGHT"
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "RERUN / GENERATED ISO PREFLIGHT"
+    fi
 
     detail_line "Expected generated ISO" "$AUTOINSTALL_ISO_PATH"
 
@@ -1208,7 +1215,7 @@ precheck_generated_iso_reuse() {
 
         if [[ "$reuse_yn" =~ ^[Yy] ]]; then
             REUSE_EXISTING_AUTOINSTALL_ISO="yes"
-            msg_ok "EXISTING GENERATED ISO WILL BE REUSED"
+            msg_ok "Existing generated ISO check complete."
             return 0
         fi
 
@@ -1219,11 +1226,11 @@ precheck_generated_iso_reuse() {
         fi
 
         REUSE_EXISTING_AUTOINSTALL_ISO="no"
-        msg_ok "EXISTING GENERATED ISO WILL BE REPLACED DURING ISO BUILD"
+        msg_ok "Existing generated ISO check complete."
     else
         GENERATED_ISO_EXISTS="no"
         REUSE_EXISTING_AUTOINSTALL_ISO="no"
-        msg_ok "NO EXISTING GENERATED ISO FOUND"
+        msg_ok "Existing generated ISO check complete."
     fi
 }
 
@@ -1584,19 +1591,21 @@ prepare_workspace() {
 # --- 47A. EXISTING GENERATED ISO VALIDATION ---
 # Lightweight validation for reuse mode. It avoids modifying files or VM config.
 verify_reused_generated_iso() {
-    section "REUSED ISO CHECK"
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "REUSED ISO CHECK"
+    fi
 
     if [ ! -s "$AUTOINSTALL_ISO_PATH" ]; then
         msg_error "Selected reuse ISO is missing or empty: ${AUTOINSTALL_ISO_PATH}"
     fi
 
-    msg_ok "EXISTING GENERATED ISO FOUND"
+    msg_ok "Existing generated ISO check complete."
     detail_line "Generated ISO" "$AUTOINSTALL_ISO_REF"
 
     if command -v xorriso >/dev/null 2>&1; then
         msg_info "Quick-checking reused ISO boot data"
         if xorriso -indev "$AUTOINSTALL_ISO_PATH" -report_el_torito plain >/dev/null 2>&1; then
-            msg_ok "REUSED ISO BOOT DATA READABLE"
+            msg_ok "Reused generated ISO boot data readable."
         else
             msg_warn "Could not read reused ISO boot data with xorriso. You may recreate it if boot fails."
         fi
@@ -1670,7 +1679,9 @@ EOF
 
 # --- 51. WRITE AUTOINSTALL CONFIG ---
 write_autoinstall_config() {
-    section "AUTOINSTALL CONFIGURATION"
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "AUTOINSTALL CONFIGURATION"
+    fi
 
     msg_info "Creating Ubuntu autoinstall configuration"
 
@@ -1689,12 +1700,14 @@ write_autoinstall_config() {
         msg_error "Generated autoinstall.yaml must use shutdown: poweroff to prevent reinstall loops."
     fi
 
-    msg_ok "UBUNTU AUTOINSTALL CONFIGURATION CREATED"
+    msg_ok "Autoinstall configuration created."
 }
 
 # --- 52. EXTRACT GRUB CONFIGS ---
 extract_grub_configs() {
-    section "BOOT CONFIG EXTRACTION"
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "BOOT CONFIG EXTRACTION"
+    fi
 
     msg_info "Extracting Ubuntu boot configuration"
 
@@ -1703,12 +1716,14 @@ extract_grub_configs() {
 
     xorriso -osirrox on -indev "$INSTALL_ISO_PATH" -extract /boot/grub/loopback.cfg "$WORK_DIR/grub/loopback.cfg" &>/dev/null || true
 
-    msg_ok "UBUNTU BOOT CONFIGURATION EXTRACTED"
+    msg_ok "Ubuntu boot configuration extracted."
 }
 
 # --- 53. PATCH BOOT PARAMETERS ---
 patch_boot_parameters() {
-    section "BOOT PARAMETER PATCHING"
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "BOOT PARAMETER PATCHING"
+    fi
 
     msg_info "Patching Ubuntu autoinstall boot parameters"
 
@@ -1727,12 +1742,14 @@ patch_boot_parameters() {
         msg_error "Subiquity autoinstall path was not injected into grub.cfg."
     fi
 
-    msg_ok "AUTOINSTALL BOOT PARAMETERS PATCHED"
+    msg_ok "Autoinstall boot parameters patched."
 }
 
 # --- 54. BUILD GENERATED ISO ---
 build_generated_iso() {
-    section "AUTOINSTALL ISO BUILD"
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "AUTOINSTALL ISO BUILD"
+    fi
 
     msg_info "Building generated Ubuntu autoinstall ISO copy"
 
@@ -1759,12 +1776,14 @@ build_generated_iso() {
         msg_error "Generated Ubuntu autoinstall ISO was not created."
     fi
 
-    msg_ok "GENERATED AUTOINSTALL ISO CREATED (${AUTOINSTALL_ISO_REF})"
+    msg_ok "Generated autoinstall ISO created. (${AUTOINSTALL_ISO_REF})"
 }
 
 # --- 55. VERIFY GENERATED ISO ---
 verify_generated_iso() {
-    section "AUTOINSTALL ISO VERIFICATION"
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "AUTOINSTALL ISO VERIFICATION"
+    fi
 
     msg_info "Verifying generated autoinstall ISO"
 
@@ -1788,11 +1807,16 @@ verify_generated_iso() {
     ! grep -q "^#!/usr/bin/env bash" "$WORK_DIR/verify/autoinstall.yaml" || msg_error "Generated ISO /autoinstall.yaml contains unindented shell script content."
     grep -q "^#cloud-config" "$WORK_DIR/verify/user-data" || msg_error "Generated ISO /nocloud/user-data is missing #cloud-config header."
 
-    msg_ok "GENERATED AUTOINSTALL ISO VERIFIED"
+    msg_ok "Generated autoinstall ISO verified."
 }
 
 # --- 56. GENERATE AUTOINSTALL ISO ---
 generate_autoinstall_iso() {
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "AUTOINSTALL ISO PREPARATION"
+        ISO_PREP_GROUPED_OUTPUT="yes"
+    fi
+
     if [ "$REUSE_EXISTING_AUTOINSTALL_ISO" == "yes" ]; then
         verify_reused_generated_iso
         return 0
@@ -1868,19 +1892,19 @@ show_apply_summary() {
 attach_iso_and_start_install() {
     ensure_vm_stopped_before_apply
 
-    section "ATTACH INSTALLER AND START VM"
+    section "PREPARING SYSTEM"
 
     msg_info "Attaching generated Ubuntu autoinstall ISO"
     run_cmd "attaching generated Ubuntu autoinstall ISO" qm set "$TARGET_VMID" --ide2 "${AUTOINSTALL_ISO_REF},media=cdrom"
-    msg_ok "GENERATED UBUNTU AUTOINSTALL ISO ATTACHED"
+    msg_ok "Installer ISO attached."
 
     msg_info "Setting VM boot order to installer first"
     run_cmd "setting VM boot order to installer first" qm set "$TARGET_VMID" --boot "order=ide2;scsi0"
-    msg_ok "VM BOOT ORDER CONFIGURED"
+    msg_ok "VM boot order configured."
 
     msg_info "Starting VM ${TARGET_VMID} for Ubuntu autoinstall"
     run_cmd "starting VM ${TARGET_VMID} for Ubuntu autoinstall" qm start "$TARGET_VMID"
-    msg_ok "VM STARTED FOR AUTOINSTALL"
+    msg_ok "VM started for autoinstall."
 }
 
 # --- 59. POST-INSTALL CLEANUP ---
@@ -1935,6 +1959,7 @@ start_installed_vm_and_detect_ip() {
         run_cmd "starting installed Ubuntu VM" qm start "$TARGET_VMID"
         msg_ok "INSTALLED UBUNTU VM STARTED"
 
+        section "QEMU GUEST AGENT / IP DETECTION"
         ASSIGNED_IPV4="$(wait_for_vm_ipv4 "$TARGET_VMID" "$SSH_IP_DETECT_TIMEOUT_SECONDS" "$SSH_IP_CHECK_INTERVAL_SECONDS" || true)"
 
         if [ -n "$ASSIGNED_IPV4" ]; then
@@ -2122,6 +2147,8 @@ main() {
     select_ubuntu_iso
     show_ubuntu_pro_note
 
+    section "AUTOINSTALL ISO PREPARATION"
+    ISO_PREP_GROUPED_OUTPUT="yes"
     precheck_generated_iso_reuse
 
     if [ "$REUSE_EXISTING_AUTOINSTALL_ISO" != "yes" ]; then
@@ -2129,6 +2156,7 @@ main() {
     fi
 
     generate_autoinstall_iso
+    ISO_PREP_GROUPED_OUTPUT="no"
 
     show_apply_summary
     attach_yn="$(timed_yes_no "Attach generated autoinstall ISO and start VM now?" "y")"
