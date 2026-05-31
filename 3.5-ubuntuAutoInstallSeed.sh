@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.10"
+SCRIPT_VERSION="v1.2.11"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-preflight-vm-actions"
+SCRIPT_BUILD="script35-final-ui-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -803,6 +803,7 @@ wait_for_vm_poweroff() {
     local status=""
     local elapsed_min=""
     local elapsed_sec=""
+    local progress_drawn="no"
 
     start_time="$(date +%s)"
 
@@ -826,19 +827,33 @@ wait_for_vm_poweroff() {
         if [ "$status" == "stopped" ]; then
             INSTALL_DURATION_SECONDS="$elapsed"
             INSTALL_DURATION_TEXT="${elapsed_min}m ${elapsed_sec}s"
-            tty_print "${BFR}"
+            if [ "$progress_drawn" == "yes" ]; then
+                tty_print "\033[3A\033[J"
+            else
+                tty_print "${BFR}"
+            fi
             msg_ok "Ubuntu autoinstall completed. (${INSTALL_DURATION_TEXT})"
             msg_ok "VM ${vmid} powered off after install."
             return 0
         fi
 
         if [ "$elapsed" -ge "$timeout_seconds" ]; then
-            tty_print "${BFR}"
+            if [ "$progress_drawn" == "yes" ]; then
+                tty_print "\033[3A\033[J"
+            else
+                tty_print "${BFR}"
+            fi
             msg_warn "Autoinstall wait timeout reached. VM ${vmid} is still ${status:-unknown}."
             return 1
         fi
 
-        tty_print "${BFR}${YW}Waiting for VM poweroff: elapsed ${elapsed_min}m ${elapsed_sec}s / ${timeout_minutes}m | status: ${status:-unknown}${CL}"
+        if [ "$progress_drawn" == "yes" ]; then
+            tty_print "\033[3A\033[J"
+        fi
+        tty_println "${YW}Waiting for VM poweroff:${CL}"
+        tty_println "${YW}  elapsed: ${elapsed_min}m ${elapsed_sec}s / ${timeout_minutes}m${CL}"
+        tty_println "${YW}  status:  ${status:-unknown}${CL}"
+        progress_drawn="yes"
         sleep 10
     done
 }
@@ -1263,8 +1278,6 @@ ensure_tools() {
     detect_missing_iso_tools
 
     if [ "${#MISSING_TOOL_PACKAGES[@]}" -gt 0 ]; then
-        msg_warn "Missing required tools: ${MISSING_TOOL_PACKAGES[*]}"
-
         if [ "$INSTALL_MISSING_TOOLS_APPROVED" != "yes" ]; then
             msg_error "Required ISO tools are missing and installation was not approved during preflight. Cannot create a new autoinstall ISO."
         fi
@@ -1689,7 +1702,8 @@ collect_network_inputs() {
 
     section "NETWORK CONFIGURATION"
 
-    echo -e "${YW}Recommended: use DHCP and keep your router reservation from the VM selection step.${CL}"
+    echo -e "${BL}Recommendation:${CL}"
+    echo -e "  ${YW}Use DHCP and keep the router reservation from the VM selection step.${CL}"
     echo ""
 
     dhcp_yn="$(timed_yes_no "Use DHCP networking inside Ubuntu?" "y")"
@@ -2214,8 +2228,6 @@ EOF
 # --- 62. HOST VERIFICATION REPORT ---
 # Writes a host-side verification report after install cleanup and optional VM start.
 create_host_verification_report() {
-    msg_info "Creating host verification report"
-
     cat > "$VERIFY_LOG" <<EOF
 --- UBUNTU AUTOINSTALL HOST VERIFICATION REPORT ---
 Date: $(date)
