@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.4"
+SCRIPT_VERSION="v1.2.5"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-iso-prep-ui-cleanup"
+SCRIPT_BUILD="script35-qemu-output-fix"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -697,6 +697,18 @@ safe_hostname() {
     echo "$value"
 }
 
+# --- 23A. YES/NO DISPLAY HELPER ---
+# Converts internal y/n-style flags into user-facing yes/no text.
+yn_word() {
+    local value="${1:-}"
+
+    if [[ "$value" =~ ^([Yy]|yes|YES|true|TRUE|1)$ ]]; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+}
+
 # --- 24. VM STATUS HELPER ---
 get_vm_status() {
     local vmid="$1"
@@ -725,7 +737,6 @@ wait_for_vm_poweroff() {
     echo -e "${YW}Waiting for the VM to power off after installation.${CL}"
     echo -e "${YW}Do not manually restart the VM during this stage.${CL}"
     echo ""
-    echo -e "${BL}Progress:${CL}"
 
     while true; do
         now_time="$(date +%s)"
@@ -750,12 +761,10 @@ wait_for_vm_poweroff() {
             return 1
         fi
 
-        tty_println "${YW}  elapsed: ${elapsed_min}m ${elapsed_sec}s / ${timeout_minutes}m${CL}"
-        tty_println "${YW}  status:  ${status:-unknown}${CL}"
+        tty_print "${BFR}${YW}Waiting for VM poweroff: elapsed ${elapsed_min}m ${elapsed_sec}s / ${timeout_minutes}m | status: ${status:-unknown}${CL}"
         sleep 10
     done
 }
-
 # --- 26. VM IPV4 DETECTION HELPER ---
 get_vm_ipv4_from_guest_agent() {
     local vmid="$1"
@@ -780,10 +789,9 @@ wait_for_vm_ipv4() {
 
     start_time="$(date +%s)"
 
-    echo -e "${BL}Waiting for IPv4 from QEMU Guest Agent:${CL}"
-    echo -e "  timeout: ${GN}${timeout_seconds}s${CL}"
-    echo ""
-    echo -e "${BL}Progress:${CL}"
+    tty_println "${BL}Waiting for IPv4 from QEMU Guest Agent:${CL}"
+    tty_println "  timeout: ${GN}${timeout_seconds}s${CL}"
+    tty_println ""
 
     while true; do
         now_time="$(date +%s)"
@@ -793,21 +801,19 @@ wait_for_vm_ipv4() {
 
         if [ -n "$ip" ]; then
             tty_print "${BFR}"
-            echo "$ip"
+            printf '%s\n' "$ip"
             return 0
         fi
 
         if [ "$elapsed" -ge "$timeout_seconds" ]; then
             tty_print "${BFR}"
-            echo ""
             return 1
         fi
 
-        tty_println "${YW}  elapsed: ${elapsed}s / ${timeout_seconds}s${CL}"
+        tty_print "${BFR}${YW}Waiting for IPv4: elapsed ${elapsed}s / ${timeout_seconds}s${CL}"
         sleep "$interval_seconds"
     done
 }
-
 # --- 28. PATCH GRUB FILE HELPER ---
 patch_grub_file() {
     local file="$1"
@@ -1149,7 +1155,6 @@ collect_early_cleanup_preferences() {
 
     section "CLEANUP PREFERENCES"
 
-    echo -e "${YW}These choices are collected before any package install, temporary workspace, generated ISO, or VM change.${CL}"
     echo -e "${BL}Remove ISO generation tools after finish?${CL}"
     echo -e "  Tools: ${GN}xorriso p7zip-full${CL}"
     echo -e "  ${YW}Recommended: yes for clean Proxmox host.${CL}"
@@ -1872,19 +1877,17 @@ show_apply_summary() {
 
     echo -e "${BL}Install:${CL}"
     echo -e "  timeout: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
-    echo -e "  start VM after cleanup: ${GN}${POST_INSTALL_START_VM}${CL}"
+    echo -e "  start VM after cleanup: ${GN}$(yn_word "$POST_INSTALL_START_VM")${CL}"
     echo -e "  IP detection timeout: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
     echo ""
 
     echo -e "${BL}Cleanup:${CL}"
-    echo -e "  delete generated ISO after install: ${GN}${DELETE_GENERATED_ISO_AFTER_INSTALL}${CL}"
-    echo -e "  remove temporary workspace: ${GN}${CLEANUP_TEMP_WORKFILES}${CL}"
-    echo -e "  remove ISO generation tools after finish: ${GN}${CLEANUP_INSTALLED_TOOLS}${CL}"
+    echo -e "  delete generated ISO after install: ${GN}$(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")${CL}"
+    echo -e "  remove temporary workspace: ${GN}$(yn_word "$CLEANUP_TEMP_WORKFILES")${CL}"
+    echo -e "  remove ISO generation tools after finish: ${GN}$(yn_word "$CLEANUP_INSTALLED_TOOLS")${CL}"
     echo ""
 
     echo -e "${RD}WARNING:${CL} Starting this VM can begin Ubuntu autoinstall and wipe its VM disk."
-    echo ""
-    echo -e "${YW}After install, Ubuntu should power off. This script will then detach installer media and boot from disk.${CL}"
     echo ""
 }
 
@@ -1961,6 +1964,7 @@ start_installed_vm_and_detect_ip() {
 
         section "QEMU GUEST AGENT / IP DETECTION"
         ASSIGNED_IPV4="$(wait_for_vm_ipv4 "$TARGET_VMID" "$SSH_IP_DETECT_TIMEOUT_SECONDS" "$SSH_IP_CHECK_INTERVAL_SECONDS" || true)"
+        ASSIGNED_IPV4="$(printf '%s\n' "$ASSIGNED_IPV4" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | head -n 1 || true)"
 
         if [ -n "$ASSIGNED_IPV4" ]; then
             SSH_COMMAND="ssh ${TARGET_USERNAME}@${ASSIGNED_IPV4}"
