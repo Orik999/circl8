@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.2.1"
+SCRIPT_VERSION="v1.2.2"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-preserve-local-lvm"
+SCRIPT_BUILD="script1-storage-layout-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -673,15 +673,41 @@ function build_storage_summary() {
 # --- 25. MACHINE/GPU LABEL HELPER ---
 # Builds adaptive system-aware GPU detection labels.
 function detected_machine_gpu_label() {
+    local system_label=""
+
+    case "$SYSTEM_TYPE" in
+        Laptop) system_label="laptop" ;;
+        "Virtual Machine") system_label="virtual machine" ;;
+        "PC/Workstation") system_label="PC/workstation" ;;
+        *) system_label="system" ;;
+    esac
+
     if [ "$IGPU_FOUND" == "yes" ] && [ "$DGPU_FOUND" == "yes" ]; then
-        echo "DETECTED ${SYSTEM_TYPE^^} WITH INTEGRATED + DISCRETE GPU."
+        echo "Detected ${system_label} with integrated + discrete GPU"
     elif [ "$IGPU_FOUND" == "yes" ]; then
-        echo "DETECTED ${SYSTEM_TYPE^^} WITH INTEGRATED GPU."
+        echo "Detected ${system_label} with integrated GPU"
     elif [ "$DGPU_FOUND" == "yes" ]; then
-        echo "DETECTED ${SYSTEM_TYPE^^} WITH DISCRETE GPU."
+        echo "Detected ${system_label} with discrete GPU"
     else
-        echo "DETECTED ${SYSTEM_TYPE^^} WITH NO GPU PASSTHROUGH TARGET."
+        echo "Detected ${system_label} with no GPU passthrough target"
     fi
+}
+
+# --- GPU DETAIL DISPLAY HELPER ---
+# Prints integrated/discrete GPU records in readable grouped blocks without changing detection logic.
+function print_gpu_detail_group() {
+    local title="$1"
+    local lines="$2"
+    local line=""
+
+    [ -n "$lines" ] || return 0
+
+    echo ""
+    echo -e "${BL}${title}:${CL}"
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        echo -e "  ${GN}${line}${CL}"
+    done <<< "$lines"
 }
 
 # --- 26. REALTEK NIC DETECTION HELPER ---
@@ -807,10 +833,8 @@ function init_script() {
 # --- 30. FRESH INSTALL WARNING ---
 # Shows flashing warning only after confirming this is Proxmox VE 9+.
 function show_fresh_install_warning() {
-    echo -e "${YW} This script will Perform PVE9 Post Install Routines.${CL}"
-    echo ""
-    echo -e "${YW}${CLF} Intended for FRESH Proxmox VE 9 installs only.${CL}"
-    echo ""
+    echo -e "${YW}This script will perform PVE9 post-install routines.${CL}"
+    echo -e "${YW}${CLF}Intended for FRESH Proxmox VE 9 installs only.${CL}"
 }
 
 # --- 31. PRE-INSTALL HARDWARE AUDIT ---
@@ -918,28 +942,36 @@ function detect_gpu_and_collect_choice() {
     GPU_SUMMARY="$(build_gpu_summary)"
     msg_ok "$(detected_machine_gpu_label)"
 
-    echo -e " ${BL}━━━━━▶${CL} ${GPU_SUMMARY:-No GPU details detected}"
+    if [ -n "${IGPU_LINES}${DGPU_LINES}" ]; then
+        print_gpu_detail_group "Integrated GPU" "$IGPU_LINES"
+        print_gpu_detail_group "Discrete GPU" "$DGPU_LINES"
+        echo ""
+    else
+        echo -e " ${BL}━━━━━▶${CL} No GPU details detected"
+    fi
 
     ENABLE_PASSTHROUGH="n"
 
     if [ "$DGPU_FOUND" == "yes" ]; then
         if [ "$SYSTEM_TYPE" == "Laptop" ] && [ "$IGPU_FOUND" == "yes" ]; then
-            echo -e "${YW}Integrated GPU will be kept for laptop screen. Only discrete GPU and same-slot function devices will be isolated.${CL}"
+            echo -e "${YW}Integrated GPU will be kept for laptop screen.${CL}"
+            echo -e "${YW}Only the discrete GPU and same-slot function devices will be isolated.${CL}"
         else
-            echo -e "${YW}Only discrete GPU and same-slot function devices will be isolated.${CL}"
+            echo -e "${YW}Only the discrete GPU and same-slot function devices will be isolated.${CL}"
         fi
 
-        gpu_yn="$(timed_yes_no "Isolate Discrete GPU for VM Passthrough?" "y")"
+        echo ""
+        gpu_yn="$(timed_yes_no "Isolate discrete GPU for VM passthrough?" "y")"
 
         if [[ "$gpu_yn" =~ ^[Yy] ]]; then
             ENABLE_PASSTHROUGH="y"
-            echo -e "${GN}Discrete GPU passthrough will be activated; integrated GPU will be left untouched.${CL}"
+            msg_ok "Discrete GPU passthrough will be activated"
         else
             ENABLE_PASSTHROUGH="n"
-            echo -e "${YW}Discrete GPU passthrough will not be activated.${CL}"
+            msg_warn "Discrete GPU passthrough will not be activated"
         fi
     else
-        echo -e "${YW}No discrete GPU detected. GPU passthrough will be skipped.${CL}"
+        msg_ok "No discrete GPU detected. GPU passthrough will be skipped"
     fi
 }
 
@@ -958,45 +990,70 @@ function show_storage_detection() {
 
 # --- STORAGE LAYOUT STATUS HELPERS ---
 # These helpers only read Proxmox/LVM state. They must never create, remove or resize storage.
+# They are written defensively for set -e/pipefail so detection failures return 1 instead of exiting.
 function storage_id_in_pvesm_status() {
     local storage_id="$1"
 
-    pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fxq "$storage_id"
+    if pvesm status 2>/dev/null | awk -v sid="$storage_id" 'NR>1 && $1 == sid { found=1 } END { exit found ? 0 : 1 }'; then
+        return 0
+    fi
+
+    return 1
 }
 
 function storage_cfg_has_local_lvm() {
-    grep -Eq '^lvmthin:[[:space:]]+local-lvm$' /etc/pve/storage.cfg 2>/dev/null
+    if grep -Eq '^lvmthin:[[:space:]]+local-lvm$' /etc/pve/storage.cfg 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
 }
 
 function pve_vg_exists() {
-    vgs pve >/dev/null 2>&1
+    if vgs pve >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 1
 }
 
 function pve_root_lv_exists() {
-    lvs pve/root >/dev/null 2>&1 || lvdisplay /dev/pve/root >/dev/null 2>&1
+    if lvs pve/root >/dev/null 2>&1 || lvdisplay /dev/pve/root >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 1
 }
 
 function pve_data_thinpool_exists() {
     local lv_attr=""
 
-    lv_attr="$(lvs --noheadings -o lv_attr pve/data 2>/dev/null | xargs || true)"
+    lv_attr="$(lvs --noheadings -o lv_attr pve/data 2>/dev/null | awk 'NF {print $1; exit}' || true)"
     if [ -n "$lv_attr" ]; then
-        [[ "$lv_attr" == t* ]] && return 0
-        return 1
+        case "$lv_attr" in
+            t*) return 0 ;;
+            *) return 1 ;;
+        esac
     fi
 
-    lvdisplay /dev/pve/data >/dev/null 2>&1
+    if lvdisplay /dev/pve/data >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 1
 }
 
 function detect_installer_local_lvm_layout() {
-    storage_id_in_pvesm_status "local" || return 1
-    storage_id_in_pvesm_status "local-lvm" || return 1
-    storage_cfg_has_local_lvm || return 1
-    pve_vg_exists || return 1
-    pve_root_lv_exists || return 1
-    pve_data_thinpool_exists || return 1
+    if storage_id_in_pvesm_status "local" && \
+       storage_id_in_pvesm_status "local-lvm" && \
+       storage_cfg_has_local_lvm && \
+       pve_vg_exists && \
+       pve_root_lv_exists && \
+       pve_data_thinpool_exists; then
+        return 0
+    fi
 
-    return 0
+    return 1
 }
 
 # --- STORAGE LAYOUT DETECTION HELPER ---
@@ -1005,6 +1062,7 @@ function detect_storage_layout_options() {
     local root_source=""
     local root_real=""
     local parent_disk=""
+    local pv_name=""
     local root_size_bytes="0"
 
     LOCAL_LVM_EXISTS="no"
@@ -1015,22 +1073,33 @@ function detect_storage_layout_options() {
     fi
 
     root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-    root_real="$(readlink -f "$root_source" 2>/dev/null || echo "$root_source")"
+    if [ -n "$root_source" ]; then
+        root_real="$(readlink -f "$root_source" 2>/dev/null || printf '%s\n' "$root_source")"
+    fi
 
-    parent_disk="$(lsblk -no PKNAME "$root_real" 2>/dev/null | head -n1 | xargs || true)"
+    if [ -n "$root_real" ]; then
+        parent_disk="$(lsblk -no PKNAME "$root_real" 2>/dev/null | awk 'NF {print; exit}' || true)"
+    fi
 
     if [ -z "$parent_disk" ] && command -v pvs >/dev/null 2>&1; then
-        parent_disk="$(pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk '$2=="pve"{print $1; exit}' | xargs -r lsblk -no PKNAME 2>/dev/null | head -n1 | xargs || true)"
+        pv_name="$(pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk '$2 == "pve" {print $1; exit}' || true)"
+        if [ -n "$pv_name" ]; then
+            parent_disk="$(lsblk -no PKNAME "$pv_name" 2>/dev/null | awk 'NF {print; exit}' || true)"
+            if [ -z "$parent_disk" ]; then
+                parent_disk="$(basename "$pv_name" 2>/dev/null || true)"
+            fi
+        fi
     fi
 
     if [ -n "$parent_disk" ] && [ -b "/dev/${parent_disk}" ]; then
-        root_size_bytes="$(lsblk -b -dn -o SIZE "/dev/${parent_disk}" 2>/dev/null | head -n1 | xargs || echo 0)"
+        root_size_bytes="$(lsblk -b -dn -o SIZE "/dev/${parent_disk}" 2>/dev/null | awk 'NF {print $1; exit}' || echo 0)"
         if [[ "$root_size_bytes" =~ ^[0-9]+$ ]] && [ "$root_size_bytes" -gt 0 ]; then
             ROOT_DISK_SIZE_GB="$(( (root_size_bytes + 1073741823) / 1073741824 ))"
         fi
     fi
 
     [ -z "$ROOT_DISK_SIZE_GB" ] && ROOT_DISK_SIZE_GB="0"
+    return 0
 }
 
 # --- STORAGE LAYOUT OPTION COLLECTOR ---
