@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.11"
+SCRIPT_VERSION="v1.2.12"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-final-ui-polish"
+SCRIPT_BUILD="script35-output-line-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -1282,6 +1282,7 @@ ensure_tools() {
             msg_error "Required ISO tools are missing and installation was not approved during preflight. Cannot create a new autoinstall ISO."
         fi
 
+        msg_ok "Required ISO tool check complete."
         msg_info "Installing missing ISO tools"
         run_cmd "updating APT package lists before tool install" env DEBIAN_FRONTEND=noninteractive apt-get update
 
@@ -2175,6 +2176,7 @@ start_installed_vm_and_detect_ip() {
         msg_info "Starting installed Ubuntu VM"
         run_cmd "starting installed Ubuntu VM" qm start "$TARGET_VMID"
         INSTALLED_VM_STARTED_STATUS="Installed Ubuntu VM started."
+        msg_ok "$INSTALLED_VM_STARTED_STATUS"
 
         ASSIGNED_IPV4="$(wait_for_vm_ipv4 "$TARGET_VMID" "$SSH_IP_DETECT_TIMEOUT_SECONDS" "$SSH_IP_CHECK_INTERVAL_SECONDS" || true)"
         ASSIGNED_IPV4="$(printf '%s\n' "$ASSIGNED_IPV4" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | head -n 1 || true)"
