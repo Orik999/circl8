@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.8"
+SCRIPT_VERSION="v1.2.9"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script35-final-display-polish"
+SCRIPT_BUILD="script35-preflight-iso-tools"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -102,8 +102,10 @@ TEMP_FILES=()
 
 REUSE_EXISTING_AUTOINSTALL_ISO="no"
 GENERATED_ISO_EXISTS="no"
+GENERATED_ISO_ACTION="create"
 TOOLS_CHECKED="no"
 MISSING_TOOL_PACKAGES=()
+INSTALL_MISSING_TOOLS_APPROVED="not-needed"
 ISO_PREP_GROUPED_OUTPUT="no"
 SCRIPT35_UI_DEMO_ACTIVE="no"
 
@@ -1169,16 +1171,9 @@ validate_proxmox() {
 
 # --- 35. TOOL INSTALLATION ---
 # Installs required ISO tooling only if missing; optional cleanup removes ISO-generation-only tools.
-ensure_tools() {
+detect_missing_iso_tools() {
     local missing_packages=()
     local pkg=""
-    local install_yn=""
-
-    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
-        section "ISO TOOL CHECK"
-    fi
-
-    msg_info "Checking required ISO tools"
 
     for pkg in xorriso rsync p7zip-full; do
         if ! dpkg -s "$pkg" >/dev/null 2>&1; then
@@ -1188,29 +1183,78 @@ ensure_tools() {
 
     MISSING_TOOL_PACKAGES=("${missing_packages[@]}")
     TOOLS_CHECKED="yes"
+}
 
-    if [ "${#missing_packages[@]}" -gt 0 ]; then
-        msg_warn "Missing required tools: ${missing_packages[*]}"
+missing_iso_tools_display() {
+    if [ "${#MISSING_TOOL_PACKAGES[@]}" -eq 0 ]; then
+        echo "none"
+    else
+        echo "${MISSING_TOOL_PACKAGES[*]}"
+    fi
+}
+
+install_missing_tools_display() {
+    if [ "$INSTALL_MISSING_TOOLS_APPROVED" == "not-needed" ]; then
+        echo "not-needed"
+    else
+        yn_word "$INSTALL_MISSING_TOOLS_APPROVED"
+    fi
+}
+
+collect_missing_iso_tools_decision() {
+    local install_yn=""
+
+    msg_info "Checking required ISO tools"
+    detect_missing_iso_tools
+
+    if [ "${#MISSING_TOOL_PACKAGES[@]}" -gt 0 ]; then
+        msg_warn "Missing required tools: ${MISSING_TOOL_PACKAGES[*]}"
         echo ""
         install_yn="$(timed_yes_no "Install missing ISO tools now?" "y")"
 
         if [[ "$install_yn" =~ ^[Nn] ]]; then
-            msg_error "Required ISO tools are missing. Cannot create a new autoinstall ISO."
+            INSTALL_MISSING_TOOLS_APPROVED="no"
+        else
+            INSTALL_MISSING_TOOLS_APPROVED="yes"
+        fi
+    else
+        INSTALL_MISSING_TOOLS_APPROVED="not-needed"
+        msg_ok "Required ISO tools available."
+    fi
+}
+
+ensure_tools() {
+    local pkg=""
+
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "ISO TOOL CHECK"
+    fi
+
+    msg_info "Checking required ISO tools"
+    detect_missing_iso_tools
+
+    if [ "${#MISSING_TOOL_PACKAGES[@]}" -gt 0 ]; then
+        msg_warn "Missing required tools: ${MISSING_TOOL_PACKAGES[*]}"
+
+        if [ "$INSTALL_MISSING_TOOLS_APPROVED" != "yes" ]; then
+            msg_error "Required ISO tools are missing and installation was not approved during preflight. Cannot create a new autoinstall ISO."
         fi
 
         msg_info "Installing missing ISO tools"
         run_cmd "updating APT package lists before tool install" env DEBIAN_FRONTEND=noninteractive apt-get update
 
-        for pkg in "${missing_packages[@]}"; do
+        for pkg in "${MISSING_TOOL_PACKAGES[@]}"; do
             run_cmd "installing ${pkg}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg"
             INSTALLED_TOOL_PACKAGES+=("$pkg")
         done
 
-        msg_ok "Required ISO tools available."
-    else
-        msg_ok "Required ISO tools available."
+        detect_missing_iso_tools
+        if [ "${#MISSING_TOOL_PACKAGES[@]}" -gt 0 ]; then
+            msg_error "Required ISO tools are still missing after install attempt: ${MISSING_TOOL_PACKAGES[*]}"
+        fi
     fi
 
+    msg_ok "Required ISO tools available."
     command -v xorriso >/dev/null 2>&1 || msg_error "xorriso is required."
 }
 
@@ -1264,16 +1308,12 @@ set_autoinstall_iso_paths() {
 }
 
 # --- 35C. GENERATED ISO REUSE / RECREATE PREFLIGHT ---
-# Handles reruns before work directories, ISO writes, VM shutdowns, or VM config changes.
-precheck_generated_iso_reuse() {
+# Collects generated ISO reuse/recreate/create choice before ISO preparation starts.
+collect_generated_iso_action() {
     local reuse_yn=""
     local recreate_yn=""
 
     set_autoinstall_iso_paths
-
-    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
-        section "RERUN / GENERATED ISO PREFLIGHT"
-    fi
 
     detail_line "Expected generated ISO" "$AUTOINSTALL_ISO_PATH"
 
@@ -1287,8 +1327,8 @@ precheck_generated_iso_reuse() {
         reuse_yn="$(timed_yes_no "Reuse existing generated ISO?" "y")"
 
         if [[ "$reuse_yn" =~ ^[Yy] ]]; then
+            GENERATED_ISO_ACTION="reuse"
             REUSE_EXISTING_AUTOINSTALL_ISO="yes"
-            msg_ok "Existing generated ISO check complete."
             return 0
         fi
 
@@ -1298,13 +1338,48 @@ precheck_generated_iso_reuse() {
             msg_error "Existing generated ISO was not reused or replaced. Script cancelled before changes."
         fi
 
+        GENERATED_ISO_ACTION="recreate"
         REUSE_EXISTING_AUTOINSTALL_ISO="no"
-        msg_ok "Existing generated ISO check complete."
     else
         GENERATED_ISO_EXISTS="no"
+        GENERATED_ISO_ACTION="create"
         REUSE_EXISTING_AUTOINSTALL_ISO="no"
-        msg_ok "Existing generated ISO check complete."
     fi
+}
+
+# Applies the preflight-generated ISO action during ISO preparation without asking again.
+precheck_generated_iso_reuse() {
+    set_autoinstall_iso_paths
+
+    if [ "$ISO_PREP_GROUPED_OUTPUT" != "yes" ]; then
+        section "RERUN / GENERATED ISO PREFLIGHT"
+    fi
+
+    detail_line "Expected generated ISO" "$AUTOINSTALL_ISO_PATH"
+    detail_line "Generated ISO action" "$GENERATED_ISO_ACTION"
+
+    case "$GENERATED_ISO_ACTION" in
+        reuse)
+            if [ ! -f "$AUTOINSTALL_ISO_PATH" ]; then
+                msg_error "Generated ISO was selected for reuse but is missing: ${AUTOINSTALL_ISO_PATH}"
+            fi
+            GENERATED_ISO_EXISTS="yes"
+            REUSE_EXISTING_AUTOINSTALL_ISO="yes"
+            ;;
+        recreate)
+            GENERATED_ISO_EXISTS="yes"
+            REUSE_EXISTING_AUTOINSTALL_ISO="no"
+            ;;
+        create)
+            GENERATED_ISO_EXISTS="no"
+            REUSE_EXISTING_AUTOINSTALL_ISO="no"
+            ;;
+        *)
+            msg_error "Invalid generated ISO action: ${GENERATED_ISO_ACTION}"
+            ;;
+    esac
+
+    msg_ok "Existing generated ISO check complete."
 }
 
 # --- 36. PREVIOUS RUN MARKER CHECK ---
@@ -1937,6 +2012,9 @@ show_apply_summary() {
     echo -e "${BL}ISO:${CL}"
     echo -e "  source: ${GN}${INSTALL_ISO_REF}${CL}"
     echo -e "  generated: ${GN}${AUTOINSTALL_ISO_REF}${CL}"
+    echo -e "  generated ISO action: ${GN}${GENERATED_ISO_ACTION}${CL}"
+    echo -e "  missing ISO tools: ${GN}$(missing_iso_tools_display)${CL}"
+    echo -e "  install missing ISO tools: ${GN}$(install_missing_tools_display)${CL}"
     echo ""
 
     echo -e "${BL}Install:${CL}"
@@ -2223,6 +2301,9 @@ setup_ui_demo_sample_data() {
     NETWORK_MODE="dhcp"
     INSTALL_ISO_REF="local:iso/ubuntu-26.04-live-server-amd64.iso"
     AUTOINSTALL_ISO_REF="local:iso/ubuntu-26.04-autoinstall-vm108.iso"
+    GENERATED_ISO_ACTION="create"
+    MISSING_TOOL_PACKAGES=()
+    INSTALL_MISSING_TOOLS_APPROVED="not-needed"
     INSTALL_WAIT_MINUTES="30"
     SSH_IP_DETECT_TIMEOUT_SECONDS="90"
     POST_INSTALL_START_VM="y"
@@ -2302,6 +2383,13 @@ demo_ubuntu_pro_note() {
     demo_line "Manual command: sudo pro attach <token>"
 }
 
+demo_preflight_questions() {
+    section "PREFLIGHT QUESTIONS"
+    demo_line "generated ISO action: ${GENERATED_ISO_ACTION}"
+    demo_line "missing ISO tools: $(missing_iso_tools_display)"
+    demo_line "install missing ISO tools: $(install_missing_tools_display)"
+}
+
 demo_autoinstall_iso_preparation() {
     section "AUTOINSTALL ISO PREPARATION"
     msg_ok "Existing generated ISO check complete."
@@ -2336,6 +2424,9 @@ demo_ready_to_apply() {
     echo -e "${BL}ISO:${CL}"
     echo -e "  source: ${GN}${INSTALL_ISO_REF}${CL}"
     echo -e "  generated: ${GN}${AUTOINSTALL_ISO_REF}${CL}"
+    echo -e "  generated ISO action: ${GN}${GENERATED_ISO_ACTION}${CL}"
+    echo -e "  missing ISO tools: ${GN}$(missing_iso_tools_display)${CL}"
+    echo -e "  install missing ISO tools: ${GN}$(install_missing_tools_display)${CL}"
     echo ""
 
     echo -e "${BL}Install:${CL}"
@@ -2403,6 +2494,7 @@ run_ui_demo() {
     demo_post_install_options
     demo_iso_selection
     demo_ubuntu_pro_note
+    demo_preflight_questions
     demo_autoinstall_iso_preparation
     demo_ready_to_apply
     demo_preparing_system
@@ -2439,6 +2531,10 @@ main() {
     collect_post_install_options
     select_ubuntu_iso
     show_ubuntu_pro_note
+
+    section "PREFLIGHT QUESTIONS"
+    collect_generated_iso_action
+    collect_missing_iso_tools_decision
 
     section "AUTOINSTALL ISO PREPARATION"
     ISO_PREP_GROUPED_OUTPUT="yes"
