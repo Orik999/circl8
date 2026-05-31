@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.1"
-SCRIPT_UPDATED="2026-05-28"
-SCRIPT_BUILD="audit-untimed-inputs-stability-ui-color-fix"
+SCRIPT_VERSION="v1.2.2"
+SCRIPT_UPDATED="2026-05-30"
+SCRIPT_BUILD="script35-final-ui-cleanup"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -1313,7 +1313,13 @@ detect_vm_mac() {
         msg_error "Could not detect net0 MAC address for VM ${TARGET_VMID}. Check: qm config ${TARGET_VMID}"
     fi
 
-    msg_ok "VM MAC DETECTED (${TARGET_VM_MAC})"
+    msg_ok "VM MAC DETECTED"
+    echo ""
+    echo -e "${BL}VM MAC address:${CL}"
+    echo -e "  ${GN}${TARGET_VM_MAC}${CL}"
+    echo ""
+    echo -e "${BL}Recommendation:${CL}"
+    echo -e "  ${YW}Reserve this MAC in your router for the desired static IP.${CL}"
 }
 
 # --- 41. USER / LOCALE INPUTS ---
@@ -1402,7 +1408,11 @@ collect_network_inputs() {
 
     section "NETWORK CONFIGURATION"
 
-    echo -e "${YW}Recommended: use DHCP here and reserve static IP in your router using this MAC:${CL} ${GN}${TARGET_VM_MAC}${CL}"
+    echo -e "${BL}VM MAC address:${CL}"
+    echo -e "  ${GN}${TARGET_VM_MAC}${CL}"
+    echo ""
+    echo -e "${BL}Recommendation:${CL}"
+    echo -e "  ${YW}Use DHCP here and reserve this MAC in your router for the desired static IP.${CL}"
     echo ""
 
     dhcp_yn="$(timed_yes_no "Use DHCP networking inside Ubuntu?" "y")"
@@ -1439,9 +1449,6 @@ collect_post_install_options() {
     section "POST-INSTALL OPTIONS"
 
     INSTALL_WAIT_MINUTES="$(timed_number_input "Enter autoinstall wait timeout in minutes" "$DEFAULT_INSTALL_WAIT_MINUTES" "10" "240")"
-
-    echo -e "${YW}Generated ISO deletion was already selected during early cleanup preferences:${CL} ${GN}${DELETE_GENERATED_ISO_AFTER_INSTALL}${CL}"
-    echo ""
 
     start_installed_yn="$(timed_yes_no "Start installed Ubuntu VM after cleanup?" "y")"
     [[ "$start_installed_yn" =~ ^[Nn] ]] && POST_INSTALL_START_VM="n" || POST_INSTALL_START_VM="y"
@@ -1482,9 +1489,12 @@ select_ubuntu_iso() {
 # --- 46. UBUNTU PRO NOTE ---
 show_ubuntu_pro_note() {
     echo ""
-    echo -e "${BL}UBUNTU PRO:${CL}"
-    echo -e "${YW}Ubuntu Pro is intentionally not attached by this script.${CL}"
-    echo -e "${YW}script 4-ubuntuVMsetup can attach Ubuntu Pro later, or manually use:${CL} ${GN}sudo pro attach <token>${CL}"
+    echo -e "${BL}Ubuntu Pro:${CL}"
+    echo -e "  ${YW}Not attached by this script.${CL}"
+    echo -e "  ${YW}Script 4 can offer Ubuntu Pro attachment inside the VM.${CL}"
+    echo ""
+    echo -e "${BL}Manual command:${CL}"
+    echo -e "  ${GN}sudo pro attach <token>${CL}"
     echo ""
 }
 
@@ -1747,7 +1757,9 @@ show_apply_summary() {
     echo -e "LOCALE: ${GN}${TARGET_LOCALE}${CL}"
     echo -e "VERIFY LOG: ${GN}${VERIFY_LOG}${CL}"
     echo -e "KEYBOARD LAYOUT: ${GN}${TARGET_KEYBOARD_LAYOUT}${CL}"
-    echo -e "KEYBOARD VARIANT: ${GN}${TARGET_KEYBOARD_VARIANT:-none}${CL}"
+    if [ -n "$TARGET_KEYBOARD_VARIANT" ]; then
+        echo -e "KEYBOARD VARIANT: ${GN}${TARGET_KEYBOARD_VARIANT}${CL}"
+    fi
     echo -e "NETWORK MODE: ${GN}${NETWORK_MODE}${CL}"
 
     if [ "$NETWORK_MODE" == "static" ]; then
@@ -1844,7 +1856,7 @@ start_installed_vm_and_detect_ip() {
 
         if [ -n "$ASSIGNED_IPV4" ]; then
             SSH_COMMAND="ssh ${TARGET_USERNAME}@${ASSIGNED_IPV4}"
-            msg_ok "VM IPV4 DETECTED (${ASSIGNED_IPV4})"
+            msg_ok "QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}"
         else
             msg_warn "VM started but IPv4 was not reported by QEMU Guest Agent within ${SSH_IP_DETECT_TIMEOUT_SECONDS}s"
         fi
@@ -1953,45 +1965,39 @@ show_generated_iso_only_summary() {
 
 # --- 64. FINAL OUTPUT ---
 show_final_output() {
-    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+    section_flash_success "     ━━━━━━━━━━━━━  INSTALL COMPLETE / NEXT STEPS  ━━━━━━━━━━━━━"
 
-    echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
-    echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
-    echo -e "VM MAC: ${GN}${TARGET_VM_MAC}${CL}"
-    echo -e "SOURCE ISO: ${GN}${INSTALL_ISO_REF}${CL}"
-    echo -e "GENERATED ISO DELETED: ${GN}${DELETE_GENERATED_ISO_AFTER_INSTALL}${CL}"
-    echo -e "BOOT ORDER: ${GN}scsi0${CL}"
-    echo -e "INSTALLED VM STARTED: ${GN}${POST_INSTALL_START_VM}${CL}"
-    echo -e "KEYBOARD: ${GN}${TARGET_KEYBOARD_LAYOUT}${CL}"
-    echo -e "LOCALE: ${GN}${TARGET_LOCALE}${CL}"
-    echo -e "VERIFY LOG: ${GN}${VERIFY_LOG}${CL}"
+    echo -e "${CM} ${GN}Ubuntu autoinstall completed.${CL}"
+    echo -e "${CM} ${GN}Installer media detached.${CL}"
 
-    if [ -n "$ASSIGNED_IPV4" ]; then
-        echo -e "ASSIGNED IPV4: ${GN}${ASSIGNED_IPV4}${CL}"
+    if [ "$POST_INSTALL_START_VM" == "y" ]; then
+        echo -e "${CM} ${GN}Installed Ubuntu VM started.${CL}"
+        if [ -n "$ASSIGNED_IPV4" ]; then
+            echo -e "${CM} ${GN}QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}${CL}"
+        else
+            echo -e "${WARN} ${YW}QEMU Guest Agent did not report an IPv4 address yet.${CL}"
+        fi
+    else
+        echo -e "${WARN} ${YW}Installed Ubuntu VM was left powered off by user choice.${CL}"
     fi
 
     echo ""
-    echo -e "${YW}Ubuntu autoinstall powered off successfully, installer media was detached.${CL}"
+    echo -e "${YW}⚠ NEXT SCRIPT LOCATION${CL}"
+    echo -e "  ${YW}Run Script 4 inside the Ubuntu VM, not on Proxmox.${CL}"
+    echo ""
+    echo -e "  VM:        ${GN}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
+    echo -e "  IP:        ${GN}${ASSIGNED_IPV4:-not-detected}${CL}"
+    echo -e "  MAC:       ${GN}${TARGET_VM_MAC}${CL}"
 
-    if [ "$POST_INSTALL_START_VM" == "y" ]; then
-        echo ""
-
-        if [ -n "$SSH_COMMAND" ]; then
-            echo -e "${YW}Wait for Ubuntu to finish first boot, then use SSH:${CL}"
-            echo -e "${GN}${SSH_COMMAND}${CL}"
-        else
-            echo -e "${YW}Ubuntu VM was started, but an IPv4 address was not reported yet.${CL}"
-            echo -e "${YW}Check the IP from the Proxmox host with:${CL}"
-            echo -e "${GN}qm guest cmd ${TARGET_VMID} network-get-interfaces${CL}"
-            echo -e "${YW}Then use SSH:${CL}"
-            echo -e "${GN}ssh ${TARGET_USERNAME}@<assigned-ip>${CL}"
-        fi
-
-        echo -e "${YW}Then run script 4-ubuntuVMsetup inside the Ubuntu VM.${CL}"
+    if [ -n "$SSH_COMMAND" ]; then
+        echo -e "  SSH:       ${GN}${SSH_COMMAND}${CL}"
     else
-        echo -e "${YW}Start the VM manually when ready with:${CL} ${GN}qm start ${TARGET_VMID}${CL}"
+        echo -e "  SSH:       ${GN}ssh ${TARGET_USERNAME}@<assigned-ip>${CL}"
     fi
 
+    echo -e "  Next:      ${GN}4-ubuntuVMsetup.sh${CL}"
+    echo ""
+    echo -e "${RD}⚠ DO NOT RUN 4-ubuntuVMsetup.sh ON THE PROXMOX HOST.${CL}"
     echo ""
 }
 
