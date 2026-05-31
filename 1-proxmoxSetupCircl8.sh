@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.2.0"
-SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="audit-untimed-inputs-snapshot-storage"
+SCRIPT_VERSION="v1.2.1"
+SCRIPT_UPDATED="2026-05-30"
+SCRIPT_BUILD="script1-preserve-local-lvm"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -84,7 +84,7 @@ PVE_FIREWALL_APPLIED="no"
 CROWDSEC_BOUNCER_PACKAGE="none"
 NUMLOCK_CONFIGURED="no"
 
-STORAGE_LAYOUT_MODE="merge_all"
+STORAGE_LAYOUT_MODE="unselected"
 ROOT_DISK_SIZE_GB="0"
 LOCAL_LVM_EXISTS="no"
 
@@ -731,6 +731,7 @@ function validate_dependencies() {
         lvdisplay
         lvremove
         lvresize
+        lvs
         mkdir
         pct
         pvesm
@@ -955,9 +956,51 @@ function show_storage_detection() {
 # --- 35. USER OPTION COLLECTION ---
 # Collects optional choices using timed prompts.
 
+# --- STORAGE LAYOUT STATUS HELPERS ---
+# These helpers only read Proxmox/LVM state. They must never create, remove or resize storage.
+function storage_id_in_pvesm_status() {
+    local storage_id="$1"
+
+    pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fxq "$storage_id"
+}
+
+function storage_cfg_has_local_lvm() {
+    grep -Eq '^lvmthin:[[:space:]]+local-lvm$' /etc/pve/storage.cfg 2>/dev/null
+}
+
+function pve_vg_exists() {
+    vgs pve >/dev/null 2>&1
+}
+
+function pve_root_lv_exists() {
+    lvs pve/root >/dev/null 2>&1 || lvdisplay /dev/pve/root >/dev/null 2>&1
+}
+
+function pve_data_thinpool_exists() {
+    local lv_attr=""
+
+    lv_attr="$(lvs --noheadings -o lv_attr pve/data 2>/dev/null | xargs || true)"
+    if [ -n "$lv_attr" ]; then
+        [[ "$lv_attr" == t* ]] && return 0
+        return 1
+    fi
+
+    lvdisplay /dev/pve/data >/dev/null 2>&1
+}
+
+function detect_installer_local_lvm_layout() {
+    storage_id_in_pvesm_status "local" || return 1
+    storage_id_in_pvesm_status "local-lvm" || return 1
+    storage_cfg_has_local_lvm || return 1
+    pve_vg_exists || return 1
+    pve_root_lv_exists || return 1
+    pve_data_thinpool_exists || return 1
+
+    return 0
+}
+
 # --- STORAGE LAYOUT DETECTION HELPER ---
-# Detects whether the default local-lvm exists and estimates the root disk size.
-# This lets the script keep snapshot-capable local-lvm on larger installs instead of blindly merging it.
+# Detects whether the installer-created local + local-lvm layout exists and estimates the root disk size.
 function detect_storage_layout_options() {
     local root_source=""
     local root_real=""
@@ -967,7 +1010,7 @@ function detect_storage_layout_options() {
     LOCAL_LVM_EXISTS="no"
     ROOT_DISK_SIZE_GB="0"
 
-    if grep -q "^lvmthin: local-lvm" /etc/pve/storage.cfg 2>/dev/null || lvdisplay /dev/pve/data >/dev/null 2>&1; then
+    if detect_installer_local_lvm_layout; then
         LOCAL_LVM_EXISTS="yes"
     fi
 
@@ -991,38 +1034,38 @@ function detect_storage_layout_options() {
 }
 
 # --- STORAGE LAYOUT OPTION COLLECTOR ---
-# Collects the local-lvm/snapshot decision before system-changing actions begin.
+# Preserves installer-created local-lvm when present. Root expansion is opt-in and defaults to no.
 function collect_storage_layout_option() {
-    local keep_lvm_yn=""
+    local expand_root_yn=""
 
     section "STORAGE LAYOUT OPTION"
 
     detect_storage_layout_options
 
     detail_line "Root disk size" "${ROOT_DISK_SIZE_GB}GB"
-    detail_line "local-lvm detected" "$LOCAL_LVM_EXISTS"
+    detail_line "installer local-lvm layout detected" "$LOCAL_LVM_EXISTS"
 
-    if [ "$LOCAL_LVM_EXISTS" != "yes" ]; then
-        STORAGE_LAYOUT_MODE="merge_all"
-        msg_ok "NO LOCAL-LVM SNAPSHOT STORAGE DETECTED"
+    if [ "$LOCAL_LVM_EXISTS" == "yes" ]; then
+        STORAGE_LAYOUT_MODE="preserve_local_lvm"
+        msg_ok "Detected installer-created local-lvm storage"
+        echo -e "${YW}Preserving Proxmox installer disk layout.${CL}"
+        echo -e "${YW}Root/local will not be expanded to 100%FREE.${CL}"
+        detail_line "Storage layout mode" "$STORAGE_LAYOUT_MODE"
         return 0
     fi
 
-    if [[ "$ROOT_DISK_SIZE_GB" =~ ^[0-9]+$ ]] && [ "$ROOT_DISK_SIZE_GB" -gt 0 ] && [ "$ROOT_DISK_SIZE_GB" -le 128 ]; then
+    echo ""
+    echo -e "${YW}No installer-created local-lvm storage was detected.${CL}"
+    echo ""
+    echo -e "${YW}Expanding root/local to use all remaining pve VG space will consume free space and prevent using it for local-lvm later.${CL}"
+    echo ""
+
+    expand_root_yn="$(timed_yes_no "Expand Proxmox root/local to 100%FREE?" "n")"
+
+    if [[ "$expand_root_yn" =~ ^[Yy] ]]; then
         STORAGE_LAYOUT_MODE="merge_all"
-        echo -e "${YW}Root disk is 128GB or smaller. Keeping the simple layout and merging local-lvm into local is recommended.${CL}"
-        msg_ok "SMALL ROOT DISK MODE SELECTED"
-        return 0
-    fi
-
-    echo -e "${YW}A larger root disk with local-lvm was detected.${CL}"
-    echo -e "${YW}Keeping local-lvm preserves Proxmox VM snapshots. Merging it gives more local/root space but removes snapshot-capable VM storage.${CL}"
-    keep_lvm_yn="$(timed_yes_no "Keep local-lvm for VM snapshots instead of merging it into local?" "y")"
-
-    if [[ "$keep_lvm_yn" =~ ^[Yy] ]]; then
-        STORAGE_LAYOUT_MODE="keep_local_lvm"
     else
-        STORAGE_LAYOUT_MODE="merge_all"
+        STORAGE_LAYOUT_MODE="skip_root_expansion"
     fi
 
     detail_line "Storage layout mode" "$STORAGE_LAYOUT_MODE"
@@ -1100,19 +1143,32 @@ function final_start_prompt() {
 #  APPLY FUNCTIONS
 # =========================================================
 
-# --- 37. STORAGE MERGE ---
-# Removes local-lvm and expands the OS/root storage for simple single-node fresh installs.
-# Supports ext filesystems through resize2fs and XFS through xfs_growfs.
+# --- 37. STORAGE LAYOUT APPLY ---
+# Preserves installer-created local-lvm by default and only runs legacy root expansion when explicitly approved.
+# Supports ext filesystems through resize2fs and XFS through xfs_growfs on the legacy expansion path.
 function apply_storage_merge() {
     local pve_free_extents=""
 
-    section "STORAGE MERGE"
+    section "STORAGE LAYOUT APPLY"
 
-    if [ "${STORAGE_LAYOUT_MODE:-merge_all}" == "keep_local_lvm" ]; then
-        msg_ok "STORAGE LAYOUT MODE: KEEP LOCAL-LVM FOR VM SNAPSHOTS"
-        echo -e "${YW}local-lvm was preserved as snapshot-capable VM storage. Root/local merge skipped by user choice.${CL}"
-        return 0
-    fi
+    case "${STORAGE_LAYOUT_MODE:-unselected}" in
+        preserve_local_lvm)
+            msg_ok "STORAGE LAYOUT MODE: PRESERVE INSTALLER LOCAL-LVM"
+            echo -e "${YW}local-lvm remains available as snapshot-capable VM storage.${CL}"
+            echo -e "${YW}Root/local expansion skipped to preserve Proxmox installer disk layout.${CL}"
+            return 0
+            ;;
+        skip_root_expansion)
+            msg_ok "Root/local expansion skipped by user"
+            return 0
+            ;;
+        merge_all)
+            msg_warn "LEGACY STORAGE MERGE APPROVED BY USER"
+            ;;
+        *)
+            msg_error "Storage layout mode was not selected. Refusing storage changes."
+            ;;
+    esac
 
     msg_info "Checking Proxmox local-lvm storage configuration"
     if grep -q "^lvmthin: local-lvm" /etc/pve/storage.cfg 2>/dev/null; then
@@ -1817,6 +1873,7 @@ INSTALL_CROWDSEC_BOUNCER_PACKAGE="$CROWDSEC_BOUNCER_PACKAGE"
 INSTALL_REALTEK_IFACE="$REALTEK_IFACE"
 INSTALL_REALTEK_OPTIMIZED="$REALTEK_OPTIMIZED"
 INSTALL_NUMLOCK_CONFIGURED="$NUMLOCK_CONFIGURED"
+INSTALL_STORAGE_LAYOUT_MODE="$STORAGE_LAYOUT_MODE"
 INSTALL_DEFAULT_IFACE="$DEFAULT_IFACE"
 INSTALL_LAN_CIDR="$LAN_CIDR"
 INSTALL_SSH_ROOT_KEY_FILE="$SSH_ROOT_KEY_FILE"
@@ -1851,6 +1908,7 @@ INFO "Public host 80/443 selected: \$INSTALL_ALLOW_PUBLIC_WEB"
 INFO "Realtek NIC optimized during install: \$INSTALL_REALTEK_OPTIMIZED"
 INFO "Realtek interface: \$INSTALL_REALTEK_IFACE"
 INFO "NumLock service configured: \$INSTALL_NUMLOCK_CONFIGURED"
+INFO "Storage layout mode: \$INSTALL_STORAGE_LAYOUT_MODE"
 INFO "Default network interface during install: \${INSTALL_DEFAULT_IFACE:-unknown}"
 INFO "LAN CIDR allowed for SSH/WebUI during install: \${INSTALL_LAN_CIDR:-not-detected}"
 INFO "Root SSH key file detected during install: \${INSTALL_SSH_ROOT_KEY_FILE:-not-detected}"
@@ -1879,9 +1937,23 @@ if grep -q "pve-no-subscription" /etc/apt/sources.list.d/proxmox.sources 2>/dev/
 if [ ! -f /etc/apt/sources.list.d/pve-enterprise.sources ]; then PASS "Enterprise repository disabled"; else FAIL "Enterprise repository still present"; fi
 if apt-get check >/dev/null 2>&1; then PASS "APT package database healthy"; else FAIL "APT package database has problems"; fi
 
-# Storage merge checks.
-if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then WARN "local-lvm still exists in storage.cfg"; else PASS "local-lvm removed from Proxmox storage config"; fi
-if lvdisplay /dev/pve/data >/dev/null 2>&1; then WARN "/dev/pve/data still exists"; else PASS "/dev/pve/data not present"; fi
+# Storage layout checks.
+case "\$INSTALL_STORAGE_LAYOUT_MODE" in
+    preserve_local_lvm)
+        if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then PASS "local-lvm preserved in Proxmox storage config"; else FAIL "local-lvm missing from Proxmox storage config"; fi
+        if lvdisplay /dev/pve/data >/dev/null 2>&1; then PASS "/dev/pve/data preserved for local-lvm"; else FAIL "/dev/pve/data missing after preserve mode"; fi
+        ;;
+    merge_all)
+        if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then WARN "local-lvm still exists in storage.cfg"; else PASS "local-lvm removed from Proxmox storage config"; fi
+        if lvdisplay /dev/pve/data >/dev/null 2>&1; then WARN "/dev/pve/data still exists"; else PASS "/dev/pve/data not present"; fi
+        ;;
+    skip_root_expansion)
+        INFO "Root/local expansion was skipped by user; local-lvm state was not changed by Script 1"
+        ;;
+    *)
+        WARN "Unknown storage layout mode: \$INSTALL_STORAGE_LAYOUT_MODE"
+        ;;
+esac
 if df -h /var/lib/vz >/dev/null 2>&1; then PASS "local storage path /var/lib/vz is accessible"; else FAIL "local storage path /var/lib/vz is not accessible"; fi
 
 # GRUB and IOMMU checks.
@@ -2159,6 +2231,7 @@ function main() {
     check_fresh_install_state
     detect_gpu_and_collect_choice
     show_storage_detection
+    collect_storage_layout_option
     collect_user_options
     final_start_prompt
 
