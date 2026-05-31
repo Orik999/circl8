@@ -36,9 +36,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.0"
-SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="audit-pro-first-untimed-inputs-stability"
+SCRIPT_VERSION="v2.1.1"
+SCRIPT_UPDATED="2026-05-30"
+SCRIPT_BUILD="script4-host-guard"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -621,6 +621,76 @@ function init_logging() {
     fi
 
     LOGGING_ENABLED="yes"
+}
+
+# --- 26. SCRIPT 4 ENVIRONMENT GUARD ---
+# Refuses to run on Proxmox/PVE and only allows Ubuntu VM environments.
+# This guard runs before logging, package operations, user/group changes, services or firewall changes.
+function detect_proxmox_host() {
+    command -v pveversion >/dev/null 2>&1 && return 0
+    [ -d /etc/pve ] && return 0
+    [ -f /etc/pve/storage.cfg ] && return 0
+    dpkg -l 2>/dev/null | grep -q '^ii[[:space:]]\+pve-manager[[:space:]]' && return 0
+
+    return 1
+}
+
+function detect_ubuntu_os() {
+    local os_id="unknown"
+
+    if [ -r /etc/os-release ]; then
+        os_id="$(awk -F= '$1 == "ID" { gsub(/"/, "", $2); print $2; exit }' /etc/os-release 2>/dev/null || true)"
+    fi
+
+    [ "${os_id:-unknown}" == "ubuntu" ]
+}
+
+function get_detected_os_id() {
+    local os_id="unknown"
+
+    if [ -r /etc/os-release ]; then
+        os_id="$(awk -F= '$1 == "ID" { gsub(/"/, "", $2); print $2; exit }' /etc/os-release 2>/dev/null || true)"
+    fi
+
+    echo "${os_id:-unknown}"
+}
+
+function guard_script4_environment() {
+    local os_id=""
+
+    if detect_proxmox_host; then
+        echo -e "${RD}ERROR: This script must run inside the Ubuntu VM, not on the Proxmox host.${CL}"
+        echo ""
+        echo -e "${RD}Detected Proxmox/PVE environment.${CL}"
+        echo -e "${YW}Stop here.${CL}"
+        echo ""
+        echo -e "${BL}Correct location:${CL}"
+        echo -e "  SSH into the Ubuntu VM first:"
+        echo -e "    ${GN}ssh <ubuntu-user>@<vm-ip>${CL}"
+        echo ""
+        echo -e "Then run:"
+        echo -e "  ${GN}4-ubuntuVMsetup.sh${CL}"
+        exit 1
+    fi
+
+    if ! detect_ubuntu_os; then
+        os_id="$(get_detected_os_id)"
+        echo -e "${RD}ERROR: This script is intended for the Ubuntu VM only.${CL}"
+        echo -e "${YW}Detected OS: ${os_id}${CL}"
+        exit 1
+    fi
+}
+
+function is_environment_check_mode() {
+    local arg=""
+
+    [ "${SCRIPT4_CHECK_ENV:-0}" = "1" ] && return 0
+
+    for arg in "$@"; do
+        [ "$arg" = "--check-environment" ] && return 0
+    done
+
+    return 1
 }
 
 # --- 26. SCRIPT INITIALIZATION ---
@@ -1553,6 +1623,7 @@ function reboot_prompt() {
 
 # --- 47. MAIN FUNCTION ---
 function main() {
+    guard_script4_environment
     init_script
     check_previous_marker
     detect_environment
@@ -1582,5 +1653,11 @@ function main() {
 
     exit 0
 }
+
+if is_environment_check_mode "$@"; then
+    guard_script4_environment
+    echo -e "${CM} ${GN}Script 4 environment check passed. Ubuntu VM detected.${CL}"
+    exit 0
+fi
 
 main "$@"
