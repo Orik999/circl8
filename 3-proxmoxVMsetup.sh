@@ -1368,7 +1368,6 @@ function show_system_audit() {
 
     echo ""
     echo -e "${YW}Storage availability:${CL}"
-    echo ""
 
     for storage_name in "${audit_storage_list[@]}"; do
         storage_type="$(get_storage_type "$storage_name")"
