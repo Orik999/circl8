@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.3.2"
+SCRIPT_VERSION="v1.3.3"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="pve923-existing-thinpool-action-menu"
+SCRIPT_BUILD="pve923-disk-audit-display-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -1184,8 +1184,44 @@ function audit_disks() {
     msg_ok "DISK AUDIT COMPLETE"
 }
 
+# Prints readable warning bullets for selectable destructive-reuse disks.
+function print_disk_warning_cards() {
+    local risk="$1"
+    local warning=""
+    local normalized=""
+
+    if [ -z "$risk" ] || [ "$risk" == "none" ]; then
+        echo -e "       ${BL}warnings:${CL} ${GN}none${CL}"
+        return 0
+    fi
+
+    echo -e "       ${YW}warnings:${CL}"
+
+    while IFS= read -r warning; do
+        warning="$(echo "$warning" | xargs)"
+        [ -z "$warning" ] && continue
+
+        case "$warning" in
+            "child partitions/devices detected ("*")")
+                normalized="$(echo "$warning" | sed -E 's/child partitions\/devices detected \(([0-9]+)\)/child partitions\/devices detected: \1/')"
+                ;;
+            "existing LVM PV/VG metadata detected (VGs: "*")")
+                normalized="$(echo "$warning" | sed -E 's/existing LVM PV\/VG metadata detected \(VGs: ([^;]+); PVs: ([^)]+)\)/existing LVM metadata: VG=\1, PV=\2/')"
+                ;;
+            "existing LVM PV metadata detected ("*")")
+                normalized="$(echo "$warning" | sed -E 's/existing LVM PV metadata detected \(([^)]+)\)/existing LVM metadata: PV=\1/')"
+                ;;
+            *)
+                normalized="$warning"
+                ;;
+        esac
+
+        echo -e "        ${YW}-${CL} ${normalized}"
+    done < <(echo "$risk" | tr ';' '\n')
+}
+
 # --- 34. DISK LIST DISPLAY ---
-# Displays safe selectable disks and blocked disks separately.
+# Displays safe selectable disks and blocked disks as readable cards.
 function show_disk_lists() {
     local name=""
     local size=""
@@ -1209,28 +1245,19 @@ function show_disk_lists() {
             dtype="HDD"
         fi
 
+        echo ""
+        echo -e "  ${BL}$((i+1))) /dev/${name}${CL}"
+        echo -e "       ${BL}size:${CL} ${GN}${size}${CL}"
+        echo -e "       ${BL}type:${CL} ${GN}${dtype}${CL}"
+        echo -e "       ${BL}bus:${CL} ${GN}${tran:-unknown}${CL}"
+        echo -e "       ${BL}model:${CL} ${GN}${model:-unknown}${CL}"
+
         if [ "$entry_type" == "destructive-reuse" ]; then
-            printf " %b %2d) %-12s %-8s %-4s BUS=%-8s %s %b%s%b\n" \
-                "${YW}━━━━━▶${CL}" \
-                "$((i+1))" \
-                "/dev/${name}" \
-                "${size}" \
-                "${dtype}" \
-                "${tran:-unknown}" \
-                "${model:-unknown}" \
-                "${RD}" \
-                "DESTRUCTIVE REUSE" \
-                "${CL}"
-            echo -e "      ${YW}!${CL} Existing metadata/signatures: ${risk}"
+            echo -e "       ${BL}action:${CL} ${RD}DESTRUCTIVE REUSE${CL}"
+            print_disk_warning_cards "$risk"
         else
-            printf " %b %2d) %-12s %-8s %-4s BUS=%-8s %s\n" \
-                "${BL}━━━━━▶${CL}" \
-                "$((i+1))" \
-                "/dev/${name}" \
-                "${size}" \
-                "${dtype}" \
-                "${tran:-unknown}" \
-                "${model:-unknown}"
+            echo -e "       ${BL}action:${CL} ${GN}clean storage candidate${CL}"
+            echo -e "       ${BL}warnings:${CL} ${GN}none${CL}"
         fi
     done
 
@@ -1240,12 +1267,11 @@ function show_disk_lists() {
 
         for line in "${BLOCKED_DISKS[@]}"; do
             IFS='|' read -r name size tran rota model reason <<< "$line"
-            printf " %b %-12s %-8s %s | reason=%s\n" \
-                "${YW}━━━━━▶${CL}" \
-                "/dev/${name}" \
-                "${size}" \
-                "${model:-unknown}" \
-                "${reason}"
+            echo ""
+            echo -e "  ${YW}/dev/${name}${CL}"
+            echo -e "     ${BL}size:${CL} ${GN}${size}${CL}"
+            echo -e "     ${BL}model:${CL} ${GN}${model:-unknown}${CL}"
+            echo -e "     ${YW}reason:${CL} ${reason}"
         done
     fi
 }
@@ -1255,18 +1281,30 @@ function show_disk_lists() {
 # Selects a safe disk using numeric validation.
 function select_disk() {
     local disk_idx=""
+    local selected_entry=""
+    local selected_size=""
+    local selected_model=""
 
     show_disk_lists
 
     disk_idx="$(timed_number_input "Select disk number to format" "1" "1" "${#SAFE_DISKS[@]}")"
 
-    SELECTED_DISK_NAME="$(echo "${SAFE_DISKS[$((disk_idx-1))]}" | cut -d'|' -f1)"
+    selected_entry="${SAFE_DISKS[$((disk_idx-1))]}"
+    SELECTED_DISK_NAME="$(echo "$selected_entry" | cut -d'|' -f1)"
     SELECTED_DISK="/dev/${SELECTED_DISK_NAME}"
-    SELECTED_DISK_ENTRY_TYPE="$(echo "${SAFE_DISKS[$((disk_idx-1))]}" | cut -d'|' -f6)"
-    SELECTED_DISK_REUSE_REASON="$(echo "${SAFE_DISKS[$((disk_idx-1))]}" | cut -d'|' -f7-)"
+    selected_size="$(echo "$selected_entry" | cut -d'|' -f2)"
+    selected_model="$(echo "$selected_entry" | cut -d'|' -f5)"
+    SELECTED_DISK_ENTRY_TYPE="$(echo "$selected_entry" | cut -d'|' -f6)"
+    SELECTED_DISK_REUSE_REASON="$(echo "$selected_entry" | cut -d'|' -f7-)"
 
     if [ ! -b "$SELECTED_DISK" ]; then
         msg_error "Selected disk is not a block device."
+    fi
+
+    if [ "$SELECTED_DISK_ENTRY_TYPE" == "destructive-reuse" ]; then
+        msg_ok "Selected disk for destructive reuse: ${SELECTED_DISK} - ${selected_model:-unknown} - ${selected_size}"
+    else
+        msg_ok "Selected disk for storage creation: ${SELECTED_DISK} - ${selected_model:-unknown} - ${selected_size}"
     fi
 }
 
