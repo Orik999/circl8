@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.5"
+SCRIPT_VERSION="v1.3.6"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-preflight-ui-polish"
+SCRIPT_BUILD="script1-crowdsec-ui-input-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -1525,10 +1525,8 @@ function collect_user_options() {
 
     echo ""
     echo -e "${BL}PROXMOX HOST WEB PORTS${CL}"
-    echo ""
     echo -e "${YW}Traefik normally handles public HTTP/HTTPS from inside the Ubuntu VM.${CL}"
     echo -e "${YW}For this setup, router port-forwarding should usually point to the VM, not the Proxmox host.${CL}"
-    echo ""
     public_web_yn="$(timed_yes_no "Expose public HTTP/HTTPS 80/443 on Proxmox host firewall:" "n")"
 
     if [[ "$public_web_yn" =~ ^[Yy] ]]; then
@@ -2367,7 +2365,7 @@ function read_text_from_tty() {
     if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf '%b' "${YW}${prompt} [default: ${default}]: ${CL}" > /dev/tty
         IFS= read -r value < /dev/tty || true
-        printf '\r\033[K' > /dev/tty
+        printf '\033[1A\r\033[K' > /dev/tty
     else
         IFS= read -r -p "${prompt} [default: ${default}]: " value || true
     fi
@@ -2381,11 +2379,10 @@ function read_secret_from_tty() {
 
     if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf '%b' "${YW}${prompt}: ${CL}" > /dev/tty
-        IFS= read -r -s value < /dev/tty || true
-        printf '\r\033[K' > /dev/tty
+        IFS= read -r value < /dev/tty || true
+        printf '\033[1A\r\033[K' > /dev/tty
     else
-        IFS= read -r -s -p "${prompt}: " value || true
-        printf '\n' >&2
+        IFS= read -r -p "${prompt}: " value || true
     fi
 
     printf '%s' "$value"
