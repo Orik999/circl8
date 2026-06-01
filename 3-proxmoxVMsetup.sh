@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.3.1"
+SCRIPT_VERSION="v1.3.2"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="gpu-option-spacing-polish"
+SCRIPT_BUILD="execution-final-summary-ui-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -1889,24 +1889,20 @@ function final_apply_confirmation() {
 # Checks conflict only after all input is collected, immediately before creation.
 # Uses qm config because it catches partial/incomplete VM configs better than qm status.
 function check_vm_id_conflict() {
-    section "VM ID CONFLICT CHECK"
-
     msg_info "Checking VM ID availability"
 
     if qm config "$VMID" >/dev/null 2>&1; then
         msg_error "VM ID ${VMID} already exists. Remove it first or choose another VM ID."
     fi
 
-    msg_ok "VM ID ${VMID} AVAILABLE"
+    msg_ok "VM ID available: ${VMID}"
 }
 
 # --- 54. VM CREATE ---
 # Creates Ubuntu/Linux VM using selected standard and advanced settings.
 # Proxmox errors are captured and displayed if qm create fails.
 function create_vm() {
-    section "VM CREATION"
-
-    msg_info "Creating VM ${VMID} (${VM_NAME})"
+    msg_info "Creating VM shell"
 
     run_proxmox_cmd "creating VM ${VMID}" \
         qm create "$VMID" \
@@ -1924,7 +1920,7 @@ function create_vm() {
 
     VM_CREATED="yes"
 
-    msg_ok "VM CREATED"
+    msg_ok "VM shell created"
 }
 
 # --- 55. EFI DISK CONFIGURATION ---
@@ -1935,23 +1931,19 @@ function configure_efi_disk() {
         return 0
     fi
 
-    section "EFI DISK CONFIGURATION"
-
     msg_info "Configuring EFI disk"
 
     run_proxmox_cmd "configuring EFI disk" \
         qm set "$VMID" \
         --efidisk0 "${STORAGE_ID}:0,format=${EFI_FORMAT},efitype=4m,pre-enrolled-keys=0"
 
-    msg_ok "EFI DISK CONFIGURED"
+    msg_ok "EFI disk configured"
 }
 
 # --- 56. MAIN VM DISK CONFIGURATION ---
 # Adds main OS disk with selected disk controller, discard setting and iothread.
 function configure_vm_disk() {
-    section "VM OS DISK CONFIGURATION"
-
-    msg_info "Configuring VM OS disk"
+    msg_info "Configuring OS disk"
 
     run_proxmox_cmd "setting disk controller" \
         qm set "$VMID" \
@@ -1961,16 +1953,14 @@ function configure_vm_disk() {
         qm set "$VMID" \
         --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=${DISCARD_VALUE},iothread=1"
 
-    msg_ok "VM OS DISK CONFIGURED"
+    msg_ok "OS disk configured"
 }
 
 # --- 57. ISO AND BOOT ORDER ---
 # Attaches selected ISO if available and sets ISO-first boot order.
 # If no ISO is attached, boots from OS disk only.
 function configure_vm_boot() {
-    section "VM BOOT CONFIGURATION"
-
-    msg_info "Configuring VM boot"
+    msg_info "Configuring boot order"
 
     if [ -n "$ISO_PATH" ]; then
         run_proxmox_cmd "attaching ISO" \
@@ -1990,7 +1980,7 @@ function configure_vm_boot() {
             --boot "order=${BOOT_ORDER}"
     fi
 
-    msg_ok "VM BOOT CONFIGURED"
+    msg_ok "boot order configured"
 }
 
 # --- 58. VM MAC VERIFICATION ---
@@ -1998,15 +1988,13 @@ function configure_vm_boot() {
 function verify_vm_mac() {
     local configured_mac=""
 
-    section "VM MAC VERIFICATION"
-
     msg_info "Verifying VM MAC address"
 
     configured_mac="$(get_vm_mac_from_config "$VMID" || true)"
 
     if [ -n "$configured_mac" ]; then
         VM_MAC_ADDRESS="$configured_mac"
-        msg_ok "VM MAC ADDRESS VERIFIED (${VM_MAC_ADDRESS})"
+        msg_ok "VM MAC verified: ${VM_MAC_ADDRESS}"
     else
         msg_warn "Could not read VM MAC address from Proxmox config. Check with: qm config ${VMID} | grep net0"
     fi
@@ -2063,8 +2051,6 @@ function attach_gpu_passthrough() {
 # --- 60. COMPLETION MARKER ---
 # Creates marker file so future checks can identify that this setup was already run.
 function write_completion_marker() {
-    section "COMPLETION MARKER"
-
     msg_info "Writing completion marker"
 
     cat <<EOF > "$COMPLETED_MARKER"
@@ -2097,15 +2083,13 @@ Discard/TRIM: ${DISCARD_ENABLED}
 Advanced Settings Used: ${ADVANCED_SETTINGS}
 EOF
 
-    msg_ok "COMPLETION MARKER WRITTEN"
+    msg_ok "completion marker written"
 }
 
 
 # --- 61. VERIFICATION REPORT ---
 # Creates a detailed post-create verification report without changing the VM.
 function create_verification_report() {
-    section "VERIFICATION"
-
     msg_info "Creating VM verification report"
 
     cat <<EOF > "$VERIFY_LOG"
@@ -2163,52 +2147,69 @@ EOF
         qm config "$VMID" 2>/dev/null || true
     } | tee -a "$VERIFY_LOG" >/dev/null
 
-    msg_ok "VM VERIFICATION REPORT CREATED"
+    msg_ok "verification report created"
 }
 
 # --- 62. FINAL SUMMARY ---
 # Shows final VM configuration and the MAC address to reserve in the router.
 function show_final_summary() {
+    local gpu_func=""
+    local gpu_function_count="0"
+
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
-    echo -e "VM ID: ${GN}${VMID}${CL}"
-    echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
-    echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
-    echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
-    echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
-    echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
-    echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
-    echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
-    echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
-    echo -e "GPU FUNCTIONS ATTACHED: ${GN}${GPU_FUNCTIONS_ATTACHED:-none}${CL}"
-    echo -e "VGA DISPLAY: ${GN}std${CL}"
-    echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
-    echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
-    echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
-    echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
-    echo -e "BALLOONING: ${GN}${BALLOONING_ENABLED}${CL}"
-    echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
-    echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
-    echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
-    echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
-    echo -e "BOOT ORDER: ${GN}${BOOT_ORDER:-unknown}${CL}"
-    echo -e "VERIFY LOG: ${GN}${VERIFY_LOG}${CL}"
+    echo -e "${YW}VM SUMMARY:${CL}"
+    echo -e "  ${BL}VM ID:${CL} ${ANS}${VMID}${CL}"
+    echo -e "  ${BL}VM NAME:${CL} ${ANS}${VM_NAME}${CL}"
+    echo -e "  ${BL}RAM:${CL} ${ANS}${RAM_GB_INPUT}GB${CL}"
+    echo -e "  ${BL}CPU CORES:${CL} ${ANS}${CPU_INPUT}${CL}"
+    echo -e "  ${BL}OS DISK:${CL} ${ANS}${DISK_GB_INPUT}GB${CL}"
+    echo -e "  ${BL}STORAGE:${CL} ${ANS}${STORAGE_ID}${CL}"
+    echo -e "  ${BL}STORAGE TYPE:${CL} ${GN}${STORAGE_TYPE:-unknown}${CL}"
+    echo -e "  ${BL}ISO:${CL} ${ANS}${ISO_PATH:-none}${CL}"
     echo ""
-    echo -e "${BL}NETWORK / ROUTER DHCP RESERVATION:${CL}"
-    echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
-    echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
-    echo -e "${YW}Recommended: reserve this MAC address in your router so the VM always receives the same IP via DHCP.${CL}"
-    echo -e "${YW}Check later with: qm config ${VMID} | grep net0${CL}"
-    echo ""
-    echo -e "${BL}NEXT STEP:${CL}"
 
-    if [ -n "$ISO_PATH" ]; then
-        echo -e "${YW}Manual install path:${CL} Start the VM and install Ubuntu from the Proxmox console."
+    echo -e "${YW}GPU SUMMARY:${CL}"
+    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
+    if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_FUNCTIONS_ATTACHED" ]; then
+        gpu_function_count="$(wc -w <<< "$GPU_FUNCTIONS_ATTACHED" | xargs)"
+        if [ "$gpu_function_count" -le 1 ]; then
+            echo -e "  ${BL}GPU DEVICE:${CL} ${GN}${GPU_FUNCTIONS_ATTACHED}${CL}"
+        else
+            echo -e "  ${BL}GPU DEVICES:${CL}"
+            for gpu_func in $GPU_FUNCTIONS_ATTACHED; do
+                echo -e "    - ${GN}${gpu_func}${CL}"
+            done
+        fi
     else
-        echo -e "${YW}No ISO was attached. Attach/install media before starting the VM.${CL}"
+        echo -e "  ${BL}GPU DEVICES:${CL} ${ANS}not attached${CL}"
     fi
+    echo ""
 
-    echo -e "${YW}Autoinstall path:${CL} Run script 3.5 next to generate and attach the Ubuntu autoinstall ISO."
+    echo -e "${YW}PLATFORM SETTINGS:${CL}"
+    echo -e "  ${BL}MACHINE TYPE:${CL} ${GN}${MACHINE_TYPE}${CL}"
+    echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_TYPE}${CL}"
+    echo -e "  ${BL}EFI FORMAT:${CL} ${GN}${EFI_FORMAT}${CL}"
+    echo -e "  ${BL}CPU TYPE:${CL} ${GN}${CPU_TYPE_VM}${CL}"
+    echo -e "  ${BL}BALLOONING:${CL} ${ANS}$(yes_no_label "$BALLOONING_ENABLED")${CL}"
+    echo -e "  ${BL}NETWORK MODEL:${CL} ${GN}${NETWORK_MODEL}${CL}"
+    echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${ANS}$(yes_no_label "$QEMU_AGENT_ENABLED")${CL}"
+    echo -e "  ${BL}DISK CONTROLLER:${CL} ${GN}${DISK_CONTROLLER}${CL}"
+    echo -e "  ${BL}DISCARD/TRIM:${CL} ${ANS}$(yes_no_label "$DISCARD_ENABLED")${CL}"
+    echo -e "  ${BL}BOOT ORDER:${CL} ${GN}${BOOT_ORDER:-unknown}${CL}"
+    echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${ANS}$(yes_no_label "$ADVANCED_SETTINGS")${CL}"
+    echo -e "  ${BL}VERIFY LOG:${CL} ${GN}${VERIFY_LOG}${CL}"
+    echo ""
+
+    echo -e "${YW}NETWORK / DHCP:${CL}"
+    echo -e "  ${BL}VM MAC ADDRESS:${CL} ${ANS}${VM_MAC_ADDRESS}${CL}"
+    echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${ANS}$(yes_no_label "$CUSTOM_MAC_SELECTED")${CL}"
+    echo -e "  ${YW}Reminder: reserve this MAC in your router if you want a fixed VM IP.${CL}"
+    echo ""
+
+    echo -e "${YW}NEXT STEP:${CL}"
+    echo -e "  ${BL}Manual install:${CL} ${YW}start the VM and install Ubuntu from the Proxmox console.${CL}"
+    echo -e "  ${BL}Autoinstall:${CL} ${YW}run Script 3.5 next to generate and attach the Ubuntu autoinstall ISO.${CL}"
     echo ""
 }
 
@@ -2233,6 +2234,8 @@ function main() {
     collect_advanced_settings
     collect_mac_configuration
     final_apply_confirmation
+
+    section "VM BUILD / APPLY"
 
     check_vm_id_conflict
     create_vm
