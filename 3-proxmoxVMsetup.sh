@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.9"
+SCRIPT_VERSION="v1.3.0"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="final-ui-spacing-nesting-polish"
+SCRIPT_BUILD="final-prompt-storage-readability-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -317,6 +317,8 @@ function timed_yes_no() {
     local key=""
     local default_label="Y/n"
     local final_label=""
+    local confirm_label=""
+    local confirm_indent="${3:-}"
     local deadline=""
     local now=""
     local remaining=""
@@ -369,9 +371,10 @@ function timed_yes_no() {
 
     [ -z "$answer" ] && answer="$default"
     final_label="$(yes_no_label "$answer")"
+    confirm_label="${prompt%\?}"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${BL}${prompt}:${CL} ${ANS}${final_label}${CL}"
+    tty_println "${confirm_indent}${CM} ${BL}${confirm_label}:${CL} ${ANS}${final_label}${CL}"
 
     echo "$answer"
 }
@@ -491,6 +494,7 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local confirm_label=""
 
     # Text/path/name inputs are deliberately NOT timed.
     # Countdown prompts are reserved only for simple Y/n decisions.
@@ -498,8 +502,10 @@ function timed_text_input() {
     answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
     [ -z "$answer" ] && answer="$default"
 
+    confirm_label="${prompt%\?}"
+
     tty_print "${BFR}"
-    tty_println "${CM} ${BL}${prompt}:${CL} ${ANS}${answer}${CL}"
+    tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${answer}${CL}"
 
     echo "$answer"
 }
@@ -517,6 +523,7 @@ function timed_number_input() {
     local min_value="${3:-1}"
     local max_value="${4:-}"
     local answer=""
+    local confirm_label=""
 
     # Numeric inputs are deliberately NOT timed.
     # Countdown prompts are reserved only for simple Y/n decisions.
@@ -525,8 +532,10 @@ function timed_number_input() {
         [ -z "$answer" ] && answer="$default"
 
         if validate_number "$answer" "$min_value" "$max_value"; then
+            confirm_label="${prompt%\?}"
+
             tty_print "${BFR}"
-            tty_println "${CM} ${BL}${prompt}:${CL} ${ANS}${answer}${CL}"
+            tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${answer}${CL}"
             echo "$answer"
             return 0
         fi
@@ -1359,6 +1368,7 @@ function show_system_audit() {
 
     echo ""
     echo -e "${YW}Storage availability:${CL}"
+    echo ""
 
     for storage_name in "${audit_storage_list[@]}"; do
         storage_type="$(get_storage_type "$storage_name")"
@@ -1368,8 +1378,10 @@ function show_system_audit() {
 
         if [ "$role" == "Proxmox system disk" ]; then
             if [ "$printed_system" == "no" ]; then
-                echo -e "  ${BL}Proxmox system storage:${CL}"
+                echo -e "  ${YW}Proxmox system storage:${CL}"
                 printed_system="yes"
+            else
+                echo ""
             fi
             print_storage_option_card "" "$storage_name" "$storage_type" "$snapshot_support" "$recommended_use" "$role"
         fi
@@ -1384,8 +1396,10 @@ function show_system_audit() {
         if [ "$role" != "Proxmox system disk" ]; then
             if [ "$printed_secondary" == "no" ]; then
                 [ "$printed_system" == "yes" ] && echo ""
-                echo -e "  ${BL}Secondary / other VM storage:${CL}"
+                echo -e "  ${YW}Secondary VM storage:${CL}"
                 printed_secondary="yes"
+            else
+                echo ""
             fi
             print_storage_option_card "" "$storage_name" "$storage_type" "$snapshot_support" "$recommended_use" "$role"
         fi
@@ -1405,7 +1419,7 @@ function start_confirmation() {
 
     echo ""
     echo -e "${YW}Start confirmation:${CL}"
-    start_yn="$(timed_yes_no "  Start the Proxmox VM Setup Script?" "y")"
+    start_yn="$(timed_yes_no "Start the Proxmox VM Setup Script?" "y" "  ")"
     echo ""
 
     if [[ "$start_yn" =~ ^[Nn] ]]; then
@@ -1745,10 +1759,10 @@ function collect_mac_configuration() {
 
     section "VM NETWORK / ROUTER DHCP RESERVATION"
 
-    echo -e "${BL}Recommended:${CL}"
+    echo -e "${YW}Recommended:${CL}"
     echo -e "  ${YW}Keep DHCP inside Ubuntu.${CL}"
     echo -e "  ${YW}Reserve a static IP in your router using the VM MAC address.${CL}"
-    echo -e "  ${YW}This script can generate a stable MAC, or you can enter an existing reservation MAC.${CL}"
+    echo -e "  ${YW}Use this MAC in your router reservation if you want a fixed VM IP.${CL}"
     echo ""
 
     msg_info "Generating suggested VM MAC address"
@@ -1788,7 +1802,7 @@ function collect_mac_configuration() {
     fi
 
     echo -e "${BL}VM MAC ADDRESS:${CL} ${GN}${VM_MAC_ADDRESS}${CL}"
-    echo -e "${YW}Use this MAC in your router DHCP reservation if you want the VM to always receive the same IP.${CL}"
+    echo -e "${YW}Use this MAC in your router reservation if you want a fixed VM IP.${CL}"
 }
 
 # --- 52. FINAL APPLY CONFIRMATION ---
