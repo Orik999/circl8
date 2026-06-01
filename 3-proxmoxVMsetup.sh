@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.3.2"
+SCRIPT_VERSION="v1.3.3"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="execution-final-summary-ui-polish"
+SCRIPT_BUILD="existing-vm-recreate-handling"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -82,6 +82,10 @@ DISK_GB_INPUT=""
 VM_MAC_ADDRESS=""
 SUGGESTED_MAC_ADDRESS=""
 CUSTOM_MAC_SELECTED="no"
+
+RECREATE_EXISTING_VM="no"
+RECREATE_EXISTING_VMID=""
+RECREATE_EXISTING_VM_NAME=""
 
 ADVANCED_SETTINGS="n"
 MACHINE_TYPE="q35"
@@ -656,6 +660,82 @@ function validate_vm_name() {
     return 1
 }
 
+# --- 23A. VM EXISTENCE HELPER ---
+# Checks whether a Proxmox VMID currently exists.
+function vm_exists() {
+    local vmid="$1"
+
+    qm config "$vmid" >/dev/null 2>&1
+}
+
+# --- 23B. VM NAME LOOKUP HELPER ---
+# Reads an existing VM name for recreate warnings.
+function get_vm_name() {
+    local vmid="$1"
+    local name=""
+
+    name="$(qm config "$vmid" 2>/dev/null | awk -F': ' '/^name:/ {print $2; exit}' || true)"
+    [ -n "$name" ] || name="unknown"
+
+    echo "$name"
+}
+
+# --- 23C. RECREATE STATE RESET HELPER ---
+# Clears pending recreate state when the user chooses another VMID or a free VMID is selected.
+function reset_recreate_state() {
+    RECREATE_EXISTING_VM="no"
+    RECREATE_EXISTING_VMID=""
+    RECREATE_EXISTING_VM_NAME=""
+}
+
+# --- 23D. EXISTING VMID ACTION HELPER ---
+# Handles VMID collisions immediately during input collection without destroying anything yet.
+function handle_existing_vmid() {
+    local existing_name=""
+    local action=""
+
+    if ! vm_exists "$VMID"; then
+        reset_recreate_state
+        msg_ok "VM ID available: ${VMID}"
+        return 0
+    fi
+
+    existing_name="$(get_vm_name "$VMID")"
+
+    echo ""
+    echo -e "${YW}Existing VM detected:${CL}"
+    echo -e "  ${BL}VM ID:${CL} ${GN}${VMID}${CL}"
+    echo -e "  ${BL}Name:${CL} ${GN}${existing_name}${CL}"
+    echo ""
+    echo -e "${YW}Choose action:${CL}"
+    echo -e "  ${RD}1) Destroy and recreate VM ${VMID}${CL}"
+    echo -e "  ${YW}2) Choose another VM ID${CL}"
+    echo -e "  ${YW}3) Exit without changes${CL}"
+    echo ""
+
+    action="$(timed_number_input "Select existing VM action" "1" "1" "3")"
+
+    case "$action" in
+        1)
+            RECREATE_EXISTING_VM="yes"
+            RECREATE_EXISTING_VMID="$VMID"
+            RECREATE_EXISTING_VM_NAME="$existing_name"
+            tty_println "${CM} ${BL}Existing VM recreate selected:${CL} ${ANS}VM ${VMID}${CL}"
+            msg_warn "VM ${VMID} will be destroyed and recreated after final confirmation"
+            return 0
+            ;;
+        2)
+            reset_recreate_state
+            return 1
+            ;;
+        3)
+            reset_recreate_state
+            echo -e "${YW}No changes made. Exiting.${CL}"
+            exit 0
+            ;;
+    esac
+}
+
 # --- 24. PHYSICAL RAM DETECTION HELPER ---
 # Uses MemTotal and rounds up to physical GiB.
 # This fixes 16GB systems being detected as 15GB and defaulting to 11GB RAM.
@@ -1196,14 +1276,52 @@ function normalize_mac_address() {
 # Checks existing Proxmox VM config files for a MAC address to avoid duplicate network identities.
 function mac_address_in_use() {
     local mac="$1"
+
+    [ -n "$(find_vms_using_mac "$mac" | xargs || true)" ]
+}
+
+# --- 37A. MAC OWNER LOOKUP HELPER ---
+# Finds existing VMIDs using a MAC address through qm list + qm config.
+function find_vms_using_mac() {
+    local mac="$1"
     local normalized_mac=""
+    local existing_vmid=""
 
     normalized_mac="$(normalize_mac_address "$mac")"
 
-    if grep -Riq "$normalized_mac" /etc/pve/qemu-server/*.conf 2>/dev/null; then
+    while read -r existing_vmid; do
+        [ -n "$existing_vmid" ] || continue
+        if qm config "$existing_vmid" 2>/dev/null | grep -qi "$normalized_mac"; then
+            echo "$existing_vmid"
+        fi
+    done < <(qm list 2>/dev/null | awk 'NR>1 {print $1}' || true)
+}
+
+# --- 37B. MAC RECREATE-AWARE CONFLICT HELPER ---
+# Allows MAC reuse only when the MAC belongs solely to the VMID selected for recreate.
+function mac_address_allowed_for_selection() {
+    local mac="$1"
+    local used_vmids=""
+    local used_vmid=""
+    local owners=""
+
+    used_vmids="$(find_vms_using_mac "$mac" | xargs || true)"
+    [ -n "$used_vmids" ] || return 0
+
+    if [ "$RECREATE_EXISTING_VM" == "yes" ]; then
+        for used_vmid in $used_vmids; do
+            if [ "$used_vmid" != "$RECREATE_EXISTING_VMID" ]; then
+                msg_warn "MAC address ${mac} is already used by VM ${used_vmid}. Choose another MAC or change that VM first."
+                return 1
+            fi
+        done
+
+        msg_ok "MAC address belongs to VM ${RECREATE_EXISTING_VMID} selected for recreate; reuse allowed"
         return 0
     fi
 
+    owners="$(sed 's/ /, /g' <<< "$used_vmids")"
+    msg_warn "MAC address ${mac} is already used by VM(s) ${owners}. Choose another MAC or change that VM first."
     return 1
 }
 
@@ -1442,7 +1560,12 @@ function collect_vm_configuration_inputs() {
     echo -e "  ${BL}RAM:${CL} ${GN}${DEFAULT_RAM_GB}GB${CL}"
     echo ""
 
-    VMID="$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")"
+    while true; do
+        VMID="$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")"
+        if handle_existing_vmid; then
+            break
+        fi
+    done
 
     while [ "$valid_name" != "yes" ]; do
         VM_NAME="$(timed_text_input "Enter VM Name" "$DEFAULT_VM_NAME")"
@@ -1780,8 +1903,7 @@ function collect_mac_configuration() {
                 continue
             fi
 
-            if mac_address_in_use "$entered_mac"; then
-                msg_warn "MAC address ${entered_mac} is already used by an existing Proxmox VM."
+            if ! mac_address_allowed_for_selection "$entered_mac"; then
                 continue
             fi
 
@@ -1834,6 +1956,13 @@ function final_apply_confirmation() {
     echo -e "  ${BL}ISO:${CL} ${ANS}${ISO_PATH:-none}${CL}"
     echo ""
 
+    if [ "$RECREATE_EXISTING_VM" == "yes" ]; then
+        echo -e "${YW}RECREATE:${CL}"
+        echo -e "  ${BL}Existing VM replaced:${CL} ${ANS}yes${CL}"
+        echo -e "  ${BL}Recreated VM ID:${CL} ${ANS}${RECREATE_EXISTING_VMID}${CL}"
+        echo ""
+    fi
+
     echo -e "${YW}GPU SUMMARY:${CL}"
     echo -e "  ${BL}GPU:${CL} ${GN}${gpu_display_name}${CL}"
     echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
@@ -1872,6 +2001,14 @@ function final_apply_confirmation() {
     echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${ANS}$(yes_no_label "$ADVANCED_SETTINGS")${CL}"
     echo ""
 
+    if [ "$RECREATE_EXISTING_VM" == "yes" ]; then
+        echo -e "${RD}RECREATE WARNING:${CL}"
+        echo -e "  ${BL}Existing VM ID:${CL} ${ANS}${RECREATE_EXISTING_VMID}${CL}"
+        echo -e "  ${BL}Existing VM name:${CL} ${GN}${RECREATE_EXISTING_VM_NAME:-unknown}${CL}"
+        echo -e "  ${BL}Action after final confirmation:${CL} ${RD}destroy and recreate this VM${CL}"
+        echo ""
+    fi
+
     apply_yn="$(timed_yes_no "Create VM now?" "y")"
 
     if [[ "$apply_yn" =~ ^[Nn] ]]; then
@@ -1891,11 +2028,50 @@ function final_apply_confirmation() {
 function check_vm_id_conflict() {
     msg_info "Checking VM ID availability"
 
-    if qm config "$VMID" >/dev/null 2>&1; then
+    if vm_exists "$VMID"; then
         msg_error "VM ID ${VMID} already exists. Remove it first or choose another VM ID."
     fi
 
     msg_ok "VM ID available: ${VMID}"
+}
+
+# --- 53A. EXISTING VM DESTROY FOR RECREATE ---
+# Destroys the selected existing VM only after final confirmation and immediately before qm create.
+function destroy_existing_vm_for_recreate() {
+    local status=""
+
+    if [ "$RECREATE_EXISTING_VM" != "yes" ]; then
+        return 0
+    fi
+
+    if [ "$VMID" != "$RECREATE_EXISTING_VMID" ]; then
+        msg_error "Recreate safety check failed: selected VMID changed."
+    fi
+
+    if ! vm_exists "$VMID"; then
+        msg_warn "Recreate was selected, but VM ${VMID} no longer exists. Continuing with create path."
+        return 0
+    fi
+
+    status="$(qm status "$VMID" 2>/dev/null | awk '{print $2}' || true)"
+
+    if [ "$status" == "running" ]; then
+        msg_info "Stopping existing VM ${VMID}"
+        run_proxmox_cmd "stopping existing VM ${VMID}" \
+            qm stop "$VMID" --skiplock 1
+        msg_ok "Existing VM ${VMID} stopped"
+    else
+        msg_ok "Existing VM ${VMID} already stopped"
+    fi
+
+    msg_info "Destroying existing VM ${VMID} for recreate"
+    run_proxmox_cmd "destroying existing VM ${VMID} for recreate" \
+        qm destroy "$VMID" --purge
+    msg_ok "Existing VM ${VMID} destroyed for recreate"
+
+    if vm_exists "$VMID"; then
+        msg_error "Existing VM ${VMID} still exists after destroy. Stop and inspect manually."
+    fi
 }
 
 # --- 54. VM CREATE ---
@@ -2081,6 +2257,9 @@ QEMU Guest Agent: ${QEMU_AGENT_ENABLED}
 Disk Controller: ${DISK_CONTROLLER}
 Discard/TRIM: ${DISCARD_ENABLED}
 Advanced Settings Used: ${ADVANCED_SETTINGS}
+Recreate Existing VM: ${RECREATE_EXISTING_VM}
+Recreated VMID: ${RECREATE_EXISTING_VMID:-none}
+Recreated VM Name: ${RECREATE_EXISTING_VM_NAME:-none}
 EOF
 
     msg_ok "completion marker written"
@@ -2169,6 +2348,13 @@ function show_final_summary() {
     echo -e "  ${BL}ISO:${CL} ${ANS}${ISO_PATH:-none}${CL}"
     echo ""
 
+    if [ "$RECREATE_EXISTING_VM" == "yes" ]; then
+        echo -e "${YW}RECREATE:${CL}"
+        echo -e "  ${BL}Existing VM replaced:${CL} ${ANS}yes${CL}"
+        echo -e "  ${BL}Recreated VM ID:${CL} ${ANS}${RECREATE_EXISTING_VMID}${CL}"
+        echo ""
+    fi
+
     echo -e "${YW}GPU SUMMARY:${CL}"
     echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
     if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_FUNCTIONS_ATTACHED" ]; then
@@ -2237,6 +2423,7 @@ function main() {
 
     section "VM BUILD / APPLY"
 
+    destroy_existing_vm_for_recreate
     check_vm_id_conflict
     create_vm
     configure_efi_disk
