@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.7"
+SCRIPT_VERSION="v1.2.8"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="user-answer-color-polish"
+SCRIPT_BUILD="ui-color-role-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -1347,18 +1347,18 @@ function show_system_audit() {
     fi
 
     echo ""
-    echo -e "${BL}System resources:${CL}"
+    echo -e "${YW}System resources:${CL}"
     echo -e "  ${BL}type:${CL} ${GN}${SYSTEM_TYPE}${CL}"
     echo -e "  ${BL}host resources:${CL} ${GN}${TOTAL_CORES} CPU cores / ${TOTAL_RAM_GB}GB RAM${CL}"
 
     echo ""
-    echo -e "${BL}GPU:${CL}"
+    echo -e "${YW}GPU:${CL}"
     print_gpu_group "Integrated" "$IGPU_LINES" "host/laptop display"
     echo ""
     print_gpu_group "Discrete" "$DGPU_LINES" "VM passthrough candidate"
 
     echo ""
-    echo -e "${BL}Storage availability:${CL}"
+    echo -e "${YW}Storage availability:${CL}"
 
     for storage_name in "${audit_storage_list[@]}"; do
         storage_type="$(get_storage_type "$storage_name")"
@@ -1423,7 +1423,7 @@ function collect_vm_configuration_inputs() {
 
     section "VM CONFIGURATION"
 
-    echo -e "${BL}Recommended defaults:${CL}"
+    echo -e "${YW}Recommended defaults:${CL}"
     echo -e "  ${BL}CPU cores:${CL} ${GN}${DEFAULT_CORES}${CL}"
     echo -e "  ${BL}RAM:${CL} ${GN}${DEFAULT_RAM_GB}GB${CL}"
     echo ""
@@ -1463,12 +1463,13 @@ function select_iso_image() {
     else
         msg_ok "ISO IMAGES FOUND"
         echo ""
-        echo -e "${BL}SELECT ISO:${CL}"
+        echo -e "${YW}Available ISO images:${CL}"
 
         for i in "${!ISOS[@]}"; do
-            echo "$((i+1))) $(basename "${ISOS[$i]}")"
+            echo -e "  $((i+1))) ${GN}$(basename "${ISOS[$i]}")${CL}"
         done
 
+        echo ""
         ISO_IDX="$(timed_number_input "Select ISO number" "1" "1" "${#ISOS[@]}")"
         ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
     fi
@@ -1591,7 +1592,7 @@ function select_vm_storage() {
 
     msg_ok "STORAGE FOUND"
     echo ""
-    echo -e "${BL}SELECT VM STORAGE:${CL}"
+    echo -e "${YW}SELECT VM STORAGE:${CL}"
 
     for i in "${!STORAGE_LIST[@]}"; do
         storage_name="${STORAGE_LIST[$i]}"
@@ -1659,7 +1660,7 @@ function collect_gpu_passthrough_option() {
 
         gpu_function_count="$(wc -w <<< "$GPU_SAME_SLOT_BDFS" | xargs)"
 
-        echo -e "${BL}Discrete GPU:${CL}"
+        echo -e "${YW}Discrete GPU:${CL}"
         echo -e "  ${BL}name:${CL} ${GN}${gpu_display_name}${CL}"
         echo -e "  ${BL}passthrough role:${CL} ${YW}optional / not required initially${CL}"
         echo ""
@@ -1825,11 +1826,11 @@ function final_apply_confirmation() {
     if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_SAME_SLOT_BDFS" ]; then
         gpu_function_count="$(wc -w <<< "$GPU_SAME_SLOT_BDFS" | xargs)"
         if [ "$gpu_function_count" -le 1 ]; then
-            echo -e "  ${BL}GPU DEVICE:${CL} ${ANS}${GPU_SAME_SLOT_BDFS}${CL}"
+            echo -e "  ${BL}GPU DEVICE:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
         else
             echo -e "  ${BL}GPU DEVICES:${CL}"
             for gpu_func in $GPU_SAME_SLOT_BDFS; do
-                echo -e "    - ${ANS}${gpu_func}${CL}"
+                echo -e "    - ${GN}${gpu_func}${CL}"
             done
         fi
     else
@@ -1843,16 +1844,16 @@ function final_apply_confirmation() {
     echo ""
 
     echo -e "${YW}VM PLATFORM SETTINGS:${CL}"
-    echo -e "  ${BL}MACHINE TYPE:${CL} ${ANS}${MACHINE_TYPE}${CL}"
-    echo -e "  ${BL}BIOS:${CL} ${ANS}${BIOS_TYPE}${CL}"
-    echo -e "  ${BL}EFI FORMAT MODE:${CL} ${ANS}${EFI_FORMAT_MODE}${CL}"
-    echo -e "  ${BL}EFI FORMAT:${CL} ${ANS}${EFI_FORMAT}${CL}"
-    echo -e "  ${BL}CPU TYPE:${CL} ${ANS}${CPU_TYPE_VM}${CL}"
+    echo -e "  ${BL}MACHINE TYPE:${CL} ${GN}${MACHINE_TYPE}${CL}"
+    echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_TYPE}${CL}"
+    echo -e "  ${BL}EFI FORMAT MODE:${CL} ${GN}${EFI_FORMAT_MODE}${CL}"
+    echo -e "  ${BL}EFI FORMAT:${CL} ${GN}${EFI_FORMAT}${CL}"
+    echo -e "  ${BL}CPU TYPE:${CL} ${GN}${CPU_TYPE_VM}${CL}"
     echo -e "  ${BL}BALLOONING ENABLED:${CL} ${ANS}$(yes_no_label "$BALLOONING_ENABLED")${CL}"
-    echo -e "  ${BL}BALLOON VALUE:${CL} ${ANS}${BALLOON_VALUE}${CL}"
-    echo -e "  ${BL}NETWORK MODEL:${CL} ${ANS}${NETWORK_MODEL}${CL}"
+    echo -e "  ${BL}BALLOON VALUE:${CL} ${GN}${BALLOON_VALUE}${CL}"
+    echo -e "  ${BL}NETWORK MODEL:${CL} ${GN}${NETWORK_MODEL}${CL}"
     echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${ANS}$(yes_no_label "$QEMU_AGENT_ENABLED")${CL}"
-    echo -e "  ${BL}DISK CONTROLLER:${CL} ${ANS}${DISK_CONTROLLER}${CL}"
+    echo -e "  ${BL}DISK CONTROLLER:${CL} ${GN}${DISK_CONTROLLER}${CL}"
     echo -e "  ${BL}DISCARD/TRIM:${CL} ${ANS}$(yes_no_label "$DISCARD_ENABLED")${CL}"
     echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${ANS}$(yes_no_label "$ADVANCED_SETTINGS")${CL}"
     echo ""
