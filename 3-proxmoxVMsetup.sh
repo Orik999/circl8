@@ -14,6 +14,7 @@ BL="$(printf '\033[36m')"
 RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
 GN="$(printf '\033[1;92m')"
+ANS="$(printf '\033[1;95m')"
 DGN="$(printf '\033[32m')"
 CL="$(printf '\033[m')"
 CLF="$(printf '\033[5m')"
@@ -25,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.6"
+SCRIPT_VERSION="v1.2.7"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="gpu-related-functions-display-polish"
+SCRIPT_BUILD="user-answer-color-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -370,7 +371,7 @@ function timed_yes_no() {
     final_label="$(yes_no_label "$answer")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    tty_println "${CM} ${BL}${prompt}:${CL} ${ANS}${final_label}${CL}"
 
     echo "$answer"
 }
@@ -498,7 +499,7 @@ function timed_text_input() {
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    tty_println "${CM} ${BL}${prompt}:${CL} ${ANS}${answer}${CL}"
 
     echo "$answer"
 }
@@ -525,7 +526,7 @@ function timed_number_input() {
 
         if validate_number "$answer" "$min_value" "$max_value"; then
             tty_print "${BFR}"
-            tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+            tty_println "${CM} ${BL}${prompt}:${CL} ${ANS}${answer}${CL}"
             echo "$answer"
             return 0
         fi
@@ -1808,52 +1809,52 @@ function final_apply_confirmation() {
     fi
 
     echo -e "${YW}VM SUMMARY:${CL}"
-    echo -e "  ${BL}VM ID:${CL} ${GN}${VMID}${CL}"
-    echo -e "  ${BL}VM NAME:${CL} ${GN}${VM_NAME}${CL}"
-    echo -e "  ${BL}CPU CORES:${CL} ${GN}${CPU_INPUT}${CL}"
-    echo -e "  ${BL}RAM:${CL} ${GN}${RAM_GB_INPUT}GB${CL}"
-    echo -e "  ${BL}OS DISK:${CL} ${GN}${DISK_GB_INPUT}GB${CL}"
-    echo -e "  ${BL}STORAGE:${CL} ${GN}${STORAGE_ID}${CL}"
+    echo -e "  ${BL}VM ID:${CL} ${ANS}${VMID}${CL}"
+    echo -e "  ${BL}VM NAME:${CL} ${ANS}${VM_NAME}${CL}"
+    echo -e "  ${BL}CPU CORES:${CL} ${ANS}${CPU_INPUT}${CL}"
+    echo -e "  ${BL}RAM:${CL} ${ANS}${RAM_GB_INPUT}GB${CL}"
+    echo -e "  ${BL}OS DISK:${CL} ${ANS}${DISK_GB_INPUT}GB${CL}"
+    echo -e "  ${BL}STORAGE:${CL} ${ANS}${STORAGE_ID}${CL}"
     echo -e "  ${BL}STORAGE TYPE:${CL} ${GN}${STORAGE_TYPE:-unknown}${CL}"
-    echo -e "  ${BL}ISO:${CL} ${GN}${ISO_PATH:-none}${CL}"
+    echo -e "  ${BL}ISO:${CL} ${ANS}${ISO_PATH:-none}${CL}"
     echo ""
 
     echo -e "${YW}GPU SUMMARY:${CL}"
     echo -e "  ${BL}GPU:${CL} ${GN}${gpu_display_name}${CL}"
-    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${GN}$(yes_no_label "$ENABLE_GPU")${CL}"
+    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
     if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_SAME_SLOT_BDFS" ]; then
         gpu_function_count="$(wc -w <<< "$GPU_SAME_SLOT_BDFS" | xargs)"
         if [ "$gpu_function_count" -le 1 ]; then
-            echo -e "  ${BL}GPU DEVICE:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
+            echo -e "  ${BL}GPU DEVICE:${CL} ${ANS}${GPU_SAME_SLOT_BDFS}${CL}"
         else
             echo -e "  ${BL}GPU DEVICES:${CL}"
             for gpu_func in $GPU_SAME_SLOT_BDFS; do
-                echo -e "    - ${GN}${gpu_func}${CL}"
+                echo -e "    - ${ANS}${gpu_func}${CL}"
             done
         fi
     else
-        echo -e "  ${BL}GPU DEVICES:${CL} ${GN}not attached${CL}"
+        echo -e "  ${BL}GPU DEVICES:${CL} ${ANS}not attached${CL}"
     fi
     echo ""
 
     echo -e "${YW}NETWORK SUMMARY:${CL}"
-    echo -e "  ${BL}VM MAC ADDRESS:${CL} ${GN}${VM_MAC_ADDRESS}${CL}"
-    echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${GN}${CUSTOM_MAC_SELECTED}${CL}"
+    echo -e "  ${BL}VM MAC ADDRESS:${CL} ${ANS}${VM_MAC_ADDRESS}${CL}"
+    echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${ANS}${CUSTOM_MAC_SELECTED}${CL}"
     echo ""
 
     echo -e "${YW}VM PLATFORM SETTINGS:${CL}"
-    echo -e "  ${BL}MACHINE TYPE:${CL} ${GN}${MACHINE_TYPE}${CL}"
-    echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_TYPE}${CL}"
-    echo -e "  ${BL}EFI FORMAT MODE:${CL} ${GN}${EFI_FORMAT_MODE}${CL}"
-    echo -e "  ${BL}EFI FORMAT:${CL} ${GN}${EFI_FORMAT}${CL}"
-    echo -e "  ${BL}CPU TYPE:${CL} ${GN}${CPU_TYPE_VM}${CL}"
-    echo -e "  ${BL}BALLOONING ENABLED:${CL} ${GN}$(yes_no_label "$BALLOONING_ENABLED")${CL}"
-    echo -e "  ${BL}BALLOON VALUE:${CL} ${GN}${BALLOON_VALUE}${CL}"
-    echo -e "  ${BL}NETWORK MODEL:${CL} ${GN}${NETWORK_MODEL}${CL}"
-    echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${GN}$(yes_no_label "$QEMU_AGENT_ENABLED")${CL}"
-    echo -e "  ${BL}DISK CONTROLLER:${CL} ${GN}${DISK_CONTROLLER}${CL}"
-    echo -e "  ${BL}DISCARD/TRIM:${CL} ${GN}$(yes_no_label "$DISCARD_ENABLED")${CL}"
-    echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${GN}$(yes_no_label "$ADVANCED_SETTINGS")${CL}"
+    echo -e "  ${BL}MACHINE TYPE:${CL} ${ANS}${MACHINE_TYPE}${CL}"
+    echo -e "  ${BL}BIOS:${CL} ${ANS}${BIOS_TYPE}${CL}"
+    echo -e "  ${BL}EFI FORMAT MODE:${CL} ${ANS}${EFI_FORMAT_MODE}${CL}"
+    echo -e "  ${BL}EFI FORMAT:${CL} ${ANS}${EFI_FORMAT}${CL}"
+    echo -e "  ${BL}CPU TYPE:${CL} ${ANS}${CPU_TYPE_VM}${CL}"
+    echo -e "  ${BL}BALLOONING ENABLED:${CL} ${ANS}$(yes_no_label "$BALLOONING_ENABLED")${CL}"
+    echo -e "  ${BL}BALLOON VALUE:${CL} ${ANS}${BALLOON_VALUE}${CL}"
+    echo -e "  ${BL}NETWORK MODEL:${CL} ${ANS}${NETWORK_MODEL}${CL}"
+    echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${ANS}$(yes_no_label "$QEMU_AGENT_ENABLED")${CL}"
+    echo -e "  ${BL}DISK CONTROLLER:${CL} ${ANS}${DISK_CONTROLLER}${CL}"
+    echo -e "  ${BL}DISCARD/TRIM:${CL} ${ANS}$(yes_no_label "$DISCARD_ENABLED")${CL}"
+    echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${ANS}$(yes_no_label "$ADVANCED_SETTINGS")${CL}"
     echo ""
 
     apply_yn="$(timed_yes_no "Create VM now?" "y")"
