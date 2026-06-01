@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.3"
+SCRIPT_VERSION="v1.2.4"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="audit-storage-selection-ui-polish"
+SCRIPT_BUILD="vm-setup-ui-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -263,11 +263,14 @@ function run_proxmox_cmd() {
 function yes_no_label() {
     local value="$1"
 
-    if [[ "$value" =~ ^[Yy]$ ]]; then
-        echo "yes"
-    else
-        echo "no"
-    fi
+    case "$value" in
+        y|Y|yes|YES|Yes|true|TRUE|True|1)
+            echo "yes"
+            ;;
+        *)
+            echo "no"
+            ;;
+    esac
 }
 
 # --- 12. BLOCKING YES/NO HELPER ---
@@ -880,6 +883,74 @@ function print_gpu_group() {
     return 0
 }
 
+# --- 29B. GPU DISPLAY NAME HELPERS ---
+# These helpers are display-only. Sysfs remains the source of truth for GPU detection and passthrough decisions.
+function gpu_line_for_bdf() {
+    local bdf="$1"
+    local line=""
+
+    while read -r line; do
+        [ -z "$line" ] && continue
+        if [[ "$line" == "$bdf "* ]]; then
+            echo "$line"
+            return 0
+        fi
+    done <<< "$GPU_ALL"
+
+    return 0
+}
+
+function gpu_fallback_display_name_from_line() {
+    local line="$1"
+    local detail=""
+
+    detail="${line% boot_vga=*}"
+    detail="${detail#* }"
+
+    if [ -n "$detail" ]; then
+        echo "$detail"
+    else
+        echo "GPU"
+    fi
+}
+
+function gpu_display_name_for_bdf() {
+    local bdf="$1"
+    local line=""
+    local fallback="GPU"
+    local lspci_line=""
+    local model=""
+
+    line="$(gpu_line_for_bdf "$bdf")"
+    if [ -n "$line" ]; then
+        fallback="$(gpu_fallback_display_name_from_line "$line")"
+    fi
+
+    if command -v timeout >/dev/null 2>&1 && command -v lspci >/dev/null 2>&1; then
+        lspci_line="$(timeout 2s lspci -s "$bdf" 2>/dev/null || true)"
+        if [ -n "$lspci_line" ]; then
+            model="${lspci_line#*: }"
+            model="${model% (rev*}"
+
+            if [[ "$model" =~ \[([^]]+)\] ]]; then
+                case "$fallback" in
+                    NVIDIA*) echo "NVIDIA ${BASH_REMATCH[1]}"; return 0 ;;
+                    AMD*) echo "AMD ${BASH_REMATCH[1]}"; return 0 ;;
+                    Intel*) echo "Intel ${BASH_REMATCH[1]}"; return 0 ;;
+                    *) echo "${BASH_REMATCH[1]}"; return 0 ;;
+                esac
+            fi
+
+            if [ -n "$model" ] && [ "$model" != "$lspci_line" ]; then
+                echo "$model"
+                return 0
+            fi
+        fi
+    fi
+
+    echo "$fallback"
+}
+
 # --- 30. SAME-SLOT GPU FUNCTION HELPER ---
 # Returns every PCI function in the same slot as the selected GPU.
 # Example: 0000:01:00.0 -> 0000:01:00.0 0000:01:00.1 ...
@@ -1158,11 +1229,6 @@ function show_system_audit() {
     echo -e "  ${BL}host resources:${CL} ${GN}${TOTAL_CORES} CPU cores / ${TOTAL_RAM_GB}GB RAM${CL}"
 
     echo ""
-    echo -e "${BL}Default VM:${CL}"
-    echo -e "  ${BL}cpu cores:${CL} ${GN}${DEFAULT_CORES}${CL}"
-    echo -e "  ${BL}ram:${CL} ${GN}${DEFAULT_RAM_GB}GB${CL}"
-
-    echo ""
     echo -e "${BL}GPU:${CL}"
     print_gpu_group "Integrated" "$IGPU_LINES" "host/laptop display"
     echo ""
@@ -1233,6 +1299,11 @@ function collect_vm_configuration_inputs() {
     local valid_name="no"
 
     section "VM CONFIGURATION"
+
+    echo -e "${BL}Recommended defaults:${CL}"
+    echo -e "  ${BL}CPU cores:${CL} ${GN}${DEFAULT_CORES}${CL}"
+    echo -e "  ${BL}RAM:${CL} ${GN}${DEFAULT_RAM_GB}GB${CL}"
+    echo ""
 
     VMID="$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")"
 
@@ -1449,17 +1520,28 @@ function select_vm_storage() {
 function collect_gpu_passthrough_option() {
     local gpu_yn=""
     local gpu_pci_id=""
+    local gpu_display_name=""
+    local gpu_func=""
 
     section "GPU OPTION"
 
     if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
         gpu_pci_id="$(echo "$DGPU_BDFS" | awk '{print $1}')"
+        gpu_display_name="$(gpu_display_name_for_bdf "$gpu_pci_id")"
         GPU_SAME_SLOT_BDFS="$(get_same_slot_functions_for_bdf "$gpu_pci_id")"
         [ -z "$GPU_SAME_SLOT_BDFS" ] && GPU_SAME_SLOT_BDFS="$gpu_pci_id"
 
-        echo -e " ${BL}━━━━━▶${CL} DISCRETE GPU: ${GN}${gpu_pci_id}${CL}"
-        echo -e " ${BL}━━━━━▶${CL} SAME-SLOT FUNCTIONS: ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
-        echo -e " ${BL}━━━━━▶${CL} RECOMMENDATION: ${YW}Not required for Docker/Postgres/Postiz initially${CL}"
+        echo -e "${BL}Discrete GPU:${CL}"
+        echo -e "  ${BL}name:${CL} ${GN}${gpu_display_name}${CL}"
+        echo -e "  ${BL}PCI device:${CL} ${GN}${gpu_pci_id}${CL}"
+        echo -e "  ${BL}passthrough role:${CL} ${YW}optional / not required initially${CL}"
+        echo ""
+        echo -e "${BL}Related same-card functions:${CL}"
+        for gpu_func in $GPU_SAME_SLOT_BDFS; do
+            echo -e "  - ${GN}${gpu_func}${CL}"
+        done
+        echo -e "${YW}These PCI functions belong to the same physical GPU/card and may need to be passed together if passthrough is enabled.${CL}"
+        echo ""
 
         gpu_yn="$(timed_yes_no "Add DISCRETE GPU to VM?" "n")"
 
@@ -1529,8 +1611,10 @@ function collect_mac_configuration() {
 
     section "VM NETWORK / ROUTER DHCP RESERVATION"
 
-    echo -e "${YW}Recommended: keep DHCP inside Ubuntu and reserve a static IP in your router using the VM MAC address.${CL}"
-    echo -e "${YW}This script can auto-generate a stable MAC, or you can enter a custom MAC if your router reservation already exists.${CL}"
+    echo -e "${BL}Recommended:${CL}"
+    echo -e "  ${YW}Keep DHCP inside Ubuntu.${CL}"
+    echo -e "  ${YW}Reserve a static IP in your router using the VM MAC address.${CL}"
+    echo -e "  ${YW}This script can generate a stable MAC, or you can enter an existing reservation MAC.${CL}"
     echo ""
 
     msg_info "Generating suggested VM MAC address"
@@ -1578,35 +1662,61 @@ function collect_mac_configuration() {
 # Shows every setting, including safe defaults and advanced options, whether advanced mode was used or not.
 function final_apply_confirmation() {
     local apply_yn=""
+    local gpu_pci_id=""
+    local gpu_display_name="not selected"
+    local gpu_func=""
 
     section "READY TO CREATE VM"
 
-    echo -e "VM ID: ${GN}${VMID}${CL}"
-    echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
-    echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
-    echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
-    echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
-    echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
-    echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
-    echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
-    echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
-    echo -e "GPU FUNCTIONS: ${GN}${GPU_SAME_SLOT_BDFS:-none}${CL}"
-    echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
-    echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
+    if [ -n "$DGPU_BDFS" ]; then
+        gpu_pci_id="$(echo "$DGPU_BDFS" | awk '{print $1}')"
+        gpu_display_name="$(gpu_display_name_for_bdf "$gpu_pci_id")"
+    elif [ -n "$GPU_ALL" ]; then
+        gpu_display_name="detected GPU available"
+    fi
+
+    echo -e "${YW}VM SUMMARY:${CL}"
+    echo -e "  ${BL}VM ID:${CL} ${GN}${VMID}${CL}"
+    echo -e "  ${BL}VM NAME:${CL} ${GN}${VM_NAME}${CL}"
+    echo -e "  ${BL}CPU CORES:${CL} ${GN}${CPU_INPUT}${CL}"
+    echo -e "  ${BL}RAM:${CL} ${GN}${RAM_GB_INPUT}GB${CL}"
+    echo -e "  ${BL}OS DISK:${CL} ${GN}${DISK_GB_INPUT}GB${CL}"
+    echo -e "  ${BL}STORAGE:${CL} ${GN}${STORAGE_ID}${CL}"
+    echo -e "  ${BL}STORAGE TYPE:${CL} ${GN}${STORAGE_TYPE:-unknown}${CL}"
+    echo -e "  ${BL}ISO:${CL} ${GN}${ISO_PATH:-none}${CL}"
     echo ""
-    echo -e "${BL}VM PLATFORM SETTINGS:${CL}"
-    echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
-    echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
-    echo -e "EFI FORMAT MODE: ${GN}${EFI_FORMAT_MODE}${CL}"
-    echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
-    echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
-    echo -e "BALLOONING ENABLED: ${GN}${BALLOONING_ENABLED}${CL}"
-    echo -e "BALLOON VALUE: ${GN}${BALLOON_VALUE}${CL}"
-    echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
-    echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
-    echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
-    echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
-    echo -e "ADVANCED SETTINGS USED: ${GN}${ADVANCED_SETTINGS}${CL}"
+
+    echo -e "${YW}GPU SUMMARY:${CL}"
+    echo -e "  ${BL}GPU:${CL} ${GN}${gpu_display_name}${CL}"
+    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${GN}$(yes_no_label "$ENABLE_GPU")${CL}"
+    if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_SAME_SLOT_BDFS" ]; then
+        echo -e "  ${BL}GPU DEVICES:${CL}"
+        for gpu_func in $GPU_SAME_SLOT_BDFS; do
+            echo -e "    - ${GN}${gpu_func}${CL}"
+        done
+    else
+        echo -e "  ${BL}GPU DEVICES:${CL} ${GN}not attached${CL}"
+    fi
+    echo ""
+
+    echo -e "${YW}NETWORK SUMMARY:${CL}"
+    echo -e "  ${BL}VM MAC ADDRESS:${CL} ${GN}${VM_MAC_ADDRESS}${CL}"
+    echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${GN}${CUSTOM_MAC_SELECTED}${CL}"
+    echo ""
+
+    echo -e "${YW}VM PLATFORM SETTINGS:${CL}"
+    echo -e "  ${BL}MACHINE TYPE:${CL} ${GN}${MACHINE_TYPE}${CL}"
+    echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_TYPE}${CL}"
+    echo -e "  ${BL}EFI FORMAT MODE:${CL} ${GN}${EFI_FORMAT_MODE}${CL}"
+    echo -e "  ${BL}EFI FORMAT:${CL} ${GN}${EFI_FORMAT}${CL}"
+    echo -e "  ${BL}CPU TYPE:${CL} ${GN}${CPU_TYPE_VM}${CL}"
+    echo -e "  ${BL}BALLOONING ENABLED:${CL} ${GN}$(yes_no_label "$BALLOONING_ENABLED")${CL}"
+    echo -e "  ${BL}BALLOON VALUE:${CL} ${GN}${BALLOON_VALUE}${CL}"
+    echo -e "  ${BL}NETWORK MODEL:${CL} ${GN}${NETWORK_MODEL}${CL}"
+    echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${GN}$(yes_no_label "$QEMU_AGENT_ENABLED")${CL}"
+    echo -e "  ${BL}DISK CONTROLLER:${CL} ${GN}${DISK_CONTROLLER}${CL}"
+    echo -e "  ${BL}DISCARD/TRIM:${CL} ${GN}$(yes_no_label "$DISCARD_ENABLED")${CL}"
+    echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${GN}$(yes_no_label "$ADVANCED_SETTINGS")${CL}"
     echo ""
 
     apply_yn="$(timed_yes_no "Create VM now?" "y")"
