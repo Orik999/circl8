@@ -3045,7 +3045,7 @@ function show_final_summary() {
         echo -e "  ${YW}Validate/accept CrowdSec engine in https://app.crowdsec.net${CL}"
         echo -e "  Engine name: ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME:-proxmox-${HOSTNAME_SHORT}}${CL}"
     fi
-    echo ""
+#    echo ""
 }
 
 # --- 54. FINAL REBOOT COUNTDOWN ---
