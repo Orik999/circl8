@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.2"
+SCRIPT_VERSION="v1.3.3"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-final-host-hardening-polish"
+SCRIPT_BUILD="script1-preflight-crowdsec-ssh-hardening"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -84,10 +84,13 @@ SSH_EFFECTIVE_PERMIT_ROOT=""
 SSH_EFFECTIVE_PASSWORD_AUTH=""
 SSH_EFFECTIVE_PUBKEY_AUTH=""
 SSH_EFFECTIVE_KBD_AUTH=""
+SSH_KEY_ONLY_HARDENING_REQUESTED="no"
 PVE_FIREWALL_APPLIED="no"
 CROWDSEC_BOUNCER_PACKAGE="none"
 CROWDSEC_CONSOLE_ENROLLMENT="no"
 CROWDSEC_CONSOLE_ENGINE_NAME=""
+CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
+CROWDSEC_CONSOLE_ENROLLMENT_KEY=""
 NUMLOCK_CONFIGURED="no"
 
 STORAGE_LAYOUT_MODE="unselected"
@@ -1456,6 +1459,9 @@ function collect_user_options() {
     local cpu_yn=""
     local crowdsec_yn=""
     local public_web_yn=""
+    local enroll_yn=""
+    local harden_yn=""
+    local engine_name=""
 
     section "POST-INSTALL OPTIONS"
 
@@ -1471,8 +1477,47 @@ function collect_user_options() {
 
     if [[ "$crowdsec_yn" =~ ^[Nn] ]]; then
         ENABLE_CROWDSEC="n"
+        CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
+        CROWDSEC_CONSOLE_ENROLLMENT="no"
+        CROWDSEC_CONSOLE_ENGINE_NAME="proxmox-${HOSTNAME_SHORT}"
     else
         ENABLE_CROWDSEC="y"
+        CROWDSEC_CONSOLE_ENGINE_NAME="proxmox-${HOSTNAME_SHORT}"
+        enroll_yn="$(timed_yes_no "Enroll Proxmox CrowdSec in CrowdSec Console?" "n")"
+        if [[ "$enroll_yn" =~ ^[Yy] ]]; then
+            CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="yes"
+            CROWDSEC_CONSOLE_ENROLLMENT="requested"
+            engine_name="$(read_text_from_tty "CrowdSec Console engine name" "$CROWDSEC_CONSOLE_ENGINE_NAME")"
+            CROWDSEC_CONSOLE_ENGINE_NAME="${engine_name:-$CROWDSEC_CONSOLE_ENGINE_NAME}"
+            CROWDSEC_CONSOLE_ENROLLMENT_KEY="$(read_secret_from_tty "Paste CrowdSec Console enrollment key")"
+            if [ -z "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" ]; then
+                CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
+                CROWDSEC_CONSOLE_ENROLLMENT="error"
+                msg_warn "CrowdSec Console enrollment key was empty; enrollment will be skipped"
+            fi
+        else
+            CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
+            CROWDSEC_CONSOLE_ENROLLMENT="no"
+        fi
+    fi
+
+    echo ""
+    echo -e "${BL}SSH:${CL}"
+    detect_root_ssh_key_state
+    print_root_ssh_key_report
+    if [ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ]; then
+        harden_yn="$(timed_yes_no "Enable SSH key-only root login hardening?" "y")"
+        if [[ "$harden_yn" =~ ^[Nn] ]]; then
+            SSH_KEY_ONLY_HARDENING_REQUESTED="no"
+            SSH_HARDENING_APPLIED="audit-only"
+        else
+            SSH_KEY_ONLY_HARDENING_REQUESTED="yes"
+            SSH_HARDENING_APPLIED="key-only-root"
+        fi
+    else
+        SSH_KEY_ONLY_HARDENING_REQUESTED="no"
+        SSH_HARDENING_APPLIED="audit-only"
+        msg_warn "Root SSH keys not detected; SSH hardening will remain audit-only"
     fi
 
     echo ""
@@ -1539,8 +1584,17 @@ function final_start_prompt() {
     echo -e "LAN CIDR ALLOWED FOR SSH/WEBUI: ${GN}${LAN_CIDR:-not-detected}${CL}"
     echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_PASSTHROUGH}${CL}"
     echo -e "CPU PERFORMANCE: ${GN}${ENABLE_PERFORMANCE}${CL}"
-    echo -e "CROWDSEC: ${GN}${ENABLE_CROWDSEC}${CL}"
     echo -e "PUBLIC HOST 80/443: ${GN}${ALLOW_PUBLIC_WEB}${CL}"
+    echo ""
+    echo -e "${BL}SSH:${CL}"
+    echo -e "  root keys detected: ${GN}$([ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ] && echo yes || echo no), ${SSH_ROOT_KEY_COUNT:-0} key line(s)${CL}"
+    echo -e "  hardening: ${GN}${SSH_HARDENING_APPLIED:-audit-only}${CL}"
+    echo ""
+    echo -e "${BL}CrowdSec:${CL}"
+    echo -e "  install: ${GN}$(yes_no_label "$ENABLE_CROWDSEC")${CL}"
+    echo -e "  firewall bouncer: ${GN}$(yes_no_label "$ENABLE_CROWDSEC")${CL}"
+    echo -e "  console enrollment: ${GN}${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}${CL}"
+    echo -e "  console engine name: ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME:-proxmox-${HOSTNAME_SHORT}}${CL}"
     echo ""
 
     start_yn="$(timed_yes_no "Start the PVE9 Post Install Script?" "y")"
@@ -1918,26 +1972,8 @@ function describe_authorized_keys_file() {
 }
 
 # --- 44. SSH SECURITY ---
-# Performs a non-invasive SSH safety audit only.
-#
-# Root cause from fresh testing:
-# SSH worked before script 1 and failed after every version that modified root SSH policy,
-# AuthorizedKeysFile handling, PermitRootLogin, or root key permissions. Therefore script 1 must not
-# touch SSH authentication policy during the base Proxmox post-install stage.
-#
-# This function intentionally does NOT modify:
-# - /etc/ssh/sshd_config
-# - /etc/ssh/sshd_config.d/*
-# - AuthorizedKeysFile
-# - PermitRootLogin
-# - PasswordAuthentication
-# - /root/.ssh permissions
-# - /root/.ssh/authorized_keys permissions/ownership
-# - ssh/sshd service state
-#
-# Security hardening for SSH can be revisited later as a separate, dedicated, testable script once
-# the full build chain is stable. The priority here is zero SSH lockout risk on fresh Proxmox tests.
-function apply_ssh_security() {
+# Detects root SSH keys during preflight and applies key-only hardening only when safe.
+function detect_root_ssh_key_state() {
     local effective_config=""
     local effective_authorized_keys=""
     local effective_permit_root=""
@@ -1952,12 +1988,6 @@ function apply_ssh_security() {
     local primary_key_file="/root/.ssh/authorized_keys"
     local primary_key_count="0"
 
-    section "SSH SECURITY"
-
-    msg_info "Auditing SSH configuration without modifying it"
-
-    run_cmd "validating current sshd config" sshd -t
-
     effective_config="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
     effective_authorized_keys="$(awk '$1=="authorizedkeysfile" {for (i=2; i<=NF; i++) printf "%s ", $i}' <<< "$effective_config" | xargs 2>/dev/null || true)"
     effective_permit_root="$(awk '$1=="permitrootlogin" {print $2; exit}' <<< "$effective_config")"
@@ -1971,69 +2001,171 @@ function apply_ssh_security() {
     SSH_EFFECTIVE_PUBKEY_AUTH="${effective_pubkey_auth:-unknown}"
     SSH_EFFECTIVE_KBD_AUTH="${effective_kbd_auth:-unknown}"
 
+    SSH_ROOT_KEY_FILE="not-detected"
+    SSH_ROOT_KEY_COUNT="0"
+    SSH_ROOT_KEY_TARGET="not-detected"
+    SSH_ROOT_KEY_OWNER="unknown"
+    SSH_ROOT_KEY_MODE="unknown"
+
+    primary_key_count="$(count_authorized_key_lines "$primary_key_file")"
+    if [ "$primary_key_count" -gt 0 ]; then
+        total_key_count="$primary_key_count"
+        first_key_file="$primary_key_file"
+    else
+        for key_pattern in $SSH_EFFECTIVE_AUTHORIZED_KEYS; do
+            key_file="$(resolve_authorized_keys_path "$key_pattern")"
+            key_count="$(count_authorized_key_lines "$key_file")"
+            if [ "$key_count" -gt 0 ]; then
+                total_key_count="$(( total_key_count + key_count ))"
+                [ -z "$first_key_file" ] && first_key_file="$key_file"
+            fi
+        done
+    fi
+
+    SSH_ROOT_KEY_COUNT="$total_key_count"
+    if [ "$total_key_count" -gt 0 ]; then
+        SSH_ROOT_KEY_FILE="$first_key_file"
+        SSH_ROOT_KEY_TARGET="$(readlink -f "$first_key_file" 2>/dev/null || echo "$first_key_file")"
+        SSH_ROOT_KEY_OWNER="$(stat -Lc '%U:%G' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
+        SSH_ROOT_KEY_MODE="$(stat -Lc '%a' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
+    fi
+}
+
+function print_root_ssh_key_report() {
+    local primary_key_file="/root/.ssh/authorized_keys"
+    local primary_key_count="0"
+
     echo ""
     echo -e "${BL}Root SSH key check:${CL}"
 
     primary_key_count="$(count_authorized_key_lines "$primary_key_file")"
     if [ "$primary_key_count" -gt 0 ]; then
         describe_authorized_keys_file "$primary_key_file" "$primary_key_count"
-        total_key_count="$primary_key_count"
-        first_key_file="$primary_key_file"
-        SSH_ROOT_KEY_TARGET="$(readlink -f "$primary_key_file" 2>/dev/null || echo "$primary_key_file")"
-        SSH_ROOT_KEY_OWNER="$(stat -Lc '%U:%G' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
-        SSH_ROOT_KEY_MODE="$(stat -Lc '%a' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
+    elif [ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ] && [ "${SSH_ROOT_KEY_FILE:-not-detected}" != "not-detected" ]; then
+        describe_authorized_keys_file "$SSH_ROOT_KEY_FILE" "$SSH_ROOT_KEY_COUNT"
     else
-        for key_pattern in $SSH_EFFECTIVE_AUTHORIZED_KEYS; do
-            key_file="$(resolve_authorized_keys_path "$key_pattern")"
-            key_count="$(count_authorized_key_lines "$key_file")"
-            if [ "$key_count" -gt 0 ]; then
-                describe_authorized_keys_file "$key_file" "$key_count"
-                total_key_count="$(( total_key_count + key_count ))"
-                [ -z "$first_key_file" ] && first_key_file="$key_file"
-            elif [ "$key_file" == "$primary_key_file" ] || [ "$key_file" == "/root/.ssh/authorized_keys2" ]; then
-                echo -e "  ${YW}${key_file}: missing/empty${CL}"
-            fi
-        done
+        echo -e "  ${YW}${primary_key_file}: missing/empty${CL}"
+        echo -e "  ${YW}/root/.ssh/authorized_keys2: missing/empty${CL}"
     fi
 
-    echo -e "  ${BL}key lines detected:${CL} ${GN}${total_key_count}${CL}"
+    echo -e "  ${BL}key lines detected:${CL} ${GN}${SSH_ROOT_KEY_COUNT:-0}${CL}"
+}
 
-    SSH_ROOT_KEY_COUNT="$total_key_count"
-    if [ "$total_key_count" -gt 0 ]; then
-        SSH_ROOT_KEY_FILE="$first_key_file"
-        if [ -z "$SSH_ROOT_KEY_TARGET" ]; then
-            SSH_ROOT_KEY_TARGET="$(readlink -f "$first_key_file" 2>/dev/null || echo "$first_key_file")"
-            SSH_ROOT_KEY_OWNER="$(stat -Lc '%U:%G' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
-            SSH_ROOT_KEY_MODE="$(stat -Lc '%a' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
+function reload_ssh_service() {
+    systemctl reload ssh >/dev/null 2>&1 && return 0
+    systemctl reload sshd >/dev/null 2>&1 && return 0
+    systemctl restart ssh >/dev/null 2>&1 && return 0
+    systemctl restart sshd >/dev/null 2>&1 && return 0
+    return 1
+}
+
+function apply_ssh_key_only_hardening() {
+    local dropin="/etc/ssh/sshd_config.d/99-circl8-hardening.conf"
+    local backup=""
+    local effective_config=""
+    local effective_permit_root=""
+    local effective_password_auth=""
+    local effective_pubkey_auth=""
+    local effective_kbd_auth=""
+
+    if [ "${SSH_ROOT_KEY_COUNT:-0}" -le 0 ]; then
+        SSH_HARDENING_APPLIED="audit-only"
+        msg_warn "No root SSH authorized keys detected; SSH key-only hardening skipped to avoid lockout"
+        return 0
+    fi
+
+    mkdir -p /root/.ssh /etc/ssh/sshd_config.d
+    chmod 700 /root/.ssh 2>/dev/null || true
+    if [ -n "${SSH_ROOT_KEY_TARGET:-}" ] && [ "${SSH_ROOT_KEY_TARGET}" != "not-detected" ] && [ -e "$SSH_ROOT_KEY_TARGET" ]; then
+        chmod 600 "$SSH_ROOT_KEY_TARGET" 2>/dev/null || true
+    fi
+
+    if [ -f "$dropin" ]; then
+        backup="${dropin}.bak.$(date +%s)"
+        cp -p "$dropin" "$backup"
+    fi
+
+    msg_info "Writing SSH key-only hardening drop-in"
+    cat <<'EOF' > "$dropin"
+# Project circl8 SSH hardening
+# Root login remains allowed with SSH keys only; password and keyboard-interactive auth are disabled.
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin prohibit-password
+EOF
+    msg_ok "SSH hardening drop-in written"
+
+    msg_info "Validating SSH configuration"
+    if ! sshd -t; then
+        if [ -n "$backup" ] && [ -f "$backup" ]; then
+            cp -p "$backup" "$dropin"
+        else
+            rm -f "$dropin"
         fi
+        SSH_HARDENING_APPLIED="error"
+        msg_warn "SSH hardening drop-in failed validation and was rolled back"
+        return 0
+    fi
+    msg_ok "SSH config validated"
+
+    msg_info "Reloading SSH service"
+    if reload_ssh_service; then
+        msg_ok "SSH reloaded"
     else
-        SSH_ROOT_KEY_FILE="not-detected"
-        SSH_ROOT_KEY_TARGET="not-detected"
-        SSH_ROOT_KEY_OWNER="unknown"
-        SSH_ROOT_KEY_MODE="unknown"
+        SSH_HARDENING_APPLIED="warning - reload failed"
+        msg_warn "SSH config is valid but service reload failed; review manually before closing this session"
+        return 0
     fi
 
-    SSH_HARDENING_APPLIED="audit-only"
+    effective_config="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
+    effective_permit_root="$(awk '$1=="permitrootlogin" {print $2; exit}' <<< "$effective_config")"
+    effective_password_auth="$(awk '$1=="passwordauthentication" {print $2; exit}' <<< "$effective_config")"
+    effective_pubkey_auth="$(awk '$1=="pubkeyauthentication" {print $2; exit}' <<< "$effective_config")"
+    effective_kbd_auth="$(awk '$1=="kbdinteractiveauthentication" {print $2; exit}' <<< "$effective_config")"
 
-    msg_ok "SSH CONFIG VALIDATED"
-    echo -e "  ${DGN}ROOT SSH CONFIG LEFT UNCHANGED${CL}"
-    echo -e "  ${DGN}SSH LOCKOUT RISK AVOIDED${CL}"
+    SSH_EFFECTIVE_PERMIT_ROOT="${effective_permit_root:-unknown}"
+    SSH_EFFECTIVE_PASSWORD_AUTH="${effective_password_auth:-unknown}"
+    SSH_EFFECTIVE_PUBKEY_AUTH="${effective_pubkey_auth:-unknown}"
+    SSH_EFFECTIVE_KBD_AUTH="${effective_kbd_auth:-unknown}"
 
-    if [ "$total_key_count" -gt 0 ]; then
-        msg_ok "ROOT SSH KEYS DETECTED (${total_key_count} key line(s))"
+    if [ "$SSH_EFFECTIVE_PASSWORD_AUTH" == "no" ] \
+        && [ "$SSH_EFFECTIVE_PUBKEY_AUTH" == "yes" ] \
+        && [ "$SSH_EFFECTIVE_KBD_AUTH" == "no" ] \
+        && [[ "$SSH_EFFECTIVE_PERMIT_ROOT" =~ ^(prohibit-password|without-password)$ ]]; then
+        SSH_HARDENING_APPLIED="key-only-root"
+        msg_ok "SSH key-only root login enabled"
+    else
+        SSH_HARDENING_APPLIED="warning - effective config mismatch"
+        msg_warn "SSH hardening applied but effective root SSH settings should be reviewed"
+    fi
+}
+
+function apply_ssh_security() {
+    section "SSH SECURITY"
+
+    msg_info "Auditing SSH configuration"
+    run_cmd "validating current sshd config" sshd -t
+    detect_root_ssh_key_state
+    print_root_ssh_key_report
+
+    if [ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ]; then
+        msg_ok "ROOT SSH KEYS DETECTED (${SSH_ROOT_KEY_COUNT} key line(s))"
     else
         msg_warn "No root SSH authorized keys detected; SSH policy hardening remains audit-only to avoid lockout"
     fi
 
-    if [ "${effective_pubkey_auth:-unknown}" != "yes" ]; then
-        msg_warn "PubkeyAuthentication is not currently yes; root key login may depend on existing Proxmox defaults"
+    if [ "${SSH_KEY_ONLY_HARDENING_REQUESTED:-no}" == "yes" ]; then
+        apply_ssh_key_only_hardening
+    else
+        SSH_HARDENING_APPLIED="audit-only"
+        msg_ok "SSH CONFIG VALIDATED"
+        echo -e "  ${DGN}SSH key-only hardening not selected during preflight${CL}"
+        echo -e "  ${DGN}SSH LOCKOUT RISK AVOIDED${CL}"
     fi
 
-    if [ "${effective_permit_root:-unknown}" == "no" ]; then
-        msg_warn "Effective PermitRootLogin is no; root SSH login may already be disabled by existing config"
-    fi
-
-    msg_ok "SSH SECURITY AUDIT COMPLETE"
+    msg_ok "SSH SECURITY COMPLETE"
 }
 
 # --- 45. SYSCTL HARDENING & NETWORK TUNING ---
@@ -2225,6 +2357,21 @@ EOF
 }
 
 
+function read_text_from_tty() {
+    local prompt="$1"
+    local default="${2:-}"
+    local value=""
+
+    if [ -r /dev/tty ]; then
+        tty_print "${YW}${prompt} [${default}]: ${CL}"
+        IFS= read -r value < /dev/tty || true
+    else
+        IFS= read -r -p "${prompt} [${default}]: " value || true
+    fi
+
+    printf '%s' "${value:-$default}"
+}
+
 function read_secret_from_tty() {
     local prompt="$1"
     local value=""
@@ -2242,38 +2389,35 @@ function read_secret_from_tty() {
 }
 
 function enroll_crowdsec_console() {
-    local enroll_yn=""
-    local enrollment_key=""
     local err_file=""
 
-    CROWDSEC_CONSOLE_ENROLLMENT="no"
-    CROWDSEC_CONSOLE_ENGINE_NAME="proxmox-${HOSTNAME_SHORT}"
-
-    if ! command -v cscli >/dev/null 2>&1; then
-        CROWDSEC_CONSOLE_ENROLLMENT="unavailable"
-        msg_warn "cscli not found; CrowdSec Console enrollment skipped"
-        return 0
-    fi
-
-    enroll_yn="$(timed_yes_no "Enroll this Proxmox CrowdSec engine in CrowdSec Console?" "n")"
-    if [[ "$enroll_yn" =~ ^[Nn] ]]; then
+    if [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" != "yes" ]; then
         CROWDSEC_CONSOLE_ENROLLMENT="no"
         msg_ok "CROWDSEC CONSOLE ENROLLMENT SKIPPED"
         return 0
     fi
 
-    enrollment_key="$(read_secret_from_tty "Paste CrowdSec Console enrollment key")"
-    if [ -z "$enrollment_key" ]; then
-        CROWDSEC_CONSOLE_ENROLLMENT="error"
-        msg_warn "CrowdSec Console enrollment key was empty; enrollment skipped"
+    if ! command -v cscli >/dev/null 2>&1; then
+        CROWDSEC_CONSOLE_ENROLLMENT="unavailable"
+        msg_warn "cscli not found; CrowdSec Console enrollment skipped"
+        CROWDSEC_CONSOLE_ENROLLMENT_KEY=""
+        unset CROWDSEC_CONSOLE_ENROLLMENT_KEY || true
         return 0
     fi
 
+    if [ -z "${CROWDSEC_CONSOLE_ENROLLMENT_KEY:-}" ]; then
+        CROWDSEC_CONSOLE_ENROLLMENT="error"
+        msg_warn "CrowdSec Console enrollment was requested but no enrollment key is available"
+        unset CROWDSEC_CONSOLE_ENROLLMENT_KEY || true
+        return 0
+    fi
+
+    CROWDSEC_CONSOLE_ENGINE_NAME="${CROWDSEC_CONSOLE_ENGINE_NAME:-proxmox-${HOSTNAME_SHORT}}"
     err_file="$(mktemp)"
     TEMP_FILES+=("$err_file")
 
     msg_info "Enrolling CrowdSec engine in Console as ${CROWDSEC_CONSOLE_ENGINE_NAME}"
-    if cscli console enroll --name "$CROWDSEC_CONSOLE_ENGINE_NAME" "$enrollment_key" > /dev/null 2> "$err_file"; then
+    if cscli console enroll --name "$CROWDSEC_CONSOLE_ENGINE_NAME" "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" > /dev/null 2> "$err_file"; then
         msg_ok "CROWDSEC CONSOLE ENROLLMENT REQUESTED"
         CROWDSEC_CONSOLE_ENROLLMENT="pending"
         run_optional cscli console enable --all
@@ -2288,7 +2432,8 @@ function enroll_crowdsec_console() {
         CROWDSEC_CONSOLE_ENROLLMENT="error"
     fi
 
-    enrollment_key=""
+    CROWDSEC_CONSOLE_ENROLLMENT_KEY=""
+    unset CROWDSEC_CONSOLE_ENROLLMENT_KEY || true
     rm -f "$err_file"
 }
 
@@ -2665,7 +2810,7 @@ else
 fi
 
 # SSH audit checks.
-if [ "\$INSTALL_SSH_HARDENING_APPLIED" == "yes" ]; then
+if [ "\$INSTALL_SSH_HARDENING_APPLIED" == "key-only-root" ]; then
     ROOT_SSHD_EFFECTIVE="\$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
     ROOT_AUTH_KEYS="\$(echo "\$ROOT_SSHD_EFFECTIVE" | awk '\$1=="authorizedkeysfile" {for (i=2; i<=NF; i++) printf "%s ", \$i}')"
 
@@ -2675,7 +2820,7 @@ if [ "\$INSTALL_SSH_HARDENING_APPLIED" == "yes" ]; then
     if echo "\$ROOT_SSHD_EFFECTIVE" | grep -q "^kbdinteractiveauthentication no"; then PASS "Keyboard-interactive SSH authentication disabled"; else WARN "Keyboard-interactive SSH authentication not confirmed disabled"; fi
     if [ -n "\$ROOT_AUTH_KEYS" ]; then PASS "AuthorizedKeysFile effective path present: \$ROOT_AUTH_KEYS"; else FAIL "AuthorizedKeysFile effective path missing"; fi
 elif [ "\$INSTALL_SSH_HARDENING_APPLIED" == "audit-only" ]; then
-    INFO "SSH policy was intentionally left audit-only during Script 1 to avoid lockout"
+    INFO "SSH policy was left audit-only during Script 1"
     if [ "\${INSTALL_SSH_ROOT_KEY_COUNT:-0}" -gt 0 ] && [ -n "\$INSTALL_SSH_ROOT_KEY_FILE" ] && [ "\$INSTALL_SSH_ROOT_KEY_FILE" != "not-detected" ]; then
         PASS "Root SSH authorized keys detected during install: \${INSTALL_SSH_ROOT_KEY_COUNT} key line(s) in \$INSTALL_SSH_ROOT_KEY_FILE"
         INFO "Root SSH key target: \${INSTALL_SSH_ROOT_KEY_TARGET:-not-detected}; owner: \${INSTALL_SSH_ROOT_KEY_OWNER:-unknown}; mode: \${INSTALL_SSH_ROOT_KEY_MODE:-unknown}"
