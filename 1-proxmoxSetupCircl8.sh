@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.1"
+SCRIPT_VERSION="v1.3.2"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-network-ssh-size-fix"
+SCRIPT_BUILD="script1-final-host-hardening-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -76,6 +76,9 @@ ALLOW_PUBLIC_WEB="n"
 SSH_HARDENING_APPLIED="no"
 SSH_ROOT_KEY_FILE=""
 SSH_ROOT_KEY_COUNT="0"
+SSH_ROOT_KEY_TARGET=""
+SSH_ROOT_KEY_OWNER=""
+SSH_ROOT_KEY_MODE=""
 SSH_EFFECTIVE_AUTHORIZED_KEYS=""
 SSH_EFFECTIVE_PERMIT_ROOT=""
 SSH_EFFECTIVE_PASSWORD_AUTH=""
@@ -83,6 +86,8 @@ SSH_EFFECTIVE_PUBKEY_AUTH=""
 SSH_EFFECTIVE_KBD_AUTH=""
 PVE_FIREWALL_APPLIED="no"
 CROWDSEC_BOUNCER_PACKAGE="none"
+CROWDSEC_CONSOLE_ENROLLMENT="no"
+CROWDSEC_CONSOLE_ENGINE_NAME=""
 NUMLOCK_CONFIGURED="no"
 
 STORAGE_LAYOUT_MODE="unselected"
@@ -100,6 +105,8 @@ CURRENT_PVE_FREE_GB="0"
 CURRENT_PVE_FREE_MIB="0"
 TARGET_ROOT_SIZE_GB="100"
 TARGET_ROOT_SIZE_MIB="0"
+ROOT_LV_ALLOCATION_GB="100"
+ROOT_LV_ALLOCATION_MIB="0"
 ROOT_GROWTH_GB="0"
 ROOT_GROWTH_MIB="0"
 PVE_FREE_RESERVE_GB="1"
@@ -832,6 +839,7 @@ function validate_dependencies() {
         pvs
         qm
         reboot
+        readlink
         resize2fs
         rm
         sed
@@ -1162,6 +1170,19 @@ function decimal_gb_to_mib_floor() {
     echo $(( (gb * DECIMAL_GB_BYTES) / MIB_BYTES ))
 }
 
+function root_visible_gb_to_allocation_gb() {
+    local visible_gb="$1"
+
+    case "${ROOT_FS_TYPE:-unknown}" in
+        ext2|ext3|ext4)
+            echo $(( (visible_gb * 102 + 99) / 100 ))
+            ;;
+        *)
+            echo "$visible_gb"
+            ;;
+    esac
+}
+
 function mib_to_decimal_gb_floor() {
     local mib="$1"
     echo $(( (mib * MIB_BYTES) / DECIMAL_GB_BYTES ))
@@ -1279,14 +1300,16 @@ function validate_storage_conflict_state() {
 
 function calculate_storage_plan() {
     TARGET_ROOT_SIZE_MIB="$(decimal_gb_to_mib_floor "$TARGET_ROOT_SIZE_GB")"
+    ROOT_LV_ALLOCATION_GB="$(root_visible_gb_to_allocation_gb "$TARGET_ROOT_SIZE_GB")"
+    ROOT_LV_ALLOCATION_MIB="$(decimal_gb_to_mib_floor "$ROOT_LV_ALLOCATION_GB")"
     PVE_FREE_RESERVE_MIB="$(decimal_gb_to_mib_floor "$PVE_FREE_RESERVE_GB")"
     ROOT_GROWTH_MIB="0"
     ROOT_GROWTH_GB="0"
     LOCAL_LVM_DEFAULT_SIZE_MIB="0"
     LOCAL_LVM_DEFAULT_SIZE_GB="0"
 
-    if [ "$TARGET_ROOT_SIZE_MIB" -gt "$CURRENT_ROOT_SIZE_MIB" ]; then
-        ROOT_GROWTH_MIB="$(( TARGET_ROOT_SIZE_MIB - CURRENT_ROOT_SIZE_MIB ))"
+    if [ "$ROOT_LV_ALLOCATION_MIB" -gt "$CURRENT_ROOT_SIZE_MIB" ]; then
+        ROOT_GROWTH_MIB="$(( ROOT_LV_ALLOCATION_MIB - CURRENT_ROOT_SIZE_MIB ))"
         ROOT_GROWTH_GB="$(mib_to_decimal_gb_floor "$ROOT_GROWTH_MIB")"
     fi
 
@@ -1334,7 +1357,8 @@ function show_storage_plan() {
             ;;
         build_local_lvm)
             detail_line "current root/local" "${CURRENT_ROOT_SIZE_GB}GB"
-            detail_line "target root/local" "${TARGET_ROOT_SIZE_GB}GB"
+            detail_line "target local visible size" "${TARGET_ROOT_SIZE_GB}GB"
+            detail_line "root LV allocation target" "${ROOT_LV_ALLOCATION_GB}GB"
             detail_line "root growth needed" "${ROOT_GROWTH_GB}GB"
             detail_line "current pve free" "${CURRENT_PVE_FREE_GB}GB"
             detail_line "reserve free VG space" "${PVE_FREE_RESERVE_GB}GB"
@@ -1343,7 +1367,8 @@ function show_storage_plan() {
             ;;
         extend_root_only)
             detail_line "current root/local" "${CURRENT_ROOT_SIZE_GB}GB"
-            detail_line "target root/local" "${TARGET_ROOT_SIZE_GB}GB"
+            detail_line "target local visible size" "${TARGET_ROOT_SIZE_GB}GB"
+            detail_line "root LV allocation target" "${ROOT_LV_ALLOCATION_GB}GB"
             detail_line "root growth needed" "${ROOT_GROWTH_GB}GB"
             detail_line "create local-lvm" "no"
             detail_line "reserve free VG space" "${PVE_FREE_RESERVE_GB}GB"
@@ -1483,7 +1508,8 @@ function final_start_prompt() {
             ;;
         build_local_lvm)
             echo -e "  current root/local: ${GN}${CURRENT_ROOT_SIZE_GB}GB${CL}"
-            echo -e "  target root/local: ${GN}${TARGET_ROOT_SIZE_GB}GB${CL}"
+            echo -e "  target local visible size: ${GN}${TARGET_ROOT_SIZE_GB}GB${CL}"
+            echo -e "  root LV allocation target: ${GN}${ROOT_LV_ALLOCATION_GB}GB${CL}"
             echo -e "  root growth needed: ${GN}${ROOT_GROWTH_GB}GB${CL}"
             echo -e "  current pve free: ${GN}${CURRENT_PVE_FREE_GB}GB${CL}"
             echo -e "  reserve free VG space: ${GN}${PVE_FREE_RESERVE_GB}GB${CL}"
@@ -1494,7 +1520,8 @@ function final_start_prompt() {
         extend_root_only)
             echo -e "  storage mode: ${GN}extend_root_only${CL}"
             echo -e "  current root/local: ${GN}${CURRENT_ROOT_SIZE_GB}GB${CL}"
-            echo -e "  target root/local: ${GN}${TARGET_ROOT_SIZE_GB}GB${CL}"
+            echo -e "  target local visible size: ${GN}${TARGET_ROOT_SIZE_GB}GB${CL}"
+            echo -e "  root LV allocation target: ${GN}${ROOT_LV_ALLOCATION_GB}GB${CL}"
             echo -e "  root growth needed: ${GN}${ROOT_GROWTH_GB}GB${CL}"
             echo -e "  create local-lvm: ${GN}no${CL}"
             ;;
@@ -1566,9 +1593,9 @@ function apply_root_target_growth() {
         return 0
     fi
 
-    msg_info "Extending root/local to ${TARGET_ROOT_SIZE_GB}GB decimal"
-    run_cmd "extending root/local to ${TARGET_ROOT_SIZE_GB}GB decimal" lvextend -L "${TARGET_ROOT_SIZE_MIB}M" /dev/pve/root
-    msg_ok "Root/local extended to target size"
+    msg_info "Extending root LV allocation to ${ROOT_LV_ALLOCATION_GB}GB decimal for ${TARGET_ROOT_SIZE_GB}GB visible target"
+    run_cmd "extending root LV allocation to ${ROOT_LV_ALLOCATION_GB}GB decimal" lvextend -L "${ROOT_LV_ALLOCATION_MIB}M" /dev/pve/root
+    msg_ok "Root/local extended to target visible size"
 
     resize_root_filesystem
 }
@@ -1862,6 +1889,34 @@ function count_authorized_key_lines() {
     fi
 }
 
+function describe_authorized_keys_file() {
+    local file="$1"
+    local key_count="$2"
+    local target=""
+    local owner="unknown"
+    local mode="unknown"
+
+    if [ -L "$file" ]; then
+        target="$(readlink -f "$file" 2>/dev/null || true)"
+    else
+        target="$file"
+    fi
+
+    if [ -n "$target" ] && [ -e "$target" ]; then
+        owner="$(stat -Lc '%U:%G' "$target" 2>/dev/null || echo unknown)"
+        mode="$(stat -Lc '%a' "$target" 2>/dev/null || echo unknown)"
+
+        if [ "$file" != "$target" ]; then
+            echo -e "  ${GN}${file} -> ${target}${CL}"
+            echo -e "  ${GN}target: present, ${owner}, mode ${mode}, ${key_count} key line(s)${CL}"
+        else
+            echo -e "  ${GN}${file}: present, ${owner}, mode ${mode}, ${key_count} key line(s)${CL}"
+        fi
+    else
+        echo -e "  ${YW}${file}: missing/empty${CL}"
+    fi
+}
+
 # --- 44. SSH SECURITY ---
 # Performs a non-invasive SSH safety audit only.
 #
@@ -1894,6 +1949,8 @@ function apply_ssh_security() {
     local key_count="0"
     local total_key_count="0"
     local first_key_file=""
+    local primary_key_file="/root/.ssh/authorized_keys"
+    local primary_key_count="0"
 
     section "SSH SECURITY"
 
@@ -1916,24 +1973,44 @@ function apply_ssh_security() {
 
     echo ""
     echo -e "${BL}Root SSH key check:${CL}"
-    for key_pattern in $SSH_EFFECTIVE_AUTHORIZED_KEYS; do
-        key_file="$(resolve_authorized_keys_path "$key_pattern")"
-        key_count="$(count_authorized_key_lines "$key_file")"
-        if [ "$key_count" -gt 0 ]; then
-            echo -e "  ${GN}${key_file}: present (${key_count} key line(s))${CL}"
-            total_key_count="$(( total_key_count + key_count ))"
-            [ -z "$first_key_file" ] && first_key_file="$key_file"
-        else
-            echo -e "  ${YW}${key_file}: missing/empty${CL}"
-        fi
-    done
+
+    primary_key_count="$(count_authorized_key_lines "$primary_key_file")"
+    if [ "$primary_key_count" -gt 0 ]; then
+        describe_authorized_keys_file "$primary_key_file" "$primary_key_count"
+        total_key_count="$primary_key_count"
+        first_key_file="$primary_key_file"
+        SSH_ROOT_KEY_TARGET="$(readlink -f "$primary_key_file" 2>/dev/null || echo "$primary_key_file")"
+        SSH_ROOT_KEY_OWNER="$(stat -Lc '%U:%G' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
+        SSH_ROOT_KEY_MODE="$(stat -Lc '%a' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
+    else
+        for key_pattern in $SSH_EFFECTIVE_AUTHORIZED_KEYS; do
+            key_file="$(resolve_authorized_keys_path "$key_pattern")"
+            key_count="$(count_authorized_key_lines "$key_file")"
+            if [ "$key_count" -gt 0 ]; then
+                describe_authorized_keys_file "$key_file" "$key_count"
+                total_key_count="$(( total_key_count + key_count ))"
+                [ -z "$first_key_file" ] && first_key_file="$key_file"
+            elif [ "$key_file" == "$primary_key_file" ] || [ "$key_file" == "/root/.ssh/authorized_keys2" ]; then
+                echo -e "  ${YW}${key_file}: missing/empty${CL}"
+            fi
+        done
+    fi
+
     echo -e "  ${BL}key lines detected:${CL} ${GN}${total_key_count}${CL}"
 
     SSH_ROOT_KEY_COUNT="$total_key_count"
     if [ "$total_key_count" -gt 0 ]; then
         SSH_ROOT_KEY_FILE="$first_key_file"
+        if [ -z "$SSH_ROOT_KEY_TARGET" ]; then
+            SSH_ROOT_KEY_TARGET="$(readlink -f "$first_key_file" 2>/dev/null || echo "$first_key_file")"
+            SSH_ROOT_KEY_OWNER="$(stat -Lc '%U:%G' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
+            SSH_ROOT_KEY_MODE="$(stat -Lc '%a' "$SSH_ROOT_KEY_TARGET" 2>/dev/null || echo unknown)"
+        fi
     else
         SSH_ROOT_KEY_FILE="not-detected"
+        SSH_ROOT_KEY_TARGET="not-detected"
+        SSH_ROOT_KEY_OWNER="unknown"
+        SSH_ROOT_KEY_MODE="unknown"
     fi
 
     SSH_HARDENING_APPLIED="audit-only"
@@ -2061,12 +2138,13 @@ function apply_proxmox_firewall() {
 
     section "PROXMOX FIREWALL BASELINE"
 
-    msg_info "Creating or verifying Proxmox node firewall directory"
+    msg_info "Creating or verifying Proxmox firewall directories"
     mkdir -p "/etc/pve/nodes/${HOSTNAME_SHORT}"
-    msg_ok "PROXMOX NODE FIREWALL DIRECTORY VERIFIED"
+    mkdir -p /etc/pve/firewall
+    msg_ok "PROXMOX FIREWALL DIRECTORIES VERIFIED"
 
     if [ -z "$LAN_CIDR" ]; then
-        PVE_FIREWALL_APPLIED="no"
+        PVE_FIREWALL_APPLIED="warning - no LAN CIDR"
         msg_warn "Could not calculate LAN network CIDR. Proxmox firewall rules skipped to avoid invalid config or lockout."
         return 0
     fi
@@ -2078,6 +2156,13 @@ function apply_proxmox_firewall() {
         echo "firewall: 1" >> /etc/pve/datacenter.cfg
     fi
     msg_ok "DATACENTER FIREWALL ENABLED"
+
+    msg_info "Writing cluster firewall enable file"
+    cat <<EOF > /etc/pve/firewall/cluster.fw
+[OPTIONS]
+enable: 1
+EOF
+    msg_ok "CLUSTER FIREWALL ENABLE FILE WRITTEN"
 
     msg_info "Writing node firewall rules"
     cat <<EOF > "/etc/pve/nodes/${HOSTNAME_SHORT}/host.fw"
@@ -2106,7 +2191,7 @@ EOF
         echo ""
         echo -e "${RD}Proxmox firewall validation reported parser errors:${CL}"
         echo "$firewall_status"
-        PVE_FIREWALL_APPLIED="no"
+        PVE_FIREWALL_APPLIED="warning - parser error"
         msg_error "Proxmox firewall config validation failed. Refusing to enable invalid firewall rules."
     fi
     msg_ok "PROXMOX FIREWALL CONFIG VALIDATED"
@@ -2120,15 +2205,91 @@ EOF
         echo ""
         echo -e "${RD}Proxmox firewall status reported parser errors after restart:${CL}"
         echo "$firewall_status"
-        PVE_FIREWALL_APPLIED="no"
+        PVE_FIREWALL_APPLIED="warning - parser error"
         msg_error "Proxmox firewall did not validate after restart."
     fi
 
-    msg_ok "PVE-FIREWALL SERVICE ENABLED"
-
-    PVE_FIREWALL_APPLIED="yes"
+    if echo "$firewall_status" | grep -q "Status: enabled/running"; then
+        PVE_FIREWALL_APPLIED="enabled/running"
+        msg_ok "PVE-FIREWALL STATUS ENABLED/RUNNING"
+    else
+        echo ""
+        echo -e "${YW}Proxmox firewall status was not enabled/running:${CL}"
+        echo "$firewall_status"
+        PVE_FIREWALL_APPLIED="warning - not enabled/running"
+        msg_warn "PVE-firewall is not enabled/running; review firewall status manually"
+        return 0
+    fi
 
     msg_ok "PROXMOX FIREWALL ENABLED"
+}
+
+
+function read_secret_from_tty() {
+    local prompt="$1"
+    local value=""
+
+    if [ -r /dev/tty ]; then
+        tty_print "${YW}${prompt}: ${CL}"
+        IFS= read -rs value < /dev/tty || true
+        tty_println ""
+    else
+        IFS= read -rs -p "${prompt}: " value || true
+        echo "" >&2
+    fi
+
+    printf '%s' "$value"
+}
+
+function enroll_crowdsec_console() {
+    local enroll_yn=""
+    local enrollment_key=""
+    local err_file=""
+
+    CROWDSEC_CONSOLE_ENROLLMENT="no"
+    CROWDSEC_CONSOLE_ENGINE_NAME="proxmox-${HOSTNAME_SHORT}"
+
+    if ! command -v cscli >/dev/null 2>&1; then
+        CROWDSEC_CONSOLE_ENROLLMENT="unavailable"
+        msg_warn "cscli not found; CrowdSec Console enrollment skipped"
+        return 0
+    fi
+
+    enroll_yn="$(timed_yes_no "Enroll this Proxmox CrowdSec engine in CrowdSec Console?" "n")"
+    if [[ "$enroll_yn" =~ ^[Nn] ]]; then
+        CROWDSEC_CONSOLE_ENROLLMENT="no"
+        msg_ok "CROWDSEC CONSOLE ENROLLMENT SKIPPED"
+        return 0
+    fi
+
+    enrollment_key="$(read_secret_from_tty "Paste CrowdSec Console enrollment key")"
+    if [ -z "$enrollment_key" ]; then
+        CROWDSEC_CONSOLE_ENROLLMENT="error"
+        msg_warn "CrowdSec Console enrollment key was empty; enrollment skipped"
+        return 0
+    fi
+
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    msg_info "Enrolling CrowdSec engine in Console as ${CROWDSEC_CONSOLE_ENGINE_NAME}"
+    if cscli console enroll --name "$CROWDSEC_CONSOLE_ENGINE_NAME" "$enrollment_key" > /dev/null 2> "$err_file"; then
+        msg_ok "CROWDSEC CONSOLE ENROLLMENT REQUESTED"
+        CROWDSEC_CONSOLE_ENROLLMENT="pending"
+        run_optional cscli console enable --all
+        if cscli console status > /dev/null 2>&1; then
+            msg_ok "CROWDSEC CONSOLE STATUS CHECKED"
+        else
+            msg_warn "CrowdSec Console status is not confirmed yet; accept the engine in the CrowdSec Console"
+        fi
+        echo -e "${YW}Validate/accept this engine in https://app.crowdsec.net${CL}"
+    else
+        msg_warn "CrowdSec Console enrollment failed; review cscli console status manually"
+        CROWDSEC_CONSOLE_ENROLLMENT="error"
+    fi
+
+    enrollment_key=""
+    rm -f "$err_file"
 }
 
 # --- 48. CROWDSEC & AUTO UPDATES ---
@@ -2198,6 +2359,8 @@ function apply_crowdsec_security() {
         msg_warn "CrowdSec firewall bouncer service was not found after install"
     fi
 
+    enroll_crowdsec_console
+
     msg_info "Writing unattended-upgrades config"
     cat <<EOF > /etc/apt/apt.conf.d/20auto-upgrades
 APT::Periodic::Update-Package-Lists "1";
@@ -2211,12 +2374,22 @@ EOF
 # --- 49. PROXMOX FIREWALL SERVICE REINFORCEMENT ---
 # Ensures the firewall service remains enabled now and at boot.
 function reinforce_pve_firewall_service() {
+    local firewall_status=""
+
     section "PROXMOX FIREWALL SERVICE REINFORCEMENT"
 
-    msg_info "Enabling and restarting Proxmox firewall service"
+    msg_info "Restarting Proxmox firewall service"
     run_optional systemctl enable --now pve-firewall
     run_optional systemctl restart pve-firewall
-    msg_ok "PROXMOX FIREWALL SERVICE ENABLED"
+
+    firewall_status="$(pve-firewall status 2>&1 || true)"
+    if echo "$firewall_status" | grep -q "Status: enabled/running"; then
+        PVE_FIREWALL_APPLIED="enabled/running"
+        msg_ok "PROXMOX FIREWALL SERVICE ENABLED/RUNNING"
+    else
+        PVE_FIREWALL_APPLIED="warning - not enabled/running"
+        msg_warn "Proxmox firewall service is not enabled/running after reinforcement"
+    fi
 }
 
 # --- 50. PERFORMANCE & TRIM ---
@@ -2341,12 +2514,15 @@ INSTALL_SSH_HARDENING_APPLIED="$SSH_HARDENING_APPLIED"
 INSTALL_PVE_FIREWALL_APPLIED="$PVE_FIREWALL_APPLIED"
 INSTALL_IOMMU_FLAG="$IOMMU_FLAG"
 INSTALL_CROWDSEC_BOUNCER_PACKAGE="$CROWDSEC_BOUNCER_PACKAGE"
+INSTALL_CROWDSEC_CONSOLE_ENROLLMENT="$CROWDSEC_CONSOLE_ENROLLMENT"
+INSTALL_CROWDSEC_CONSOLE_ENGINE_NAME="$CROWDSEC_CONSOLE_ENGINE_NAME"
 INSTALL_REALTEK_IFACE="$REALTEK_IFACE"
 INSTALL_REALTEK_OPTIMIZED="$REALTEK_OPTIMIZED"
 INSTALL_NUMLOCK_CONFIGURED="$NUMLOCK_CONFIGURED"
 INSTALL_STORAGE_LAYOUT_MODE="$STORAGE_LAYOUT_MODE"
 INSTALL_CURRENT_ROOT_SIZE_GB="$CURRENT_ROOT_SIZE_GB"
 INSTALL_TARGET_ROOT_SIZE_GB="$TARGET_ROOT_SIZE_GB"
+INSTALL_ROOT_LV_ALLOCATION_GB="$ROOT_LV_ALLOCATION_GB"
 INSTALL_ROOT_GROWTH_GB="$ROOT_GROWTH_GB"
 INSTALL_CREATE_LOCAL_LVM="$CREATE_LOCAL_LVM"
 INSTALL_LOCAL_LVM_SIZE_GB="$LOCAL_LVM_SIZE_GB"
@@ -2354,6 +2530,9 @@ INSTALL_DEFAULT_IFACE="$DEFAULT_IFACE"
 INSTALL_LAN_CIDR="$LAN_CIDR"
 INSTALL_SSH_ROOT_KEY_FILE="$SSH_ROOT_KEY_FILE"
 INSTALL_SSH_ROOT_KEY_COUNT="$SSH_ROOT_KEY_COUNT"
+INSTALL_SSH_ROOT_KEY_TARGET="$SSH_ROOT_KEY_TARGET"
+INSTALL_SSH_ROOT_KEY_OWNER="$SSH_ROOT_KEY_OWNER"
+INSTALL_SSH_ROOT_KEY_MODE="$SSH_ROOT_KEY_MODE"
 INSTALL_SSH_EFFECTIVE_AUTHORIZED_KEYS="$SSH_EFFECTIVE_AUTHORIZED_KEYS"
 INSTALL_SSH_EFFECTIVE_PERMIT_ROOT="$SSH_EFFECTIVE_PERMIT_ROOT"
 INSTALL_SSH_EFFECTIVE_PASSWORD_AUTH="$SSH_EFFECTIVE_PASSWORD_AUTH"
@@ -2380,6 +2559,8 @@ INFO "CPU performance selected: \$INSTALL_ENABLE_PERFORMANCE"
 INFO "SSH hardening applied during install: \$INSTALL_SSH_HARDENING_APPLIED"
 INFO "CrowdSec selected during install: \$INSTALL_ENABLE_CROWDSEC"
 INFO "CrowdSec bouncer package: \$INSTALL_CROWDSEC_BOUNCER_PACKAGE"
+INFO "CrowdSec Console enrollment: \${INSTALL_CROWDSEC_CONSOLE_ENROLLMENT:-no}"
+INFO "CrowdSec Console engine name: \${INSTALL_CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}"
 INFO "Proxmox firewall applied during install: \$INSTALL_PVE_FIREWALL_APPLIED"
 INFO "Public host 80/443 selected: \$INSTALL_ALLOW_PUBLIC_WEB"
 INFO "Realtek NIC optimized during install: \$INSTALL_REALTEK_OPTIMIZED"
@@ -2389,6 +2570,7 @@ INFO "Storage layout mode: \$INSTALL_STORAGE_LAYOUT_MODE"
 INFO "Default network interface during install: \${INSTALL_DEFAULT_IFACE:-unknown}"
 INFO "LAN CIDR allowed for SSH/WebUI during install: \${INSTALL_LAN_CIDR:-not-detected}"
 INFO "Root SSH key file detected during install: \${INSTALL_SSH_ROOT_KEY_FILE:-not-detected}"
+INFO "Root SSH key target during install: \${INSTALL_SSH_ROOT_KEY_TARGET:-not-detected}"
 INFO "Effective AuthorizedKeysFile during install: \${INSTALL_SSH_EFFECTIVE_AUTHORIZED_KEYS:-unknown}"
 
 echo ""
@@ -2425,11 +2607,11 @@ case "\$INSTALL_STORAGE_LAYOUT_MODE" in
         if pvesm status 2>/dev/null | awk 'NR>1 && \$1 == "local-lvm" {found=1} END {exit found ? 0 : 1}'; then PASS "pvesm lists local-lvm"; else FAIL "pvesm does not list local-lvm"; fi
         if lvdisplay /dev/pve/data >/dev/null 2>&1; then PASS "/dev/pve/data exists for local-lvm"; else FAIL "/dev/pve/data missing after build mode"; fi
         if lvs --noheadings -o lv_attr pve/data 2>/dev/null | awk 'NF {exit substr(\$1,1,1)=="t" ? 0 : 1}'; then PASS "pve/data is a thinpool"; else WARN "pve/data thinpool attribute not confirmed"; fi
-        INFO "Root target during install: \${INSTALL_TARGET_ROOT_SIZE_GB}GB; local-lvm size: \${INSTALL_LOCAL_LVM_SIZE_GB}GB"
+        INFO "Root visible target during install: \${INSTALL_TARGET_ROOT_SIZE_GB}GB; root LV allocation: \${INSTALL_ROOT_LV_ALLOCATION_GB}GB; local-lvm size: \${INSTALL_LOCAL_LVM_SIZE_GB}GB"
         ;;
     extend_root_only)
         INFO "Root/local extension selected without local-lvm creation"
-        INFO "Root target during install: \${INSTALL_TARGET_ROOT_SIZE_GB}GB; root growth requested: \${INSTALL_ROOT_GROWTH_GB}GB"
+        INFO "Root visible target during install: \${INSTALL_TARGET_ROOT_SIZE_GB}GB; root LV allocation: \${INSTALL_ROOT_LV_ALLOCATION_GB}GB; root growth requested: \${INSTALL_ROOT_GROWTH_GB}GB"
         ;;
     skip_root_expansion)
         INFO "Root/local expansion skipped; local-lvm creation skipped; storage state intentionally unchanged by Script 1"
@@ -2496,6 +2678,7 @@ elif [ "\$INSTALL_SSH_HARDENING_APPLIED" == "audit-only" ]; then
     INFO "SSH policy was intentionally left audit-only during Script 1 to avoid lockout"
     if [ "\${INSTALL_SSH_ROOT_KEY_COUNT:-0}" -gt 0 ] && [ -n "\$INSTALL_SSH_ROOT_KEY_FILE" ] && [ "\$INSTALL_SSH_ROOT_KEY_FILE" != "not-detected" ]; then
         PASS "Root SSH authorized keys detected during install: \${INSTALL_SSH_ROOT_KEY_COUNT} key line(s) in \$INSTALL_SSH_ROOT_KEY_FILE"
+        INFO "Root SSH key target: \${INSTALL_SSH_ROOT_KEY_TARGET:-not-detected}; owner: \${INSTALL_SSH_ROOT_KEY_OWNER:-unknown}; mode: \${INSTALL_SSH_ROOT_KEY_MODE:-unknown}"
     else
         WARN "No root SSH authorized keys were detected during install; SSH policy remained audit-only"
     fi
@@ -2512,7 +2695,10 @@ else
 fi
 
 # Proxmox firewall checks.
+FIREWALL_STATUS="\$(pve-firewall status 2>&1 || true)"
+if echo "\$FIREWALL_STATUS" | grep -q "Status: enabled/running"; then PASS "Proxmox firewall status enabled/running"; else FAIL "Proxmox firewall status is not enabled/running: \$FIREWALL_STATUS"; fi
 if systemctl is-active --quiet pve-firewall; then PASS "Proxmox firewall service active"; else FAIL "Proxmox firewall service inactive"; fi
+if [ -f /etc/pve/firewall/cluster.fw ] && grep -q "enable: 1" /etc/pve/firewall/cluster.fw 2>/dev/null; then PASS "Cluster firewall enable file present"; else FAIL "Cluster firewall enable file missing"; fi
 if grep -q "firewall: 1" /etc/pve/datacenter.cfg 2>/dev/null; then PASS "Datacenter firewall enabled"; else FAIL "Datacenter firewall not enabled"; fi
 if [ -f "/etc/pve/nodes/\$(hostname -s)/host.fw" ]; then PASS "Node firewall file exists"; else WARN "Node firewall file missing"; fi
 
@@ -2653,11 +2839,16 @@ Root FS Type: $ROOT_FS_TYPE
 GPU Passthrough: $ENABLE_PASSTHROUGH
 CPU Performance: $ENABLE_PERFORMANCE
 CrowdSec: $ENABLE_CROWDSEC
+CrowdSec Console Enrollment: $CROWDSEC_CONSOLE_ENROLLMENT
+CrowdSec Console Engine Name: ${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
 Allow Public Host 80/443: $ALLOW_PUBLIC_WEB
 Default Interface: ${DEFAULT_IFACE:-unknown}
 LAN CIDR Allowed For SSH/WebUI: ${LAN_CIDR:-not-detected}
 SSH Hardening: $SSH_HARDENING_APPLIED
 Root SSH Key File: ${SSH_ROOT_KEY_FILE:-not-detected}
+Root SSH Key Target: ${SSH_ROOT_KEY_TARGET:-not-detected}
+Root SSH Key Owner: ${SSH_ROOT_KEY_OWNER:-unknown}
+Root SSH Key Mode: ${SSH_ROOT_KEY_MODE:-unknown}
 Root SSH Key Lines: ${SSH_ROOT_KEY_COUNT:-0}
 Effective AuthorizedKeysFile: ${SSH_EFFECTIVE_AUTHORIZED_KEYS:-unknown}
 Effective PermitRootLogin: ${SSH_EFFECTIVE_PERMIT_ROOT:-unknown}
@@ -2669,7 +2860,8 @@ Realtek Optimized: $REALTEK_OPTIMIZED
 NumLock: $NUMLOCK_CONFIGURED
 Storage Layout Mode: $STORAGE_LAYOUT_MODE
 Current Root Size GB: $CURRENT_ROOT_SIZE_GB
-Target Root Size GB: $TARGET_ROOT_SIZE_GB
+Target Root/Local Visible GB: $TARGET_ROOT_SIZE_GB
+Root LV Allocation GB: $ROOT_LV_ALLOCATION_GB
 Root Growth GB: $ROOT_GROWTH_GB
 Create Local LVM: $CREATE_LOCAL_LVM
 Local LVM Size GB: $LOCAL_LVM_SIZE_GB
