@@ -1577,11 +1577,11 @@ function check_storage_conflicts() {
 # Validates the final value to avoid failure after disk wipe.
 function collect_thinpool_allocation() {
     if [ "$DISK_SIZE_GB" -lt 256 ]; then
-        THIN_PERCENT="95"
+        THIN_PERCENT="97"
     elif [ "$DISK_SIZE_GB" -lt 1024 ]; then
-        THIN_PERCENT="92"
+        THIN_PERCENT="96"
     else
-        THIN_PERCENT="90"
+        THIN_PERCENT="95"
     fi
 
     THIN_PERCENT="$(timed_percent_input "Enter thinpool allocation percent" "$THIN_PERCENT" "50" "98")"
