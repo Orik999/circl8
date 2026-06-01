@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.6"
+SCRIPT_VERSION="v1.3.7"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-crowdsec-ui-input-polish"
+SCRIPT_BUILD="script1-final-display-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -2688,6 +2688,13 @@ PASS() { echo -e "\${GN}✓ PASS\${CL} - \$1"; }
 FAIL() { echo -e "\${RD}✗ FAIL\${CL} - \$1"; }
 WARN() { echo -e "\${YW}! WARN\${CL} - \$1"; }
 INFO() { echo -e "\${BL}- INFO\${CL} - \$1"; }
+YESNO() {
+    case "\${1:-}" in
+        y|Y|yes|YES|true|TRUE|1) echo "yes" ;;
+        n|N|no|NO|false|FALSE|0|"") echo "no" ;;
+        *) echo "\$1" ;;
+    esac
+}
 
 echo ""
 echo -e "\${BL}--- PVE9 POST-INSTALL VERIFICATION REPORT ---\${CL}"
@@ -2699,18 +2706,18 @@ INFO "System type detected during install: \$INSTALL_SYSTEM_TYPE"
 INFO "SSD detected during install: \$INSTALL_IS_SSD"
 INFO "Integrated GPU detected during install: \$INSTALL_IGPU_FOUND"
 INFO "Discrete GPU detected during install: \$INSTALL_DGPU_FOUND"
-INFO "Discrete GPU passthrough selected: \$INSTALL_ENABLE_PASSTHROUGH"
-INFO "CPU performance selected: \$INSTALL_ENABLE_PERFORMANCE"
+INFO "Discrete GPU passthrough selected: \$(YESNO "\$INSTALL_ENABLE_PASSTHROUGH")"
+INFO "CPU performance selected: \$(YESNO "\$INSTALL_ENABLE_PERFORMANCE")"
 INFO "SSH hardening applied during install: \$INSTALL_SSH_HARDENING_APPLIED"
-INFO "CrowdSec selected during install: \$INSTALL_ENABLE_CROWDSEC"
+INFO "CrowdSec selected during install: \$(YESNO "\$INSTALL_ENABLE_CROWDSEC")"
 INFO "CrowdSec bouncer package: \$INSTALL_CROWDSEC_BOUNCER_PACKAGE"
 INFO "CrowdSec Console enrollment: \${INSTALL_CROWDSEC_CONSOLE_ENROLLMENT:-no}"
 INFO "CrowdSec Console engine name: \${INSTALL_CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}"
 INFO "Proxmox firewall applied during install: \$INSTALL_PVE_FIREWALL_APPLIED"
-INFO "Public host 80/443 selected: \$INSTALL_ALLOW_PUBLIC_WEB"
-INFO "Realtek NIC optimized during install: \$INSTALL_REALTEK_OPTIMIZED"
+INFO "Public host 80/443 selected: \$(YESNO "\$INSTALL_ALLOW_PUBLIC_WEB")"
+INFO "Realtek NIC optimized during install: \$(YESNO "\$INSTALL_REALTEK_OPTIMIZED")"
 INFO "Realtek interface: \$INSTALL_REALTEK_IFACE"
-INFO "NumLock service configured: \$INSTALL_NUMLOCK_CONFIGURED"
+INFO "NumLock service configured: \$(YESNO "\$INSTALL_NUMLOCK_CONFIGURED")"
 INFO "Storage layout mode: \$INSTALL_STORAGE_LAYOUT_MODE"
 INFO "Default network interface during install: \${INSTALL_DEFAULT_IFACE:-unknown}"
 INFO "LAN CIDR allowed for SSH/WebUI during install: \${INSTALL_LAN_CIDR:-not-detected}"
@@ -2981,12 +2988,12 @@ PVE9 Post Install completed on: $(date)
 System Type: $SYSTEM_TYPE
 SSD Detected: $IS_SSD
 Root FS Type: $ROOT_FS_TYPE
-GPU Passthrough: $ENABLE_PASSTHROUGH
-CPU Performance: $ENABLE_PERFORMANCE
-CrowdSec: $ENABLE_CROWDSEC
+GPU Passthrough: $(yes_no_label "$ENABLE_PASSTHROUGH")
+CPU Performance: $(yes_no_label "$ENABLE_PERFORMANCE")
+CrowdSec: $(yes_no_label "$ENABLE_CROWDSEC")
 CrowdSec Console Enrollment: $CROWDSEC_CONSOLE_ENROLLMENT
 CrowdSec Console Engine Name: ${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
-Allow Public Host 80/443: $ALLOW_PUBLIC_WEB
+Allow Public Host 80/443: $(yes_no_label "$ALLOW_PUBLIC_WEB")
 Default Interface: ${DEFAULT_IFACE:-unknown}
 LAN CIDR Allowed For SSH/WebUI: ${LAN_CIDR:-not-detected}
 SSH Hardening: $SSH_HARDENING_APPLIED
@@ -3001,14 +3008,14 @@ Effective PasswordAuthentication: ${SSH_EFFECTIVE_PASSWORD_AUTH:-unknown}
 Effective PubkeyAuthentication: ${SSH_EFFECTIVE_PUBKEY_AUTH:-unknown}
 Effective KbdInteractiveAuthentication: ${SSH_EFFECTIVE_KBD_AUTH:-unknown}
 Proxmox Firewall: $PVE_FIREWALL_APPLIED
-Realtek Optimized: $REALTEK_OPTIMIZED
-NumLock: $NUMLOCK_CONFIGURED
+Realtek Optimized: $(yes_no_label "$REALTEK_OPTIMIZED")
+NumLock: $(yes_no_label "$NUMLOCK_CONFIGURED")
 Storage Layout Mode: $STORAGE_LAYOUT_MODE
 Current Root Size GB: $CURRENT_ROOT_SIZE_GB
 Target Root/Local Visible GB: $TARGET_ROOT_SIZE_GB
 Root LV Allocation GB: $ROOT_LV_ALLOCATION_GB
 Root Growth GB: $ROOT_GROWTH_GB
-Create Local LVM: $CREATE_LOCAL_LVM
+Create Local LVM: $(yes_no_label "$CREATE_LOCAL_LVM")
 Local LVM Size GB: $LOCAL_LVM_SIZE_GB
 EOF
 
@@ -3023,14 +3030,21 @@ function show_final_summary() {
 
     detail_line "SYSTEM TYPE" "$SYSTEM_TYPE"
     detail_line "STORAGE LAYOUT MODE" "$STORAGE_LAYOUT_MODE"
-    detail_line "GPU PASSTHROUGH" "$ENABLE_PASSTHROUGH"
-    detail_line "CPU PERFORMANCE" "$ENABLE_PERFORMANCE"
-    detail_line "CROWDSEC" "$ENABLE_CROWDSEC"
+    detail_line "GPU PASSTHROUGH" "$(yes_no_label "$ENABLE_PASSTHROUGH")"
+    detail_line "CPU PERFORMANCE" "$(yes_no_label "$ENABLE_PERFORMANCE")"
+    detail_line "CROWDSEC" "$(yes_no_label "$ENABLE_CROWDSEC")"
     detail_line "PROXMOX FIREWALL" "$PVE_FIREWALL_APPLIED"
     detail_line "SSH HARDENING" "$SSH_HARDENING_APPLIED"
-    detail_line "REALTEK OPTIMIZED" "$REALTEK_OPTIMIZED"
-    detail_line "NUMLOCK" "$NUMLOCK_CONFIGURED"
+    detail_line "REALTEK OPTIMIZED" "$(yes_no_label "$REALTEK_OPTIMIZED")"
+    detail_line "NUMLOCK" "$(yes_no_label "$NUMLOCK_CONFIGURED")"
     detail_line "VERIFY LOG" "$VERIFY_LOG"
+
+    if [ "${CROWDSEC_CONSOLE_ENROLLMENT:-no}" == "pending" ] || { [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" == "yes" ] && [ "${CROWDSEC_CONSOLE_ENROLLMENT:-no}" != "no" ]; }; then
+        echo ""
+        echo -e "${BL}CROWDSEC CONSOLE NEXT STEP${CL}"
+        echo -e "  ${YW}Validate/accept CrowdSec engine in https://app.crowdsec.net${CL}"
+        echo -e "  Engine name: ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME:-proxmox-${HOSTNAME_SHORT}}${CL}"
+    fi
     echo ""
 }
 
