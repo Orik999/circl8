@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.3.0"
+SCRIPT_VERSION="v1.3.1"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="final-prompt-storage-readability-polish"
+SCRIPT_BUILD="gpu-option-spacing-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -1678,11 +1678,11 @@ function collect_gpu_passthrough_option() {
         echo -e "${YW}Discrete GPU:${CL}"
         echo -e "  ${BL}name:${CL} ${GN}${gpu_display_name}${CL}"
         echo -e "  ${BL}passthrough role:${CL} ${YW}optional / not required initially${CL}"
-        echo ""
 
         if [ "$gpu_function_count" -le 1 ]; then
             echo -e "  ${BL}passthrough device:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
         else
+            echo ""
             echo -e "${BL}Related same-card functions:${CL}"
             for gpu_func in $GPU_SAME_SLOT_BDFS; do
                 echo -e "  - ${GN}${gpu_func}${CL}"
