@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.1"
+SCRIPT_VERSION="v1.2.2"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="system-audit-display-polish"
+SCRIPT_BUILD="strict-mode-audit-return-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -867,6 +867,8 @@ function print_gpu_group() {
             echo -e "    ${BL}use:${CL} ${GN}${use_label}${CL}"
         fi
     done <<< "$lines"
+
+    return 0
 }
 
 # --- 30. SAME-SLOT GPU FUNCTION HELPER ---
@@ -1084,10 +1086,16 @@ function audit_system_resources() {
     TOTAL_CORES="$(nproc)"
 
     DEFAULT_RAM_GB=$(( TOTAL_RAM_GB * DEFAULT_RAM_PERCENT / 100 ))
-    [ "$DEFAULT_RAM_GB" -lt 1 ] && DEFAULT_RAM_GB=1
+    if [ "$DEFAULT_RAM_GB" -lt 1 ]; then
+        DEFAULT_RAM_GB=1
+    fi
 
     DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
-    [ "$DEFAULT_CORES" -lt 1 ] && DEFAULT_CORES=1
+    if [ "$DEFAULT_CORES" -lt 1 ]; then
+        DEFAULT_CORES=1
+    fi
+
+    return 0
 }
 
 # --- 43. SAFE SYSFS GPU AUDIT ---
@@ -1101,6 +1109,8 @@ function audit_gpu_hardware() {
     else
         GPU_DETECTION_STATUS="skipped"
     fi
+
+    return 0
 }
 
 # --- 44. SYSTEM AUDIT DISPLAY ---
@@ -1127,6 +1137,8 @@ function show_system_audit() {
     print_gpu_group "Integrated" "$IGPU_LINES" "host/laptop display"
     echo ""
     print_gpu_group "Discrete" "$DGPU_LINES" "VM passthrough candidate"
+
+    return 0
 }
 
 # --- 45. START CONFIRMATION ---
