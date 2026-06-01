@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.3.5"
+SCRIPT_VERSION="v1.3.6"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="pve923-display-spacing-percent-polish"
+SCRIPT_BUILD="pve923-final-iso-next-step-reminder"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -2106,7 +2106,41 @@ EOF
     msg_ok "COMPLETION MARKER WRITTEN"
 }
 
-# --- 56. FINAL SUMMARY ---
+# --- 56. ISO NEXT STEP REMINDER ---
+# Shows a non-blocking reminder before Script 3 / 3.5 so the Ubuntu Server ISO is ready.
+function show_iso_next_step_reminder() {
+    local proxmox_node="<proxmox-node>"
+    local proxmox_ip=""
+
+    proxmox_node="$(hostname -s 2>/dev/null || true)"
+    [ -n "$proxmox_node" ] || proxmox_node="<proxmox-node>"
+
+    if command -v ip >/dev/null 2>&1; then
+        proxmox_ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+    fi
+
+    if [ -z "$proxmox_ip" ]; then
+        proxmox_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    fi
+
+    [ -n "$proxmox_ip" ] || proxmox_ip="<proxmox-ip>"
+
+    section "NEXT STEP BEFORE SCRIPT 3 / 3.5"
+
+    echo -e "${CLF}${YW}⚠ Make sure the Ubuntu Server ISO is available on the Proxmox host.${CL}"
+    echo ""
+    echo -e "${BL}Option A - upload in Proxmox Web UI:${CL}"
+    echo -e "  node ${GN}${proxmox_node}${CL} / local / ISO Images / Upload"
+    echo ""
+    echo -e "${BL}Option B - copy from your laptop:${CL}"
+    echo -e "  ${GN}scp /path/to/ubuntu-live-server.iso root@${proxmox_ip}:/var/lib/vz/template/iso/${CL}"
+    echo ""
+    echo -e "${BL}Expected Proxmox ISO directory:${CL}"
+    echo -e "  ${GN}/var/lib/vz/template/iso/${CL}"
+    echo ""
+}
+
+# --- 57. FINAL SUMMARY ---
 # Shows final storage details.
 function show_final_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
@@ -2124,10 +2158,12 @@ function show_final_summary() {
     echo ""
     echo -e "${YW}New Proxmox LVM-thin storage is ready for VM disks, containers and backups according to selected content types.${CL}"
     echo ""
+
+    show_iso_next_step_reminder
 }
 
 
-# --- 57. MAIN FUNCTION ---
+# --- 58. MAIN FUNCTION ---
 # Runs validation -> safe disk selection -> configuration -> destructive apply -> verification.
 function main() {
     init_script
