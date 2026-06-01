@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.4"
+SCRIPT_VERSION="v1.2.5"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="vm-setup-ui-polish"
+SCRIPT_BUILD="safe-gpu-display-name-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -686,7 +686,7 @@ function detect_system_type() {
 }
 
 # --- 26. PCI VENDOR NAME HELPER ---
-# Converts PCI vendor IDs to readable GPU vendor names without calling lspci.
+# Converts PCI vendor IDs to readable GPU vendor names without calling external PCI listing tools.
 function pci_vendor_name() {
     local vendor="$1"
 
@@ -700,7 +700,7 @@ function pci_vendor_name() {
 }
 
 # --- 27. GPU TYPE CLASSIFIER ---
-# Classifies GPUs using sysfs vendor/class/boot_vga instead of fragile lspci text matching.
+# Classifies GPUs using sysfs vendor/class/boot_vga instead of fragile external PCI listing text matching.
 # This avoids treating AMD APUs as safe dGPU passthrough targets on laptop-style systems.
 function classify_gpu_type() {
     local vendor="$1"
@@ -739,8 +739,8 @@ function classify_gpu_type() {
 }
 
 # --- 28. SYSFS GPU DETECTION HELPER ---
-# Detects GPUs through /sys/bus/pci/devices instead of lspci.
-# This avoids lspci hangs on some fresh Proxmox/laptop PCI states.
+# Detects GPUs through /sys/bus/pci/devices instead of external PCI listing commands.
+# This avoids PCI listing hangs on some fresh Proxmox/laptop PCI states.
 function detect_gpus_sysfs() {
     local dev=""
     local bdf=""
@@ -844,7 +844,8 @@ function print_gpu_group() {
     local use_label="$3"
     local count="0"
     local line=""
-    local detail=""
+    local bdf=""
+    local display_name=""
     local boot_vga=""
     local idx="1"
 
@@ -864,17 +865,18 @@ function print_gpu_group() {
     while read -r line; do
         [ -z "$line" ] && continue
 
-        detail="${line% boot_vga=*}"
+        bdf="$(awk '{print $1; exit}' <<< "$line")"
+        display_name="$(gpu_display_name_for_bdf "$bdf")"
         boot_vga="${line##* boot_vga=}"
-        [ "$detail" != "$line" ] || boot_vga="unknown"
+        [ "$boot_vga" != "$line" ] || boot_vga="unknown"
 
         if [ "$count" -gt 1 ]; then
-            echo -e "    ${idx}) ${GN}${detail}${CL}"
+            echo -e "    ${idx}) ${GN}${display_name}${CL}"
             echo -e "       ${BL}boot_vga:${CL} ${GN}${boot_vga}${CL}"
             echo -e "       ${BL}use:${CL} ${GN}${use_label}${CL}"
             idx=$((idx + 1))
         else
-            echo -e "    ${GN}${detail}${CL}"
+            echo -e "    ${GN}${display_name}${CL}"
             echo -e "    ${BL}boot_vga:${CL} ${GN}${boot_vga}${CL}"
             echo -e "    ${BL}use:${CL} ${GN}${use_label}${CL}"
         fi
@@ -885,6 +887,7 @@ function print_gpu_group() {
 
 # --- 29B. GPU DISPLAY NAME HELPERS ---
 # These helpers are display-only. Sysfs remains the source of truth for GPU detection and passthrough decisions.
+# They intentionally do not call external PCI listing commands because some laptop PCI states can hang.
 function gpu_line_for_bdf() {
     local bdf="$1"
     local line=""
@@ -900,55 +903,174 @@ function gpu_line_for_bdf() {
     return 0
 }
 
-function gpu_fallback_display_name_from_line() {
-    local line="$1"
-    local detail=""
+function normalize_pci_hex_id() {
+    local value="$1"
 
-    detail="${line% boot_vga=*}"
-    detail="${detail#* }"
+    value="${value#0x}"
+    value="${value#0X}"
+    value="$(tr '[:upper:]' '[:lower:]' <<< "$value")"
 
-    if [ -n "$detail" ]; then
-        echo "$detail"
+    echo "$value"
+}
+
+function gpu_vendor_label_from_id() {
+    local vendor_id="$1"
+
+    case "$vendor_id" in
+        10de) echo "NVIDIA" ;;
+        1002|1022) echo "AMD" ;;
+        8086) echo "Intel" ;;
+        *) echo "GPU" ;;
+    esac
+}
+
+function gpu_sysfs_vendor_device_for_bdf() {
+    local bdf="$1"
+    local dev_path="/sys/bus/pci/devices/${bdf}"
+    local vendor=""
+    local device=""
+    local line=""
+
+    if [ -r "${dev_path}/vendor" ] && [ -r "${dev_path}/device" ]; then
+        vendor="$(cat "${dev_path}/vendor" 2>/dev/null || true)"
+        device="$(cat "${dev_path}/device" 2>/dev/null || true)"
+    fi
+
+    if [ -z "$vendor" ] || [ -z "$device" ]; then
+        line="$(gpu_line_for_bdf "$bdf")"
+        if [[ "$line" =~ \[([0-9A-Fa-f]{4}):([0-9A-Fa-f]{4})\] ]]; then
+            vendor="${BASH_REMATCH[1]}"
+            device="${BASH_REMATCH[2]}"
+        fi
+    fi
+
+    vendor="$(normalize_pci_hex_id "$vendor")"
+    device="$(normalize_pci_hex_id "$device")"
+
+    if [[ "$vendor" =~ ^[0-9a-f]{4}$ ]] && [[ "$device" =~ ^[0-9a-f]{4}$ ]]; then
+        echo "$vendor $device"
+    fi
+}
+
+function first_readable_pci_ids_file() {
+    local candidate=""
+
+    for candidate in \
+        /usr/share/misc/pci.ids \
+        /usr/share/hwdata/pci.ids \
+        /usr/share/doc/pci.ids \
+        /usr/share/misc/pci.ids.gz \
+        /usr/share/hwdata/pci.ids.gz; do
+        if [ -r "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 0
+}
+
+function read_pci_ids_file() {
+    local pci_ids_file="$1"
+
+    case "$pci_ids_file" in
+        *.gz)
+            if command -v gzip >/dev/null 2>&1; then
+                gzip -cd "$pci_ids_file" 2>/dev/null || true
+            elif command -v zcat >/dev/null 2>&1; then
+                zcat "$pci_ids_file" 2>/dev/null || true
+            fi
+            ;;
+        *)
+            cat "$pci_ids_file" 2>/dev/null || true
+            ;;
+    esac
+}
+
+function lookup_pci_ids_device_name() {
+    local vendor_id="$1"
+    local device_id="$2"
+    local pci_ids_file=""
+
+    pci_ids_file="$(first_readable_pci_ids_file)"
+    [ -n "$pci_ids_file" ] || return 0
+
+    read_pci_ids_file "$pci_ids_file" | awk -v vendor="$vendor_id" -v device="$device_id" '
+        BEGIN { in_vendor=0 }
+        /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][[:space:]]/ {
+            in_vendor=(tolower($1)==vendor)
+            next
+        }
+        in_vendor && /^\t[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][[:space:]]/ {
+            current=tolower($1)
+            if (current==device) {
+                sub(/^\t[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][[:space:]]+/, "")
+                print
+                exit
+            }
+        }
+    ' || true
+}
+
+function build_gpu_display_name() {
+    local vendor_id="$1"
+    local device_id="$2"
+    local bdf="$3"
+    local vendor_label=""
+    local pci_name=""
+    local model=""
+    local chip=""
+    local display_model=""
+
+    vendor_label="$(gpu_vendor_label_from_id "$vendor_id")"
+    pci_name="$(lookup_pci_ids_device_name "$vendor_id" "$device_id")"
+
+    if [ -n "$pci_name" ]; then
+        if [[ "$pci_name" =~ \[([^]]+)\] ]]; then
+            model="${BASH_REMATCH[1]}"
+            chip="${pci_name%%\[*}"
+            chip="$(xargs <<< "$chip")"
+        else
+            model="$(xargs <<< "$pci_name")"
+            chip=""
+        fi
+    fi
+
+    if [ -n "$model" ]; then
+        case "$model" in
+            NVIDIA*|AMD*|ATI*|Intel*) display_model="$model" ;;
+            *) display_model="${vendor_label} ${model}" ;;
+        esac
+
+        if [ -n "$chip" ]; then
+            echo "${display_model} [${chip}] [${vendor_id}:${device_id}] [${bdf}]"
+        else
+            echo "${display_model} [${vendor_id}:${device_id}] [${bdf}]"
+        fi
+        return 0
+    fi
+
+    if [ "$vendor_label" != "GPU" ]; then
+        echo "${vendor_label} GPU [${vendor_id}:${device_id}] [${bdf}]"
     else
-        echo "GPU"
+        echo "GPU [${vendor_id}:${device_id}] [${bdf}]"
     fi
 }
 
 function gpu_display_name_for_bdf() {
     local bdf="$1"
-    local line=""
-    local fallback="GPU"
-    local lspci_line=""
-    local model=""
+    local vendor_device=""
+    local vendor_id=""
+    local device_id=""
 
-    line="$(gpu_line_for_bdf "$bdf")"
-    if [ -n "$line" ]; then
-        fallback="$(gpu_fallback_display_name_from_line "$line")"
+    vendor_device="$(gpu_sysfs_vendor_device_for_bdf "$bdf")"
+    if [ -n "$vendor_device" ]; then
+        read -r vendor_id device_id <<< "$vendor_device"
+        build_gpu_display_name "$vendor_id" "$device_id" "$bdf"
+        return 0
     fi
 
-    if command -v timeout >/dev/null 2>&1 && command -v lspci >/dev/null 2>&1; then
-        lspci_line="$(timeout 2s lspci -s "$bdf" 2>/dev/null || true)"
-        if [ -n "$lspci_line" ]; then
-            model="${lspci_line#*: }"
-            model="${model% (rev*}"
-
-            if [[ "$model" =~ \[([^]]+)\] ]]; then
-                case "$fallback" in
-                    NVIDIA*) echo "NVIDIA ${BASH_REMATCH[1]}"; return 0 ;;
-                    AMD*) echo "AMD ${BASH_REMATCH[1]}"; return 0 ;;
-                    Intel*) echo "Intel ${BASH_REMATCH[1]}"; return 0 ;;
-                    *) echo "${BASH_REMATCH[1]}"; return 0 ;;
-                esac
-            fi
-
-            if [ -n "$model" ] && [ "$model" != "$lspci_line" ]; then
-                echo "$model"
-                return 0
-            fi
-        fi
-    fi
-
-    echo "$fallback"
+    echo "GPU [${bdf}]"
 }
 
 # --- 30. SAME-SLOT GPU FUNCTION HELPER ---
@@ -1179,7 +1301,7 @@ function audit_system_resources() {
 }
 
 # --- 43. SAFE SYSFS GPU AUDIT ---
-# Detects GPU through sysfs only, avoiding lspci because lspci can hang on some fresh Proxmox/laptop systems.
+# Detects GPU through sysfs only, avoiding external PCI listing commands on fresh Proxmox/laptop systems.
 function audit_gpu_hardware() {
     detect_gpus_sysfs
     GPU_SUMMARY="$(build_gpu_summary)"
@@ -1480,6 +1602,8 @@ function select_vm_storage() {
         print_storage_option_card "$((i+1))" "$storage_name" "$storage_type" "$snapshot_support" "$recommended_use" "$role"
     done
 
+    echo ""
+
     if [ "$default_index" == "1" ]; then
         storage_type="$(get_storage_type "${STORAGE_LIST[0]}")"
         if [ "$(storage_supports_snapshots "$storage_type")" != "yes" ]; then
@@ -1533,7 +1657,6 @@ function collect_gpu_passthrough_option() {
 
         echo -e "${BL}Discrete GPU:${CL}"
         echo -e "  ${BL}name:${CL} ${GN}${gpu_display_name}${CL}"
-        echo -e "  ${BL}PCI device:${CL} ${GN}${gpu_pci_id}${CL}"
         echo -e "  ${BL}passthrough role:${CL} ${YW}optional / not required initially${CL}"
         echo ""
         echo -e "${BL}Related same-card functions:${CL}"
