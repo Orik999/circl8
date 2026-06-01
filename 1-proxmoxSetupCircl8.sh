@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.4"
+SCRIPT_VERSION="v1.3.5"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-crowdsec-preflight-input-fix"
+SCRIPT_BUILD="script1-preflight-ui-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -262,9 +262,9 @@ function run_optional() {
 # --- 12. YES/NO LABEL HELPER ---
 # Converts raw Y/N input into clean visible yes/no wording.
 function yes_no_label() {
-    local value="$1"
+    local value="${1:-}"
 
-    if [[ "$value" =~ ^[Yy]$ ]]; then
+    if [[ "$value" =~ ^([Yy]|yes|YES|true|TRUE|1)$ ]]; then
         echo "yes"
     else
         echo "no"
@@ -1489,11 +1489,14 @@ function collect_user_options() {
             CROWDSEC_CONSOLE_ENROLLMENT="requested"
             engine_name="$(read_text_from_tty "CrowdSec Console engine name" "$CROWDSEC_CONSOLE_ENGINE_NAME")"
             CROWDSEC_CONSOLE_ENGINE_NAME="${engine_name:-$CROWDSEC_CONSOLE_ENGINE_NAME}"
+            msg_ok "CrowdSec Console engine name set: ${CROWDSEC_CONSOLE_ENGINE_NAME}"
             CROWDSEC_CONSOLE_ENROLLMENT_KEY="$(read_secret_from_tty "Paste CrowdSec Console enrollment key")"
             if [ -z "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" ]; then
                 CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
                 CROWDSEC_CONSOLE_ENROLLMENT="error"
                 msg_warn "CrowdSec Console enrollment key was empty; enrollment will be skipped"
+            else
+                msg_ok "CrowdSec Console enrollment key captured"
             fi
         else
             CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
@@ -1502,7 +1505,7 @@ function collect_user_options() {
     fi
 
     echo ""
-    echo -e "${BL}SSH:${CL}"
+    echo -e "${BL}SSH KEY CHECK${CL}"
     detect_root_ssh_key_state
     print_root_ssh_key_report
     if [ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ]; then
@@ -1517,13 +1520,16 @@ function collect_user_options() {
     else
         SSH_KEY_ONLY_HARDENING_REQUESTED="no"
         SSH_HARDENING_APPLIED="audit-only"
-        msg_warn "Root SSH keys not detected; SSH hardening will remain audit-only"
+        msg_warn "SSH key-only hardening skipped to avoid lockout"
     fi
 
     echo ""
-    echo -e "${YW}Public 80/443 on the Proxmox host is usually not required when Traefik runs inside your Ubuntu VM.${CL}"
-    echo -e "${YW}For your current architecture, router port-forwarding should normally point to the VM, not the Proxmox host.${CL}"
-    public_web_yn="$(timed_yes_no "Allow public HTTP/HTTPS 80/443 on Proxmox host firewall?" "n")"
+    echo -e "${BL}PROXMOX HOST WEB PORTS${CL}"
+    echo ""
+    echo -e "${YW}Traefik normally handles public HTTP/HTTPS from inside the Ubuntu VM.${CL}"
+    echo -e "${YW}For this setup, router port-forwarding should usually point to the VM, not the Proxmox host.${CL}"
+    echo ""
+    public_web_yn="$(timed_yes_no "Expose public HTTP/HTTPS 80/443 on Proxmox host firewall:" "n")"
 
     if [[ "$public_web_yn" =~ ^[Yy] ]]; then
         ALLOW_PUBLIC_WEB="y"
@@ -1582,9 +1588,9 @@ function final_start_prompt() {
     echo ""
     echo -e "DEFAULT IFACE: ${GN}${DEFAULT_IFACE:-unknown}${CL}"
     echo -e "LAN CIDR ALLOWED FOR SSH/WEBUI: ${GN}${LAN_CIDR:-not-detected}${CL}"
-    echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_PASSTHROUGH}${CL}"
-    echo -e "CPU PERFORMANCE: ${GN}${ENABLE_PERFORMANCE}${CL}"
-    echo -e "PUBLIC HOST 80/443: ${GN}${ALLOW_PUBLIC_WEB}${CL}"
+    echo -e "GPU PASSTHROUGH: ${GN}$(yes_no_label "$ENABLE_PASSTHROUGH")${CL}"
+    echo -e "CPU PERFORMANCE: ${GN}$(yes_no_label "$ENABLE_PERFORMANCE")${CL}"
+    echo -e "PUBLIC HOST 80/443: ${GN}$(yes_no_label "$ALLOW_PUBLIC_WEB")${CL}"
     echo ""
     echo -e "${BL}SSH:${CL}"
     echo -e "  root keys detected: ${GN}$([ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ] && echo yes || echo no), ${SSH_ROOT_KEY_COUNT:-0} key line(s)${CL}"
@@ -1593,7 +1599,7 @@ function final_start_prompt() {
     echo -e "${BL}CrowdSec:${CL}"
     echo -e "  install: ${GN}$(yes_no_label "$ENABLE_CROWDSEC")${CL}"
     echo -e "  firewall bouncer: ${GN}$(yes_no_label "$ENABLE_CROWDSEC")${CL}"
-    echo -e "  console enrollment: ${GN}${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}${CL}"
+    echo -e "  console enrollment: ${GN}$(yes_no_label "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}")${CL}"
     echo -e "  console engine name: ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME:-proxmox-${HOSTNAME_SHORT}}${CL}"
     echo ""
 
@@ -2032,23 +2038,19 @@ function detect_root_ssh_key_state() {
 }
 
 function print_root_ssh_key_report() {
-    local primary_key_file="/root/.ssh/authorized_keys"
-    local primary_key_count="0"
-
-    echo ""
-    echo -e "${BL}Root SSH key check:${CL}"
-
-    primary_key_count="$(count_authorized_key_lines "$primary_key_file")"
-    if [ "$primary_key_count" -gt 0 ]; then
-        describe_authorized_keys_file "$primary_key_file" "$primary_key_count"
-    elif [ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ] && [ "${SSH_ROOT_KEY_FILE:-not-detected}" != "not-detected" ]; then
-        describe_authorized_keys_file "$SSH_ROOT_KEY_FILE" "$SSH_ROOT_KEY_COUNT"
+    if [ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ]; then
+        msg_ok "Root SSH keys detected: ${SSH_ROOT_KEY_COUNT} key line(s)"
+        if [ "${SSH_ROOT_KEY_FILE:-not-detected}" != "not-detected" ] && [ "${SSH_ROOT_KEY_TARGET:-not-detected}" != "not-detected" ]; then
+            if [ "$SSH_ROOT_KEY_FILE" != "$SSH_ROOT_KEY_TARGET" ]; then
+                echo -e "  ${BL}${SSH_ROOT_KEY_FILE}${CL} -> ${GN}${SSH_ROOT_KEY_TARGET}${CL}"
+            else
+                echo -e "  ${BL}${SSH_ROOT_KEY_FILE}${CL}"
+            fi
+            echo -e "  ${BL}target:${CL} ${GN}${SSH_ROOT_KEY_OWNER:-unknown}, mode ${SSH_ROOT_KEY_MODE:-unknown}${CL}"
+        fi
     else
-        echo -e "  ${YW}${primary_key_file}: missing/empty${CL}"
-        echo -e "  ${YW}/root/.ssh/authorized_keys2: missing/empty${CL}"
+        msg_warn "No root SSH authorized keys detected"
     fi
-
-    echo -e "  ${BL}key lines detected:${CL} ${GN}${SSH_ROOT_KEY_COUNT:-0}${CL}"
 }
 
 function reload_ssh_service() {
@@ -2365,6 +2367,7 @@ function read_text_from_tty() {
     if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf '%b' "${YW}${prompt} [default: ${default}]: ${CL}" > /dev/tty
         IFS= read -r value < /dev/tty || true
+        printf '\r\033[K' > /dev/tty
     else
         IFS= read -r -p "${prompt} [default: ${default}]: " value || true
     fi
@@ -2379,7 +2382,7 @@ function read_secret_from_tty() {
     if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf '%b' "${YW}${prompt}: ${CL}" > /dev/tty
         IFS= read -r -s value < /dev/tty || true
-        printf '\n' > /dev/tty
+        printf '\r\033[K' > /dev/tty
     else
         IFS= read -r -s -p "${prompt}: " value || true
         printf '\n' >&2
