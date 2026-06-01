@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.8"
+SCRIPT_VERSION="v1.2.9"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="ui-color-role-polish"
+SCRIPT_BUILD="final-ui-spacing-nesting-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -1404,8 +1404,9 @@ function start_confirmation() {
     local start_yn=""
 
     echo ""
-    echo -e "${BL}Start confirmation:${CL}"
-    start_yn="$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")"
+    echo -e "${YW}Start confirmation:${CL}"
+    start_yn="$(timed_yes_no "  Start the Proxmox VM Setup Script?" "y")"
+    echo ""
 
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
@@ -1592,7 +1593,7 @@ function select_vm_storage() {
 
     msg_ok "STORAGE FOUND"
     echo ""
-    echo -e "${YW}SELECT VM STORAGE:${CL}"
+    echo -e "${YW}Available VM storage:${CL}"
 
     for i in "${!STORAGE_LIST[@]}"; do
         storage_name="${STORAGE_LIST[$i]}"
@@ -1635,8 +1636,8 @@ function select_vm_storage() {
     fi
 
     EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
-    detail_line "Selected storage" "${STORAGE_ID} (${STORAGE_TYPE})"
-    detail_line "Snapshot capable" "$selected_snapshot_support"
+    echo -e "  ${BL}selected storage:${CL} ${GN}${STORAGE_ID} (${STORAGE_TYPE})${CL}"
+    echo -e "  ${BL}snapshot capable:${CL} ${GN}${selected_snapshot_support}${CL}"
     return 0
 }
 
@@ -1666,7 +1667,7 @@ function collect_gpu_passthrough_option() {
         echo ""
 
         if [ "$gpu_function_count" -le 1 ]; then
-            echo -e "${BL}Passthrough device:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
+            echo -e "  ${BL}passthrough device:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
         else
             echo -e "${BL}Related same-card functions:${CL}"
             for gpu_func in $GPU_SAME_SLOT_BDFS; do
@@ -1786,7 +1787,7 @@ function collect_mac_configuration() {
         CUSTOM_MAC_SELECTED="no"
     fi
 
-    echo -e "${GN}VM MAC ADDRESS:${CL} ${VM_MAC_ADDRESS}"
+    echo -e "${BL}VM MAC ADDRESS:${CL} ${GN}${VM_MAC_ADDRESS}${CL}"
     echo -e "${YW}Use this MAC in your router DHCP reservation if you want the VM to always receive the same IP.${CL}"
 }
 
