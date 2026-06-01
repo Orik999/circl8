@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.0"
-SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="audit-untimed-inputs-snapshot-aware-storage"
+SCRIPT_VERSION="v1.2.1"
+SCRIPT_UPDATED="2026-05-30"
+SCRIPT_BUILD="system-audit-display-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -818,6 +818,57 @@ function build_gpu_summary() {
     echo "${out%; }"
 }
 
+# --- 29A. GPU AUDIT DISPLAY HELPERS ---
+# Renders already-detected GPU lines in a readable grouped layout.
+function gpu_line_count() {
+    local lines="$1"
+
+    printf '%s\n' "$lines" | awk 'NF {count++} END {print count+0}'
+}
+
+function print_gpu_group() {
+    local title="$1"
+    local lines="$2"
+    local use_label="$3"
+    local count="0"
+    local line=""
+    local detail=""
+    local boot_vga=""
+    local idx="1"
+
+    count="$(gpu_line_count "$lines")"
+
+    if [ "$count" -eq 0 ]; then
+        echo -e "  ${BL}${title}:${CL} ${YW}not detected${CL}"
+        return 0
+    fi
+
+    if [ "$count" -gt 1 ]; then
+        echo -e "  ${BL}${title} GPUs:${CL}"
+    else
+        echo -e "  ${BL}${title}:${CL}"
+    fi
+
+    while read -r line; do
+        [ -z "$line" ] && continue
+
+        detail="${line% boot_vga=*}"
+        boot_vga="${line##* boot_vga=}"
+        [ "$detail" != "$line" ] || boot_vga="unknown"
+
+        if [ "$count" -gt 1 ]; then
+            echo -e "    ${idx}) ${GN}${detail}${CL}"
+            echo -e "       ${BL}boot_vga:${CL} ${GN}${boot_vga}${CL}"
+            echo -e "       ${BL}use:${CL} ${GN}${use_label}${CL}"
+            idx=$((idx + 1))
+        else
+            echo -e "    ${GN}${detail}${CL}"
+            echo -e "    ${BL}boot_vga:${CL} ${GN}${boot_vga}${CL}"
+            echo -e "    ${BL}use:${CL} ${GN}${use_label}${CL}"
+        fi
+    done <<< "$lines"
+}
+
 # --- 30. SAME-SLOT GPU FUNCTION HELPER ---
 # Returns every PCI function in the same slot as the selected GPU.
 # Example: 0000:01:00.0 -> 0000:01:00.0 0000:01:00.1 ...
@@ -1027,10 +1078,6 @@ function init_script() {
 # --- 42. SYSTEM RESOURCE AUDIT ---
 # Detects RAM, CPU cores and calculates adaptive default VM resources.
 function audit_system_resources() {
-    section "SYSTEM RESOURCE AUDIT"
-
-    msg_info "Auditing system resources"
-
     detect_system_type
 
     TOTAL_RAM_GB="$(detect_total_ram_gb)"
@@ -1041,42 +1088,45 @@ function audit_system_resources() {
 
     DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
     [ "$DEFAULT_CORES" -lt 1 ] && DEFAULT_CORES=1
-
-    msg_ok "SYSTEM RESOURCES DETECTED"
 }
 
 # --- 43. SAFE SYSFS GPU AUDIT ---
 # Detects GPU through sysfs only, avoiding lspci because lspci can hang on some fresh Proxmox/laptop systems.
 function audit_gpu_hardware() {
-    section "GPU AUDIT"
-
-    msg_info "Detecting GPU hardware"
-
     detect_gpus_sysfs
     GPU_SUMMARY="$(build_gpu_summary)"
 
     if [ -n "$GPU_ALL" ]; then
-        msg_ok "GPU DETECTION COMPLETE"
+        GPU_DETECTION_STATUS="ok"
     else
         GPU_DETECTION_STATUS="skipped"
-        msg_ok "GPU DETECTION SKIPPED"
     fi
 }
 
 # --- 44. SYSTEM AUDIT DISPLAY ---
-# Shows available host resources and adaptive defaults before asking user inputs.
+# Shows available host resources, adaptive defaults and readable GPU grouping before asking user inputs.
 function show_system_audit() {
     section "SYSTEM AUDIT"
 
-    echo -e " ${BL}━━━━━▶${CL} SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} HOST RESOURCES: ${GN}${TOTAL_CORES} CPU cores / ${TOTAL_RAM_GB}GB RAM${CL}"
-    echo -e " ${BL}━━━━━▶${CL} DEFAULT VM: ${GN}${DEFAULT_CORES} CPU cores / ${DEFAULT_RAM_GB}GB RAM${CL}"
+    msg_ok "SYSTEM RESOURCES DETECTED"
 
-    if [ -n "$GPU_SUMMARY" ]; then
-        echo -e " ${BL}━━━━━▶${CL} GPU: ${GN}${GPU_SUMMARY}${CL}"
+    if [ "$GPU_DETECTION_STATUS" == "skipped" ]; then
+        msg_ok "GPU DETECTION SKIPPED"
     else
-        echo -e " ${BL}━━━━━▶${CL} GPU: ${YW}No passthrough target detected or GPU detection skipped${CL}"
+        msg_ok "GPU DETECTION COMPLETE"
     fi
+
+    echo ""
+    echo -e "${BL}System:${CL}"
+    echo -e "  ${BL}type:${CL} ${GN}${SYSTEM_TYPE}${CL}"
+    echo -e "  ${BL}host resources:${CL} ${GN}${TOTAL_CORES} CPU cores / ${TOTAL_RAM_GB}GB RAM${CL}"
+    echo -e "  ${BL}default VM:${CL} ${GN}${DEFAULT_CORES} CPU cores / ${DEFAULT_RAM_GB}GB RAM${CL}"
+
+    echo ""
+    echo -e "${BL}GPU:${CL}"
+    print_gpu_group "Integrated" "$IGPU_LINES" "host/laptop display"
+    echo ""
+    print_gpu_group "Discrete" "$DGPU_LINES" "VM passthrough candidate"
 }
 
 # --- 45. START CONFIRMATION ---
