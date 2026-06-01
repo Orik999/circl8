@@ -1674,7 +1674,6 @@ function start_confirmation() {
     echo ""
     echo -e "${YW}Start confirmation:${CL}"
     start_yn="$(timed_yes_no "Start the Proxmox VM Setup Script?" "y" "  ")"
-    echo ""
 
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
