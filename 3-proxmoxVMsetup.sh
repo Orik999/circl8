@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.5"
+SCRIPT_VERSION="v1.2.6"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="safe-gpu-display-name-polish"
+SCRIPT_BUILD="gpu-related-functions-display-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -1646,6 +1646,7 @@ function collect_gpu_passthrough_option() {
     local gpu_pci_id=""
     local gpu_display_name=""
     local gpu_func=""
+    local gpu_function_count="0"
 
     section "GPU OPTION"
 
@@ -1655,15 +1656,22 @@ function collect_gpu_passthrough_option() {
         GPU_SAME_SLOT_BDFS="$(get_same_slot_functions_for_bdf "$gpu_pci_id")"
         [ -z "$GPU_SAME_SLOT_BDFS" ] && GPU_SAME_SLOT_BDFS="$gpu_pci_id"
 
+        gpu_function_count="$(wc -w <<< "$GPU_SAME_SLOT_BDFS" | xargs)"
+
         echo -e "${BL}Discrete GPU:${CL}"
         echo -e "  ${BL}name:${CL} ${GN}${gpu_display_name}${CL}"
         echo -e "  ${BL}passthrough role:${CL} ${YW}optional / not required initially${CL}"
         echo ""
-        echo -e "${BL}Related same-card functions:${CL}"
-        for gpu_func in $GPU_SAME_SLOT_BDFS; do
-            echo -e "  - ${GN}${gpu_func}${CL}"
-        done
-        echo -e "${YW}These PCI functions belong to the same physical GPU/card and may need to be passed together if passthrough is enabled.${CL}"
+
+        if [ "$gpu_function_count" -le 1 ]; then
+            echo -e "${BL}Passthrough device:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
+        else
+            echo -e "${BL}Related same-card functions:${CL}"
+            for gpu_func in $GPU_SAME_SLOT_BDFS; do
+                echo -e "  - ${GN}${gpu_func}${CL}"
+            done
+            echo -e "${YW}Note: these functions belong to the same physical GPU/card and may need to be passed together.${CL}"
+        fi
         echo ""
 
         gpu_yn="$(timed_yes_no "Add DISCRETE GPU to VM?" "n")"
@@ -1788,6 +1796,7 @@ function final_apply_confirmation() {
     local gpu_pci_id=""
     local gpu_display_name="not selected"
     local gpu_func=""
+    local gpu_function_count="0"
 
     section "READY TO CREATE VM"
 
@@ -1813,10 +1822,15 @@ function final_apply_confirmation() {
     echo -e "  ${BL}GPU:${CL} ${GN}${gpu_display_name}${CL}"
     echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${GN}$(yes_no_label "$ENABLE_GPU")${CL}"
     if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_SAME_SLOT_BDFS" ]; then
-        echo -e "  ${BL}GPU DEVICES:${CL}"
-        for gpu_func in $GPU_SAME_SLOT_BDFS; do
-            echo -e "    - ${GN}${gpu_func}${CL}"
-        done
+        gpu_function_count="$(wc -w <<< "$GPU_SAME_SLOT_BDFS" | xargs)"
+        if [ "$gpu_function_count" -le 1 ]; then
+            echo -e "  ${BL}GPU DEVICE:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
+        else
+            echo -e "  ${BL}GPU DEVICES:${CL}"
+            for gpu_func in $GPU_SAME_SLOT_BDFS; do
+                echo -e "    - ${GN}${gpu_func}${CL}"
+            done
+        fi
     else
         echo -e "  ${BL}GPU DEVICES:${CL} ${GN}not attached${CL}"
     fi
