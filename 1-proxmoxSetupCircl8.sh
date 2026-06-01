@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.3"
+SCRIPT_VERSION="v1.3.4"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-preflight-crowdsec-ssh-hardening"
+SCRIPT_BUILD="script1-crowdsec-preflight-input-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -2362,11 +2362,11 @@ function read_text_from_tty() {
     local default="${2:-}"
     local value=""
 
-    if [ -r /dev/tty ]; then
-        tty_print "${YW}${prompt} [${default}]: ${CL}"
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        printf '%b' "${YW}${prompt} [default: ${default}]: ${CL}" > /dev/tty
         IFS= read -r value < /dev/tty || true
     else
-        IFS= read -r -p "${prompt} [${default}]: " value || true
+        IFS= read -r -p "${prompt} [default: ${default}]: " value || true
     fi
 
     printf '%s' "${value:-$default}"
@@ -2376,13 +2376,13 @@ function read_secret_from_tty() {
     local prompt="$1"
     local value=""
 
-    if [ -r /dev/tty ]; then
-        tty_print "${YW}${prompt}: ${CL}"
-        IFS= read -rs value < /dev/tty || true
-        tty_println ""
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        printf '%b' "${YW}${prompt}: ${CL}" > /dev/tty
+        IFS= read -r -s value < /dev/tty || true
+        printf '\n' > /dev/tty
     else
-        IFS= read -rs -p "${prompt}: " value || true
-        echo "" >&2
+        IFS= read -r -s -p "${prompt}: " value || true
+        printf '\n' >&2
     fi
 
     printf '%s' "$value"
