@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.3.3"
+SCRIPT_VERSION="v1.3.4"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="existing-vm-recreate-handling"
+SCRIPT_BUILD="cpu-details-marker-ui-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -45,6 +45,9 @@ DEFAULT_CPU_PERCENT="50"
 
 TOTAL_RAM_GB="0"
 TOTAL_CORES="0"
+CPU_MODEL_CLOCK="unknown"
+CPU_PHYSICAL_CORES="0"
+CPU_THREADS="0"
 DEFAULT_RAM_GB="1"
 DEFAULT_CORES="1"
 
@@ -627,22 +630,104 @@ function validate_proxmox() {
     fi
 }
 
-# --- 22. PREVIOUS RUN MARKER CHECK ---
-# Warns if a previous VM setup marker exists.
+# --- 22. COMPLETION MARKER VALUE HELPER ---
+# Reads one field from an existing marker safely and returns unknown when missing.
+function marker_value_or_unknown() {
+    local marker_file="$1"
+    local key="$2"
+    local value=""
+
+    value="$(awk -F': ' -v k="$key" '$0 ~ "^" k ":" {sub(/^[^:]+:[[:space:]]*/, ""); print; exit}' "$marker_file" 2>/dev/null || true)"
+    [ -n "$value" ] || value="unknown"
+
+    echo "$value"
+}
+
+# --- 22A. PREVIOUS MARKER SUMMARY DISPLAY ---
+# Displays previous run marker details using the unified Circl8 UI style.
+function show_previous_marker_summary() {
+    local marker_file="$1"
+    local completed_on=""
+    local marker_recreate=""
+    local marker_cpu_cores=""
+    local marker_cpu_threads=""
+    local marker_cpu_pair="unknown"
+
+    completed_on="$(marker_value_or_unknown "$marker_file" "Proxmox VM Setup completed on")"
+    marker_recreate="$(marker_value_or_unknown "$marker_file" "Recreate Existing VM")"
+    marker_cpu_cores="$(marker_value_or_unknown "$marker_file" "CPU Physical Cores")"
+    marker_cpu_threads="$(marker_value_or_unknown "$marker_file" "CPU Threads")"
+
+    if [ "$marker_cpu_cores" != "unknown" ] && [ "$marker_cpu_threads" != "unknown" ]; then
+        marker_cpu_pair="${marker_cpu_cores} / ${marker_cpu_threads}"
+    fi
+
+    echo -e "${YW}Marker:${CL}"
+    echo -e "  ${BL}path:${CL} ${GN}${marker_file}${CL}"
+    echo -e "  ${BL}completed on:${CL} ${GN}${completed_on}${CL}"
+    echo ""
+
+    echo -e "${YW}VM SUMMARY:${CL}"
+    echo -e "  ${BL}VM ID:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "VMID")${CL}"
+    echo -e "  ${BL}VM NAME:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Name")${CL}"
+    echo -e "  ${BL}RAM:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "RAM")${CL}"
+    echo -e "  ${BL}CPU CORES:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "CPU Cores")${CL}"
+    echo -e "  ${BL}OS DISK:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "OS Disk")${CL}"
+    echo -e "  ${BL}STORAGE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Storage")${CL}"
+    echo -e "  ${BL}STORAGE TYPE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Storage Type")${CL}"
+    echo -e "  ${BL}ISO:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "ISO")${CL}"
+    echo ""
+
+    echo -e "${YW}HOST RESOURCES:${CL}"
+    echo -e "  ${BL}CPU Model/Clock:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "CPU Model/Clock")${CL}"
+    echo -e "  ${BL}CPU Cores/Threads:${CL} ${GN}${marker_cpu_pair}${CL}"
+    echo -e "  ${BL}System RAM:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "System RAM")${CL}"
+    echo ""
+
+    echo -e "${YW}GPU SUMMARY:${CL}"
+    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "GPU Passthrough")${CL}"
+    echo -e "  ${BL}GPU DEVICES:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "GPU Functions Attached")${CL}"
+    echo ""
+
+    echo -e "${YW}NETWORK / DHCP:${CL}"
+    echo -e "  ${BL}VM MAC ADDRESS:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "VM MAC Address")${CL}"
+    echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Custom MAC Selected")${CL}"
+    echo ""
+
+    echo -e "${YW}PLATFORM SETTINGS:${CL}"
+    echo -e "  ${BL}MACHINE TYPE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Machine Type")${CL}"
+    echo -e "  ${BL}BIOS:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "BIOS")${CL}"
+    echo -e "  ${BL}EFI FORMAT MODE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "EFI Format Mode")${CL}"
+    echo -e "  ${BL}EFI FORMAT:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "EFI Format")${CL}"
+    echo -e "  ${BL}CPU TYPE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "CPU Type")${CL}"
+    echo -e "  ${BL}BALLOONING:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Ballooning Enabled")${CL}"
+    echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "QEMU Guest Agent")${CL}"
+    echo -e "  ${BL}DISCARD/TRIM:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Discard/TRIM")${CL}"
+    echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Advanced Settings Used")${CL}"
+
+    if [ "$marker_recreate" == "yes" ]; then
+        echo ""
+        echo -e "${YW}RECREATE:${CL}"
+        echo -e "  ${BL}Existing VM replaced:${CL} ${GN}yes${CL}"
+        echo -e "  ${BL}Recreated VM ID:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Recreated VMID")${CL}"
+        echo -e "  ${BL}Recreated VM name:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Recreated VM Name")${CL}"
+    fi
+}
+
+# --- 22B. PREVIOUS RUN MARKER CHECK ---
+# Warns if a previous VM setup marker exists using a styled marker summary.
 function check_previous_marker() {
     local continue_yn=""
 
     if [ -f "$COMPLETED_MARKER" ]; then
-        section "PREVIOUS VM SETUP MARKER DETECTED"
-
-        echo -e "${YW}A previous Proxmox VM Setup marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
-        echo ""
-        cat "$COMPLETED_MARKER" 2>/dev/null || true
+        section "PREVIOUS VM SETUP DETECTED"
+        show_previous_marker_summary "$COMPLETED_MARKER"
         echo ""
 
         continue_yn="$(timed_yes_no "Continue anyway?" "n")"
 
         if [[ "$continue_yn" =~ ^[Nn] ]]; then
+            echo -e "${YW}No changes made. Exiting.${CL}"
             exit 0
         fi
     fi
@@ -751,6 +836,52 @@ function detect_total_ram_gb() {
     fi
 
     echo $(( (mem_kb + gib_kb - 1) / gib_kb ))
+}
+
+# --- 24A. CPU MODEL CLEANUP HELPER ---
+# Conservatively cleans common Intel CPU branding while leaving AMD model text intact.
+function clean_cpu_model_clock() {
+    local model="$1"
+
+    model="${model//Intel(R)/Intel}"
+    model="${model//Core(TM)/Core}"
+    model="${model//Xeon(R)/Xeon}"
+    model="${model//Pentium(R)/Pentium}"
+    model="${model//Celeron(R)/Celeron}"
+    model="$(sed -E 's/[[:space:]]+CPU[[:space:]]+@/ @/; s/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//' <<< "$model")"
+
+    echo "$model"
+}
+
+# --- 24B. CPU MODEL / CLOCK DETECTION HELPER ---
+# Reads a local CPU model string without network access or package installs.
+function detect_cpu_model_clock() {
+    local model=""
+
+    model="$(awk -F: '/model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
+    [ -n "$model" ] || model="unknown"
+
+    clean_cpu_model_clock "$model"
+}
+
+# --- 24C. CPU PHYSICAL CORE DETECTION HELPER ---
+# Calculates physical cores from lscpu when available, otherwise falls back to thread count.
+function detect_cpu_physical_cores() {
+    local threads="$1"
+    local cores_per_socket=""
+    local sockets=""
+
+    if command -v lscpu >/dev/null 2>&1; then
+        cores_per_socket="$(lscpu 2>/dev/null | awk -F: '/^Core\(s\) per socket:/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' || true)"
+        sockets="$(lscpu 2>/dev/null | awk -F: '/^Socket\(s\):/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' || true)"
+
+        if [[ "$cores_per_socket" =~ ^[0-9]+$ ]] && [[ "$sockets" =~ ^[0-9]+$ ]] && [ "$cores_per_socket" -gt 0 ] && [ "$sockets" -gt 0 ]; then
+            echo $(( cores_per_socket * sockets ))
+            return 0
+        fi
+    fi
+
+    echo "$threads"
 }
 
 # --- 25. SYSTEM TYPE AUDIT HELPER ---
@@ -1413,7 +1544,11 @@ function audit_system_resources() {
     detect_system_type
 
     TOTAL_RAM_GB="$(detect_total_ram_gb)"
+    SYSTEM_RAM_GB="$TOTAL_RAM_GB"
     TOTAL_CORES="$(nproc)"
+    CPU_THREADS="$TOTAL_CORES"
+    CPU_PHYSICAL_CORES="$(detect_cpu_physical_cores "$CPU_THREADS")"
+    CPU_MODEL_CLOCK="$(detect_cpu_model_clock)"
 
     DEFAULT_RAM_GB=$(( TOTAL_RAM_GB * DEFAULT_RAM_PERCENT / 100 ))
     if [ "$DEFAULT_RAM_GB" -lt 1 ]; then
@@ -1476,7 +1611,9 @@ function show_system_audit() {
     echo ""
     echo -e "${YW}System resources:${CL}"
     echo -e "  ${BL}type:${CL} ${GN}${SYSTEM_TYPE}${CL}"
-    echo -e "  ${BL}host resources:${CL} ${GN}${TOTAL_CORES} CPU cores / ${TOTAL_RAM_GB}GB RAM${CL}"
+    echo -e "  ${BL}CPU Model/Clock:${CL} ${GN}${CPU_MODEL_CLOCK}${CL}"
+    echo -e "  ${BL}CPU Cores/Threads:${CL} ${GN}${CPU_PHYSICAL_CORES} / ${CPU_THREADS}${CL}"
+    echo -e "  ${BL}System RAM:${CL} ${GN}${TOTAL_RAM_GB}GB${CL}"
 
     echo ""
     echo -e "${YW}GPU:${CL}"
@@ -2235,6 +2372,10 @@ VMID: $VMID
 Name: $VM_NAME
 RAM: ${RAM_GB_INPUT}GB
 CPU Cores: ${CPU_INPUT}
+CPU Model/Clock: ${CPU_MODEL_CLOCK}
+CPU Physical Cores: ${CPU_PHYSICAL_CORES}
+CPU Threads: ${CPU_THREADS}
+System RAM: ${TOTAL_RAM_GB}GB
 OS Disk: ${DISK_GB_INPUT}GB
 Storage: ${STORAGE_ID}
 Storage Type: ${STORAGE_TYPE}
