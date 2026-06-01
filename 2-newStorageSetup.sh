@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.3.4"
+SCRIPT_VERSION="v1.3.5"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="pve923-warning-dedupe-display-polish"
+SCRIPT_BUILD="pve923-display-spacing-percent-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -405,11 +405,12 @@ function editable_input_loop() {
     local min_value="${4:-1}"
     local max_value="${5:-}"
     local initial_value="${6:-}"
+    local display_default="${7:-$default}"
     local answer="$initial_value"
     local key=""
 
     while true; do
-        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"
+        tty_print "${BFR}${YW}${prompt} [default: ${display_default}]: ${CL}${answer}"
 
         if [ -r /dev/tty ]; then
             IFS= read -rsn1 key < /dev/tty || true
@@ -500,6 +501,30 @@ function timed_number_input() {
         if validate_number "$answer" "$min_value" "$max_value"; then
             tty_print "${BFR}"
             tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+            echo "$answer"
+            return 0
+        fi
+
+        tty_print "${BFR}"
+        print_number_error "$min_value" "$max_value"
+    done
+}
+
+function timed_percent_input() {
+    local prompt="$1"
+    local default="$2"
+    local min_value="${3:-1}"
+    local max_value="${4:-}"
+    local answer=""
+
+    # Display-only percent wrapper; returned value remains a plain number.
+    while true; do
+        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "" "${default}%")"
+        [ -z "$answer" ] && answer="$default"
+
+        if validate_number "$answer" "$min_value" "$max_value"; then
+            tty_print "${BFR}"
+            tty_println "${CM} ${GN}${prompt} ${answer}%${CL}"
             echo "$answer"
             return 0
         fi
@@ -1251,7 +1276,10 @@ function show_disk_lists() {
         bus_label="${tran:-unknown}"
         bus_label="${bus_label^^}"
 
-        echo ""
+        if [ "$i" -gt 0 ]; then
+            echo ""
+        fi
+
         if [ "$entry_type" == "destructive-reuse" ]; then
             echo -e "  ${YW}$((i+1))) /dev/${name}${CL}"
         else
@@ -1274,9 +1302,12 @@ function show_disk_lists() {
         echo ""
         echo -e "${RD}BLOCKED DISKS:${CL}"
 
-        for line in "${BLOCKED_DISKS[@]}"; do
+        for i in "${!BLOCKED_DISKS[@]}"; do
+            line="${BLOCKED_DISKS[$i]}"
             IFS='|' read -r name size tran rota model reason <<< "$line"
-            echo ""
+            if [ "$i" -gt 0 ]; then
+                echo ""
+            fi
             echo -e "  ${YW}/dev/${name}${CL}"
             echo -e "     ${BL}SIZE:${CL} ${GN}${size}${CL}"
             echo -e "     ${BL}MODEL:${CL} ${GN}${model:-unknown}${CL}"
@@ -1553,7 +1584,7 @@ function collect_thinpool_allocation() {
         THIN_PERCENT="90"
     fi
 
-    THIN_PERCENT="$(timed_number_input "Enter thinpool allocation percent" "$THIN_PERCENT" "50" "98")"
+    THIN_PERCENT="$(timed_percent_input "Enter thinpool allocation percent" "$THIN_PERCENT" "50" "98")"
 }
 
 # --- 43. CONTENT TYPE SELECTION ---
