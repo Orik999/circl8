@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.3.1"
+SCRIPT_VERSION="v1.3.2"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="pve923-lvmthin-register-resume"
+SCRIPT_BUILD="pve923-existing-thinpool-action-menu"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -1695,7 +1695,7 @@ function complete_existing_storage_success() {
 }
 
 function handle_existing_storage_resume() {
-    local recover_yn=""
+    local recover_action=""
 
     section "EXISTING STORAGE RESUME CHECK"
 
@@ -1718,15 +1718,33 @@ function handle_existing_storage_resume() {
         echo -e " ${BL}━━━━━▶${CL} THINPOOL: ${GN}${THINPOOL_NAME}${CL}"
         echo -e " ${BL}━━━━━▶${CL} STORAGE ID TO REGISTER: ${GN}${STORAGE_ID}${CL}"
         echo ""
-        echo -e "${YW}This looks like a previous run completed LVM creation but failed Proxmox registration.${CL}"
-        recover_yn="$(timed_yes_no "Register existing thinpool without wiping any disk?" "y")"
-        if [[ "$recover_yn" =~ ^[Nn] ]]; then
-            msg_error "Registration-only recovery declined. No destructive action taken."
-        fi
+        echo -e "${YW}Choose storage recovery action:${CL}"
+        echo -e " ${BL}1)${CL} Register existing thinpool without wiping any disk"
+        echo -e " ${BL}2)${CL} Wipe/recreate secondary disk storage"
+        echo -e " ${BL}3)${CL} Exit without changes"
+        echo ""
 
-        register_proxmox_storage
-        complete_existing_storage_success
-        exit 0
+        recover_action="$(timed_number_input "Select action [1/2/3]" "1" "1" "3")"
+
+        case "$recover_action" in
+            1)
+                register_proxmox_storage
+                complete_existing_storage_success
+                exit 0
+                ;;
+            2)
+                msg_ok "Wipe/recreate path selected."
+                echo -e "${YW}Continuing to normal disk selection and wipe confirmation...${CL}"
+                return 0
+                ;;
+            3)
+                echo -e "${YW}No destructive action taken.${CL}"
+                exit 0
+                ;;
+            *)
+                msg_error "Invalid storage recovery action."
+                ;;
+        esac
     fi
 
     msg_ok "No existing ${STORAGE_ID}/${VG_NAME}/${THINPOOL_NAME} registration state detected; normal disk setup path will continue"
