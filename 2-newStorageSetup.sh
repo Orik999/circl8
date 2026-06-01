@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.3.3"
+SCRIPT_VERSION="v1.3.4"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="pve923-disk-audit-display-polish"
+SCRIPT_BUILD="pve923-warning-dedupe-display-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -1184,26 +1184,29 @@ function audit_disks() {
     msg_ok "DISK AUDIT COMPLETE"
 }
 
-# Prints readable warning bullets for selectable destructive-reuse disks.
-function print_disk_warning_cards() {
-    local risk="$1"
+# Prints readable risk bullets once in selected disk inspection.
+function print_selected_data_risk_report() {
+    local risk_report="$1"
     local warning=""
     local normalized=""
 
-    if [ -z "$risk" ] || [ "$risk" == "none" ]; then
-        echo -e "       ${BL}warnings:${CL} ${GN}none${CL}"
+    echo -e "${BL}Data that will be removed:${CL}"
+
+    if [ -z "$risk_report" ]; then
+        echo -e "  ${GN}-${CL} none detected"
         return 0
     fi
-
-    echo -e "       ${YW}warnings:${CL}"
 
     while IFS= read -r warning; do
         warning="$(echo "$warning" | xargs)"
         [ -z "$warning" ] && continue
 
         case "$warning" in
+            "filesystem/partition signatures detected")
+                normalized="filesystem/partition signatures"
+                ;;
             "child partitions/devices detected ("*")")
-                normalized="$(echo "$warning" | sed -E 's/child partitions\/devices detected \(([0-9]+)\)/child partitions\/devices detected: \1/')"
+                normalized="$(echo "$warning" | sed -E 's/child partitions\/devices detected \(([0-9]+)\)/child partitions\/devices: \1/')"
                 ;;
             "existing LVM PV/VG metadata detected (VGs: "*")")
                 normalized="$(echo "$warning" | sed -E 's/existing LVM PV\/VG metadata detected \(VGs: ([^;]+); PVs: ([^)]+)\)/existing LVM metadata: VG=\1, PV=\2/')"
@@ -1216,8 +1219,8 @@ function print_disk_warning_cards() {
                 ;;
         esac
 
-        echo -e "        ${YW}-${CL} ${normalized}"
-    done < <(echo "$risk" | tr ';' '\n')
+        echo -e "  ${YW}-${CL} ${normalized}"
+    done <<< "$risk_report"
 }
 
 # --- 34. DISK LIST DISPLAY ---
@@ -1232,6 +1235,7 @@ function show_disk_lists() {
     local dtype=""
     local entry_type=""
     local risk=""
+    local bus_label=""
 
     echo ""
     echo -e "${BL}SELECTABLE DISKS:${CL}"
@@ -1244,38 +1248,42 @@ function show_disk_lists() {
         else
             dtype="HDD"
         fi
+        bus_label="${tran:-unknown}"
+        bus_label="${bus_label^^}"
 
         echo ""
-        echo -e "  ${BL}$((i+1))) /dev/${name}${CL}"
-        echo -e "       ${BL}size:${CL} ${GN}${size}${CL}"
-        echo -e "       ${BL}type:${CL} ${GN}${dtype}${CL}"
-        echo -e "       ${BL}bus:${CL} ${GN}${tran:-unknown}${CL}"
-        echo -e "       ${BL}model:${CL} ${GN}${model:-unknown}${CL}"
+        if [ "$entry_type" == "destructive-reuse" ]; then
+            echo -e "  ${YW}$((i+1))) /dev/${name}${CL}"
+        else
+            echo -e "  ${BL}$((i+1))) /dev/${name}${CL}"
+        fi
+        echo -e "       ${BL}SIZE:${CL} ${GN}${size}${CL}"
+        echo -e "       ${BL}TYPE/BUS:${CL} ${GN}${dtype} / ${bus_label}${CL}"
+        echo -e "       ${BL}MODEL:${CL} ${GN}${model:-unknown}${CL}"
 
         if [ "$entry_type" == "destructive-reuse" ]; then
-            echo -e "       ${BL}action:${CL} ${RD}DESTRUCTIVE REUSE${CL}"
-            print_disk_warning_cards "$risk"
+            echo -e "       ${BL}MODE:${CL} ${RD}DESTRUCTIVE REUSE${CL}"
+            echo -e "       ${YW}DATA RISK:${CL} existing metadata detected"
         else
-            echo -e "       ${BL}action:${CL} ${GN}clean storage candidate${CL}"
-            echo -e "       ${BL}warnings:${CL} ${GN}none${CL}"
+            echo -e "       ${BL}MODE:${CL} ${GN}clean storage candidate${CL}"
+            echo -e "       ${BL}DATA RISK:${CL} ${GN}none detected${CL}"
         fi
     done
 
     if [ "${#BLOCKED_DISKS[@]}" -gt 0 ]; then
         echo ""
-        echo -e "${YW}BLOCKED DISKS:${CL}"
+        echo -e "${RD}BLOCKED DISKS:${CL}"
 
         for line in "${BLOCKED_DISKS[@]}"; do
             IFS='|' read -r name size tran rota model reason <<< "$line"
             echo ""
             echo -e "  ${YW}/dev/${name}${CL}"
-            echo -e "     ${BL}size:${CL} ${GN}${size}${CL}"
-            echo -e "     ${BL}model:${CL} ${GN}${model:-unknown}${CL}"
-            echo -e "     ${YW}reason:${CL} ${reason}"
+            echo -e "     ${BL}SIZE:${CL} ${GN}${size}${CL}"
+            echo -e "     ${BL}MODEL:${CL} ${GN}${model:-unknown}${CL}"
+            echo -e "     ${YW}REASON:${CL} ${reason}"
         done
     fi
 }
-
 
 # --- 35. DISK SELECTION ---
 # Selects a safe disk using numeric validation.
@@ -1355,7 +1363,7 @@ function inspect_selected_disk() {
 }
 
 # --- 37. SELECTED DISK SUMMARY ---
-# Shows disk details and warns if data/signatures already exist.
+# Shows selected disk details and one detailed risk report.
 function show_selected_disk_summary() {
     echo ""
     echo -e "${BL}SELECTED DISK:${CL}"
@@ -1363,16 +1371,13 @@ function show_selected_disk_summary() {
     echo -e " ${BL}━━━━━▶${CL} MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
     echo -e " ${BL}━━━━━▶${CL} TYPE/BUS: ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
     echo -e " ${BL}━━━━━▶${CL} SIZE: ${GN}${DISK_SIZE_GB}GB${CL}"
-    echo -e " ${BL}━━━━━▶${CL} EXISTING DATA/SIGNATURES: ${GN}${HAS_DATA}${CL}"
     echo -e " ${BL}━━━━━▶${CL} SELECTION MODE: ${GN}${SELECTED_DISK_ENTRY_TYPE}${CL}"
+    echo ""
+    print_selected_data_risk_report "$DATA_RISK_REPORT"
 
     if [ "$HAS_DATA" == "yes" ]; then
         echo ""
-        echo -e "${RD}DATA RISK REPORT:${CL}"
-        while read -r line; do
-            [ -z "$line" ] && continue
-            echo -e "  ${YW}!${CL} ${line}"
-        done <<< "$DATA_RISK_REPORT"
+        echo -e "${RD}WARNING: Continuing will erase/recreate storage on ${SELECTED_DISK}.${CL}"
     fi
 }
 
@@ -1507,24 +1512,32 @@ function check_storage_conflicts() {
         fi
 
         echo ""
-        echo -e "${YW}Destructive reuse warning:${CL} existing VG(s) on ${SELECTED_DISK} will be removed before new storage is created: ${EXISTING_VGS_ON_SELECTED_DISK}"
+        echo -e "${BL}Selected disk cleanup planned:${CL}"
+        for vg in $EXISTING_VGS_ON_SELECTED_DISK; do
+            echo -e "  ${YW}-${CL} remove existing VG ${vg} from ${SELECTED_DISK}"
+        done
+        echo -e "  ${YW}-${CL} create new Proxmox storage using the names selected above"
     fi
 
     if vgs "$VG_NAME" >/dev/null 2>&1; then
         if [[ " ${EXISTING_VGS_ON_SELECTED_DISK} " != *" ${VG_NAME} "* ]]; then
             msg_error "Volume group ${VG_NAME} already exists on another disk or unknown device."
         fi
-        msg_warn "Target VG ${VG_NAME} already exists on selected disk and will be destroyed/recreated after final confirmation"
     fi
 
     if lvs "${VG_NAME}/${THINPOOL_NAME}" >/dev/null 2>&1; then
         if [[ " ${EXISTING_VGS_ON_SELECTED_DISK} " != *" ${VG_NAME} "* ]]; then
             msg_error "Logical volume ${VG_NAME}/${THINPOOL_NAME} already exists outside the selected disk reuse scope."
         fi
-        msg_warn "Target thinpool ${VG_NAME}/${THINPOOL_NAME} already exists on selected disk and will be destroyed/recreated after final confirmation"
     fi
 
-    msg_ok "NO BLOCKING STORAGE CONFLICTS FOUND"
+    echo ""
+    echo -e "${BL}New storage to create:${CL}"
+    echo -e "  ${BL}VG:${CL} ${GN}${VG_NAME}${CL}"
+    echo -e "  ${BL}Thinpool:${CL} ${GN}${THINPOOL_NAME}${CL}"
+    echo -e "  ${BL}Proxmox storage ID:${CL} ${GN}${STORAGE_ID}${CL}"
+
+    msg_ok "No blocking conflicts outside the selected disk."
 }
 
 
