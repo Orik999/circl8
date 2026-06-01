@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.2.2"
+SCRIPT_VERSION="v1.2.3"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="strict-mode-audit-return-fix"
+SCRIPT_BUILD="audit-storage-selection-ui-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -419,6 +419,7 @@ function editable_input_loop() {
     local initial_value="${6:-}"
     local answer="$initial_value"
     local key=""
+    local invalid_notice_shown="no"
 
     while true; do
         tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"
@@ -441,7 +442,10 @@ function editable_input_loop() {
                     fi
 
                     tty_print "${BFR}"
-                    print_number_error "$min_value" "$max_value"
+                    if [ "$invalid_notice_shown" != "yes" ]; then
+                        print_number_error "$min_value" "$max_value"
+                        invalid_notice_shown="yes"
+                    fi
                     answer=""
                 else
                     tty_print "${BFR}"
@@ -451,14 +455,19 @@ function editable_input_loop() {
                 ;;
             $'\177'|$'\b')
                 answer="${answer%?}"
+                invalid_notice_shown="no"
                 ;;
             *)
                 if [ "$numeric_only" == "yes" ]; then
                     if [[ "$key" =~ ^[0-9]$ ]]; then
                         answer+="$key"
+                        invalid_notice_shown="no"
                     else
                         tty_print "${BFR}"
-                        print_number_error "$min_value" "$max_value"
+                        if [ "$invalid_notice_shown" != "yes" ]; then
+                            print_number_error "$min_value" "$max_value"
+                            invalid_notice_shown="yes"
+                        fi
                         answer=""
                     fi
                 else
@@ -1114,8 +1123,19 @@ function audit_gpu_hardware() {
 }
 
 # --- 44. SYSTEM AUDIT DISPLAY ---
-# Shows available host resources, adaptive defaults and readable GPU grouping before asking user inputs.
+# Shows host resources, recommended VM defaults, readable GPU grouping and storage context before asking user inputs.
 function show_system_audit() {
+    local audit_storage_list=()
+    local storage_name=""
+    local storage_type=""
+    local snapshot_support=""
+    local recommended_use=""
+    local role=""
+    local printed_system="no"
+    local printed_secondary="no"
+
+    mapfile -t audit_storage_list < <(get_storage_list | sort)
+
     section "SYSTEM AUDIT"
 
     msg_ok "SYSTEM RESOURCES DETECTED"
@@ -1126,17 +1146,65 @@ function show_system_audit() {
         msg_ok "GPU DETECTION COMPLETE"
     fi
 
+    if [ "${#audit_storage_list[@]}" -gt 0 ]; then
+        msg_ok "STORAGE OPTIONS DETECTED"
+    else
+        msg_warn "NO VM STORAGE OPTIONS DETECTED"
+    fi
+
     echo ""
-    echo -e "${BL}System:${CL}"
+    echo -e "${BL}System resources:${CL}"
     echo -e "  ${BL}type:${CL} ${GN}${SYSTEM_TYPE}${CL}"
     echo -e "  ${BL}host resources:${CL} ${GN}${TOTAL_CORES} CPU cores / ${TOTAL_RAM_GB}GB RAM${CL}"
-    echo -e "  ${BL}default VM:${CL} ${GN}${DEFAULT_CORES} CPU cores / ${DEFAULT_RAM_GB}GB RAM${CL}"
+
+    echo ""
+    echo -e "${BL}Default VM:${CL}"
+    echo -e "  ${BL}cpu cores:${CL} ${GN}${DEFAULT_CORES}${CL}"
+    echo -e "  ${BL}ram:${CL} ${GN}${DEFAULT_RAM_GB}GB${CL}"
 
     echo ""
     echo -e "${BL}GPU:${CL}"
     print_gpu_group "Integrated" "$IGPU_LINES" "host/laptop display"
     echo ""
     print_gpu_group "Discrete" "$DGPU_LINES" "VM passthrough candidate"
+
+    echo ""
+    echo -e "${BL}Storage availability:${CL}"
+
+    for storage_name in "${audit_storage_list[@]}"; do
+        storage_type="$(get_storage_type "$storage_name")"
+        snapshot_support="$(storage_supports_snapshots "$storage_type")"
+        recommended_use="$(storage_recommended_use "$storage_type")"
+        role="$(storage_role_label "$storage_name" "$storage_type")"
+
+        if [ "$role" == "Proxmox system disk" ]; then
+            if [ "$printed_system" == "no" ]; then
+                echo -e "  ${BL}Proxmox system storage:${CL}"
+                printed_system="yes"
+            fi
+            print_storage_option_card "" "$storage_name" "$storage_type" "$snapshot_support" "$recommended_use" "$role"
+        fi
+    done
+
+    for storage_name in "${audit_storage_list[@]}"; do
+        storage_type="$(get_storage_type "$storage_name")"
+        snapshot_support="$(storage_supports_snapshots "$storage_type")"
+        recommended_use="$(storage_recommended_use "$storage_type")"
+        role="$(storage_role_label "$storage_name" "$storage_type")"
+
+        if [ "$role" != "Proxmox system disk" ]; then
+            if [ "$printed_secondary" == "no" ]; then
+                [ "$printed_system" == "yes" ] && echo ""
+                echo -e "  ${BL}Secondary / other VM storage:${CL}"
+                printed_secondary="yes"
+            fi
+            print_storage_option_card "" "$storage_name" "$storage_type" "$snapshot_support" "$recommended_use" "$role"
+        fi
+    done
+
+    if [ "${#audit_storage_list[@]}" -eq 0 ]; then
+        echo -e "  ${YW}No active VM image storage detected yet.${CL}"
+    fi
 
     return 0
 }
@@ -1147,6 +1215,7 @@ function start_confirmation() {
     local start_yn=""
 
     echo ""
+    echo -e "${BL}Start confirmation:${CL}"
     start_yn="$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")"
 
     if [[ "$start_yn" =~ ^[Nn] ]]; then
@@ -1230,17 +1299,17 @@ function storage_supports_snapshots() {
     esac
 }
 
-# --- STORAGE ROLE LABEL HELPER ---
-# Provides a clear user-facing role for storage choices.
-function storage_role_label() {
+# --- STORAGE RECOMMENDED USE HELPER ---
+# Provides concise user-facing storage usage guidance.
+function storage_recommended_use() {
     local type="$1"
 
     case "$type" in
         lvmthin|zfspool|btrfs|rbd)
-            echo "VM disks/snapshots recommended"
+            echo "VM disks / snapshots"
             ;;
         dir|nfs|cifs|glusterfs)
-            echo "ISO/backups/file storage; VM snapshots may not work"
+            echo "ISO / backups / file storage"
             ;;
         lvm)
             echo "block storage; snapshots not recommended"
@@ -1251,11 +1320,57 @@ function storage_role_label() {
     esac
 }
 
+# --- STORAGE ROLE LABEL HELPER ---
+# Gives a display-only source/role hint based on well-known Proxmox storage IDs.
+function storage_role_label() {
+    local storage="$1"
+    local type="${2:-}"
+
+    case "$storage" in
+        local|local-lvm)
+            echo "Proxmox system disk"
+            ;;
+        circl8-vm)
+            echo "secondary VM storage disk"
+            ;;
+        *)
+            if [ "$type" == "lvmthin" ]; then
+                echo "VM storage"
+            else
+                echo "detected Proxmox storage"
+            fi
+            ;;
+    esac
+}
+
+# --- STORAGE OPTION CARD DISPLAY HELPER ---
+# Renders storage choices and audit items as readable multi-line cards.
+function print_storage_option_card() {
+    local index="$1"
+    local storage_name="$2"
+    local storage_type="$3"
+    local snapshot_support="$4"
+    local recommended_use="$5"
+    local role="$6"
+
+    if [ -n "$index" ]; then
+        echo -e "  ${index}) ${GN}${storage_name}${CL}"
+    else
+        echo -e "    - ${GN}${storage_name}${CL}"
+    fi
+
+    echo -e "       ${BL}type:${CL} ${GN}${storage_type:-unknown}${CL}"
+    echo -e "       ${BL}snapshots:${CL} ${GN}${snapshot_support}${CL}"
+    echo -e "       ${BL}recommended use:${CL} ${GN}${recommended_use}${CL}"
+    echo -e "       ${BL}storage role:${CL} ${GN}${role}${CL}"
+}
+
 function select_vm_storage() {
     local storage_name=""
     local storage_type=""
     local snapshot_support=""
     local role=""
+    local recommended_use=""
     local default_index="1"
     local selected_snapshot_support=""
     local continue_yn=""
@@ -1288,8 +1403,10 @@ function select_vm_storage() {
         storage_name="${STORAGE_LIST[$i]}"
         storage_type="$(get_storage_type "$storage_name")"
         snapshot_support="$(storage_supports_snapshots "$storage_type")"
-        role="$(storage_role_label "$storage_type")"
-        echo "$((i+1))) ${storage_name} (${storage_type:-unknown}) | snapshots: ${snapshot_support} | ${role}"
+        role="$(storage_role_label "$storage_name" "$storage_type")"
+        recommended_use="$(storage_recommended_use "$storage_type")"
+        [ "$i" -gt 0 ] && echo ""
+        print_storage_option_card "$((i+1))" "$storage_name" "$storage_type" "$snapshot_support" "$recommended_use" "$role"
     done
 
     if [ "$default_index" == "1" ]; then
