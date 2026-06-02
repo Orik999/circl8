@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.4.3"
+SCRIPT_VERSION="v1.4.4"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="batch6-gpu-spacing-transient-prompts"
+SCRIPT_BUILD="batch7-transient-crowdsec-cleanup"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -1986,7 +1986,6 @@ function collect_storage_layout_option() {
     echo ""
     echo -e "${YW}No installer-created local-lvm storage was detected.${CL}"
     echo -e "${YW}Script 1 can build root/local target sizing and snapshot-ready local-lvm from free pve VG space.${CL}"
-    echo ""
 
     if [ "$CURRENT_ROOT_SIZE_GB" -gt "$default_target" ]; then
         default_target="$CURRENT_ROOT_SIZE_GB"
@@ -2060,14 +2059,13 @@ function collect_user_options() {
             CROWDSEC_CONSOLE_ENROLLMENT="requested"
             engine_name="$(read_text_from_tty "CrowdSec Console engine name" "$CROWDSEC_CONSOLE_ENGINE_NAME")"
             CROWDSEC_CONSOLE_ENGINE_NAME="${engine_name:-$CROWDSEC_CONSOLE_ENGINE_NAME}"
-            msg_ok "CrowdSec Console engine name set: ${CROWDSEC_CONSOLE_ENGINE_NAME}"
             CROWDSEC_CONSOLE_ENROLLMENT_KEY="$(read_secret_from_tty "Paste CrowdSec Console enrollment key")"
             if [ -z "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" ]; then
                 CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
                 CROWDSEC_CONSOLE_ENROLLMENT="error"
                 msg_warn "CrowdSec Console enrollment key was empty; enrollment will be skipped"
             else
-                msg_ok "CrowdSec Console enrollment key captured"
+                msg_ok "CrowdSec enrollment key received"
             fi
         else
             CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
@@ -2941,7 +2939,7 @@ function read_text_from_tty() {
 
     final_value="${value:-$default}"
     confirm_label="$(clean_prompt_label "$prompt")"
-    tty_print "${BFR}"
+    tty_clear_previous_line
     tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${final_value}${CL}"
 
     printf '%s' "$final_value"
@@ -2954,10 +2952,8 @@ function read_secret_from_tty() {
     if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf '%b' "${YW}${prompt}: ${CL}" > /dev/tty
         IFS= read -r -s value < /dev/tty || true
-        printf '
-' > /dev/tty
-        printf '[1A
-[K' > /dev/tty
+        printf '\n' > /dev/tty
+        tty_clear_previous_line
     else
         IFS= read -r -s -p "${prompt}: " value || true
         echo >&2
