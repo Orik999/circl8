@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.9"
+SCRIPT_VERSION="v1.4.0"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="batch2-ui-readability-polish"
+SCRIPT_BUILD="batch3-preapply-ui-consistency"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -58,6 +58,10 @@ IS_SSD="no"
 IS_FRESH="yes"
 
 CPU_TYPE=""
+CPU_MODEL_CLOCK="unknown"
+CPU_PHYSICAL_CORES="0"
+CPU_THREADS="0"
+SYSTEM_RAM_GB="0"
 IOMMU_FLAG=""
 
 DEFAULT_IFACE=""
@@ -302,6 +306,7 @@ function clean_prompt_label() {
 
     label="${label%\?}"
     label="${label%:}"
+    label="$(printf '%s' "$label" | sed -E 's/[[:space:]]+\[[^]]+\]$//')"
     printf '%s' "$label"
 }
 
@@ -977,13 +982,23 @@ function root_parent_disk_name() {
     local name=""
     local parent=""
     local type=""
+    local pv=""
 
     [ -n "$source" ] || source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
     [ -n "$source" ] || return 0
 
-    resolved="$(readlink -f "$source" 2>/dev/null || true)"
-    [ -n "$resolved" ] || resolved="$source"
-    name="$(basename "$resolved")"
+    if [[ "$source" == *pve-root* || "$source" == *pve/root* ]]; then
+        pv="$(pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk '$2 == "pve" {print $1; exit}' || true)"
+        if [ -n "$pv" ]; then
+            name="$(basename "$(readlink -f "$pv" 2>/dev/null || echo "$pv")")"
+        fi
+    fi
+
+    if [ -z "$name" ]; then
+        resolved="$(readlink -f "$source" 2>/dev/null || true)"
+        [ -n "$resolved" ] || resolved="$source"
+        name="$(basename "$resolved")"
+    fi
 
     while [ -n "$name" ]; do
         type="$(lsblk -dn -o TYPE "/dev/${name}" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
@@ -1008,7 +1023,7 @@ function display_storage_detected_block() {
 
     echo -e "${YW}Detected:${CL}"
     if [ -n "$root_disk" ]; then
-        echo -e "  ${BL}System disk:${CL} ${GN}$(disk_kind_label "$root_disk") (${root_disk})${CL}"
+        echo -e "  ${BL}System disk:${CL} ${GN}$(disk_display_name "$root_disk")${CL}"
     else
         echo -e "  ${BL}System disk:${CL} ${GN}not detected${CL}"
     fi
@@ -1018,9 +1033,9 @@ function display_storage_detected_block() {
         [ "$disk" == "$root_disk" ] && continue
         secondary_count=$((secondary_count + 1))
         if [ "$secondary_count" -eq 1 ]; then
-            echo -e "  ${BL}Secondary disk:${CL} ${GN}$(disk_kind_label "$disk") (${disk})${CL}"
+            echo -e "  ${BL}Secondary disk:${CL} ${GN}$(disk_display_name "$disk")${CL}"
         else
-            echo -e "  ${BL}Secondary disk ${secondary_count}:${CL} ${GN}$(disk_kind_label "$disk") (${disk})${CL}"
+            echo -e "  ${BL}Secondary disk ${secondary_count}:${CL} ${GN}$(disk_display_name "$disk")${CL}"
         fi
     done < <(lsblk -dn -o NAME,TYPE | awk '$2 == "disk" {print $1}')
 
@@ -1272,30 +1287,176 @@ function init_script() {
 # --- 30. FRESH INSTALL WARNING ---
 # Shows flashing warning only after confirming this is Proxmox VE 9+.
 function show_fresh_install_warning() {
-    echo -e "${YW}This script will perform PVE9 post-install routines.${CL}"
-    echo -e "${YW}${CLF}Intended for FRESH Proxmox VE 9 installs only.${CL}"
+    echo -e "${YW}This script will perform Proxmox post-install routines.${CL}"
+    echo -e "${YW}${CLF}Intended for FRESH Proxmox v9 installs only.${CL}"
 }
 
+
+function read_first_file_value() {
+    local file="$1"
+    local value=""
+
+    if [ -r "$file" ]; then
+        value="$(head -n 1 "$file" 2>/dev/null | xargs || true)"
+    fi
+
+    printf '%s' "$value"
+}
+
+function detect_os_pretty_name() {
+    local pretty=""
+
+    if [ -r /etc/os-release ]; then
+        pretty="$(awk -F= '$1=="PRETTY_NAME" {gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null || true)"
+    fi
+
+    printf '%s' "${pretty:-unknown}"
+}
+
+function normalize_arch_label() {
+    local arch="$1"
+
+    case "$arch" in
+        x86_64) echo "x86-64" ;;
+        aarch64) echo "ARM64" ;;
+        armv7l) echo "ARMv7" ;;
+        *) echo "${arch:-unknown}" ;;
+    esac
+}
+
+function chassis_type_label() {
+    local chassis="$1"
+
+    case "$chassis" in
+        8|9|10|14|31|32) echo "Laptop 💻" ;;
+        3|4|5|6|7|15|16|35|36) echo "PC/Workstation" ;;
+        1|2|11|12|13|17|18|19|20|21|22|23|24|25|26|27|28|29|30|33|34) echo "Server/Appliance" ;;
+        *) echo "Unknown" ;;
+    esac
+}
+
+function clean_cpu_model_clock() {
+    local model="$1"
+
+    printf '%s' "$model" | sed -E \
+        -e 's/Intel\(R\)/Intel/g' \
+        -e 's/Core\(TM\)/Core/g' \
+        -e 's/Xeon\(R\)/Xeon/g' \
+        -e 's/Pentium\(R\)/Pentium/g' \
+        -e 's/Celeron\(R\)/Celeron/g' \
+        -e 's/[[:space:]]+CPU[[:space:]]+@/ @/g' \
+        -e 's/[[:space:]]+/ /g' \
+        -e 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+function detect_cpu_model_clock() {
+    local model=""
+
+    model="$(awk -F: '/model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
+    if [ -n "$model" ]; then
+        clean_cpu_model_clock "$model"
+    else
+        echo "unknown"
+    fi
+}
+
+function detect_cpu_physical_cores() {
+    local cores_per_socket=""
+    local sockets=""
+    local cores=""
+
+    if command -v lscpu >/dev/null 2>&1; then
+        cores_per_socket="$(lscpu 2>/dev/null | awk -F: '/^Core\(s\) per socket:/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' || true)"
+        sockets="$(lscpu 2>/dev/null | awk -F: '/^Socket\(s\):/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' || true)"
+        if [[ "$cores_per_socket" =~ ^[0-9]+$ && "$sockets" =~ ^[0-9]+$ ]] && [ "$cores_per_socket" -gt 0 ] && [ "$sockets" -gt 0 ]; then
+            cores=$(( cores_per_socket * sockets ))
+            echo "$cores"
+            return 0
+        fi
+    fi
+
+    nproc 2>/dev/null || echo "0"
+}
+
+function detect_system_ram_gb() {
+    local mem_kb=""
+
+    mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+    if [[ "$mem_kb" =~ ^[0-9]+$ ]] && [ "$mem_kb" -gt 0 ]; then
+        echo $(( (mem_kb + 1048575) / 1048576 ))
+    else
+        echo "0"
+    fi
+}
+
+function disk_display_name() {
+    local disk="$1"
+    local model=""
+    local size=""
+    local kind=""
+    local display=""
+
+    model="$(lsblk -dn -o MODEL "/dev/${disk}" 2>/dev/null | xargs || true)"
+    size="$(lsblk -dn -o SIZE "/dev/${disk}" 2>/dev/null | xargs || true)"
+    size="${size/G/GB}"
+    kind="$(disk_kind_label "$disk")"
+
+    if [ -n "$model" ] && [ -n "$size" ]; then
+        display="${model} ${size}"
+    elif [ -n "$model" ]; then
+        display="$model"
+    elif [ -n "$kind" ]; then
+        display="$kind"
+    else
+        display="$disk"
+    fi
+
+    echo "${display} (${disk})"
+}
 
 # --- PROXMOX PLATFORM DETECTION ---
 # Captures exact host platform data before any isolation or post-install changes.
 function detect_proxmox_platform() {
     local pve_raw=""
+    local chassis_code=""
 
     pve_raw="$(pveversion 2>/dev/null || true)"
     PROXMOX_VERSION="$(printf '%s\n' "$pve_raw" | sed -nE 's|^pve-manager/([^/]+)/.*|\1|p' | head -n 1)"
     [ -n "$PROXMOX_VERSION" ] || PROXMOX_VERSION="unknown"
 
     PROXMOX_KERNEL="$(uname -r 2>/dev/null || echo unknown)"
+    OS_PRETTY="$(detect_os_pretty_name)"
+    SYSTEM_ARCH="$(normalize_arch_label "$(uname -m 2>/dev/null || echo unknown)")"
 
-    if command -v dmidecode >/dev/null 2>&1; then
-        BIOS_VERSION="$(dmidecode -s bios-version 2>/dev/null | head -n 1 | xargs || true)"
+    SYSTEM_VENDOR="$(read_first_file_value /sys/class/dmi/id/sys_vendor)"
+    SYSTEM_PRODUCT="$(read_first_file_value /sys/class/dmi/id/product_name)"
+    BIOS_VERSION="$(read_first_file_value /sys/class/dmi/id/bios_version)"
+    BIOS_DATE="$(read_first_file_value /sys/class/dmi/id/bios_date)"
+    chassis_code="$(read_first_file_value /sys/class/dmi/id/chassis_type)"
+
+    if [ -z "$SYSTEM_VENDOR" ] && command -v dmidecode >/dev/null 2>&1; then
+        SYSTEM_VENDOR="$(dmidecode -s system-manufacturer 2>/dev/null | head -n 1 | xargs || true)"
+    fi
+    if [ -z "$SYSTEM_PRODUCT" ] && command -v dmidecode >/dev/null 2>&1; then
         SYSTEM_PRODUCT="$(dmidecode -s system-product-name 2>/dev/null | head -n 1 | xargs || true)"
-        SYSTEM_CHASSIS="$(dmidecode -s chassis-type 2>/dev/null | head -n 1 | xargs || true)"
+    fi
+    if [ -z "$BIOS_VERSION" ] && command -v dmidecode >/dev/null 2>&1; then
+        BIOS_VERSION="$(dmidecode -s bios-version 2>/dev/null | head -n 1 | xargs || true)"
+    fi
+    if [ -z "$BIOS_DATE" ] && command -v dmidecode >/dev/null 2>&1; then
+        BIOS_DATE="$(dmidecode -s bios-release-date 2>/dev/null | head -n 1 | xargs || true)"
+    fi
+    if [ -z "$chassis_code" ] && command -v dmidecode >/dev/null 2>&1; then
+        chassis_code="$(dmidecode -s chassis-type 2>/dev/null | head -n 1 | xargs || true)"
     fi
 
-    [ -n "$BIOS_VERSION" ] || BIOS_VERSION="unknown"
+    SYSTEM_CHASSIS="${chassis_code:-unknown}"
+    HOST_TYPE_LABEL="$(chassis_type_label "$chassis_code")"
+
+    [ -n "$SYSTEM_VENDOR" ] || SYSTEM_VENDOR="unknown"
     [ -n "$SYSTEM_PRODUCT" ] || SYSTEM_PRODUCT="unknown"
+    [ -n "$BIOS_VERSION" ] || BIOS_VERSION="unknown"
+    [ -n "$BIOS_DATE" ] || BIOS_DATE="unknown"
     [ -n "$SYSTEM_CHASSIS" ] || SYSTEM_CHASSIS="unknown"
 }
 
@@ -1322,17 +1483,24 @@ function audit_hardware() {
         IS_VM="yes"
     fi
 
-    if command -v dmidecode >/dev/null 2>&1; then
-        CHASSIS="${SYSTEM_CHASSIS:-Unknown}"
-    fi
+    CHASSIS="${SYSTEM_CHASSIS:-unknown}"
 
-    if [[ "$CHASSIS" =~ (Laptop|Notebook|Portable) ]]; then
+    if [[ "$HOST_TYPE_LABEL" == Laptop* ]]; then
         SYSTEM_TYPE="Laptop"
     elif [ "$IS_VM" == "yes" ]; then
         SYSTEM_TYPE="Virtual Machine"
-    else
+        HOST_TYPE_LABEL="Virtual Machine"
+    elif [ "$HOST_TYPE_LABEL" == "Unknown" ]; then
         SYSTEM_TYPE="PC/Workstation"
+        HOST_TYPE_LABEL="PC/Workstation"
+    else
+        SYSTEM_TYPE="${HOST_TYPE_LABEL}"
     fi
+
+    CPU_MODEL_CLOCK="$(detect_cpu_model_clock)"
+    CPU_THREADS="$(nproc 2>/dev/null || echo 0)"
+    CPU_PHYSICAL_CORES="$(detect_cpu_physical_cores)"
+    SYSTEM_RAM_GB="$(detect_system_ram_gb)"
 
     if lsblk -dn -o ROTA | grep -q "^0$"; then
         IS_SSD="yes"
@@ -1365,6 +1533,11 @@ function audit_hardware() {
     echo -e "  ${BL}Model:${CL} ${GN}${SYSTEM_PRODUCT}${CL}"
     echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_VERSION}${CL}"
     echo -e "  ${BL}BIOS date:${CL} ${GN}${BIOS_DATE}${CL}"
+    echo ""
+    echo -e "${YW}CPU:${CL}"
+    echo -e "  ${BL}Model/Clock:${CL} ${GN}${CPU_MODEL_CLOCK}${CL}"
+    echo -e "  ${BL}Cores/Threads:${CL} ${GN}${CPU_PHYSICAL_CORES} / ${CPU_THREADS}${CL}"
+    echo -e "  ${BL}System RAM:${CL} ${GN}${SYSTEM_RAM_GB}GB${CL}"
 }
 
 # --- 32. FRESH INSTALL DETECTION ---
@@ -1610,9 +1783,10 @@ function read_storage_gb_input() {
     local default_value="$2"
     local allow_zero="${3:-no}"
     local value=""
+    local confirm_label=""
 
     while true; do
-        tty_print "${YW}${prompt} [${default_value}]: ${CL}"
+        tty_print "${BFR}${YW}${prompt} [${default_value}]: ${CL}"
         if [ -r /dev/tty ]; then
             IFS= read -r value < /dev/tty || true
         else
@@ -1624,11 +1798,15 @@ function read_storage_gb_input() {
 
         if [[ "$value" =~ ^[0-9]+$ ]]; then
             if [ "$allow_zero" == "yes" ] || [ "$value" -gt 0 ]; then
+                confirm_label="$(clean_prompt_label "$prompt")"
+                tty_print "${BFR}"
+                tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${value}${CL}"
                 echo "$value"
                 return 0
             fi
         fi
 
+        tty_print "${BFR}"
         tty_println "${RD}Enter a whole number greater than zero.${CL}"
     done
 }
@@ -1754,16 +1932,16 @@ function show_storage_plan() {
             ;;
         build_local_lvm)
             echo -e "  ${BL}Mode:${CL} ${GN}build local-lvm${CL}"
-            echo -e "  ${BL}Target root/local:${CL} ${GN}${TARGET_ROOT_SIZE_GB} GB${CL}"
-            echo -e "  ${BL}Create local-lvm:${CL} ${GN}yes${CL}"
-            echo -e "  ${BL}local-lvm size:${CL} ${GN}${LOCAL_LVM_SIZE_GB} GB${CL}"
-            echo -e "  ${BL}Reserve free VG space:${CL} ${GN}${PVE_FREE_RESERVE_GB} GB${CL}"
+            echo -e "  ${BL}Target root/local:${CL} ${ANS}${TARGET_ROOT_SIZE_GB} GB${CL}"
+            echo -e "  ${BL}Create local-lvm:${CL} ${ANS}yes${CL}"
+            echo -e "  ${BL}local-lvm size:${CL} ${ANS}${LOCAL_LVM_SIZE_GB} GB${CL}"
+            echo -e "  ${BL}Reserve free VG space:${CL} ${ANS}${PVE_FREE_RESERVE_GB} GB${CL}"
             ;;
         extend_root_only)
             echo -e "  ${BL}Mode:${CL} ${GN}extend root only${CL}"
-            echo -e "  ${BL}Target root/local:${CL} ${GN}${TARGET_ROOT_SIZE_GB} GB${CL}"
-            echo -e "  ${BL}Create local-lvm:${CL} ${GN}no${CL}"
-            echo -e "  ${BL}Reserve free VG space:${CL} ${GN}${PVE_FREE_RESERVE_GB} GB${CL}"
+            echo -e "  ${BL}Target root/local:${CL} ${ANS}${TARGET_ROOT_SIZE_GB} GB${CL}"
+            echo -e "  ${BL}Create local-lvm:${CL} ${ANS}no${CL}"
+            echo -e "  ${BL}Reserve free VG space:${CL} ${ANS}${PVE_FREE_RESERVE_GB} GB${CL}"
             ;;
         skip_root_expansion)
             echo -e "  ${BL}Mode:${CL} ${GN}skip root expansion${CL}"
@@ -1853,7 +2031,8 @@ function collect_user_options() {
 
     section "POST-INSTALL OPTIONS"
 
-    cpu_yn="$(timed_yes_no "Set CPU Governor to PERFORMANCE?" "n")"
+    echo -e "${YW}Performance:${CL}"
+    cpu_yn="$(timed_yes_no "Set CPU governor to performance?" "n")"
 
     if [[ "$cpu_yn" =~ ^[Yy] ]]; then
         ENABLE_PERFORMANCE="y"
@@ -1861,7 +2040,9 @@ function collect_user_options() {
         ENABLE_PERFORMANCE="n"
     fi
 
-    crowdsec_yn="$(timed_yes_no "Install CrowdSec Security Suite?" "y")"
+    echo ""
+    echo -e "${YW}CrowdSec:${CL}"
+    crowdsec_yn="$(timed_yes_no "Install CrowdSec?" "y")"
 
     if [[ "$crowdsec_yn" =~ ^[Nn] ]]; then
         ENABLE_CROWDSEC="n"
@@ -1893,7 +2074,7 @@ function collect_user_options() {
     fi
 
     echo ""
-    echo -e "${BL}SSH KEY CHECK${CL}"
+    echo -e "${YW}SSH key check:${CL}"
     detect_root_ssh_key_state
     print_root_ssh_key_report
     if [ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ]; then
@@ -1947,6 +2128,8 @@ function final_start_prompt() {
     echo -e "${YW}Platform:${CL}"
     echo -e "  ${BL}Proxmox:${CL} ${GN}${PROXMOX_VERSION}${CL} / ${BL}Kernel:${CL} ${GN}${PROXMOX_KERNEL}${CL}"
     echo -e "  ${BL}Host:${CL} ${GN}${host_summary} / ${HOST_TYPE_LABEL}${CL}"
+    echo -e "  ${BL}CPU:${CL} ${GN}${CPU_MODEL_CLOCK} / ${CPU_PHYSICAL_CORES} cores / ${CPU_THREADS} threads${CL}"
+    echo -e "  ${BL}RAM:${CL} ${GN}${SYSTEM_RAM_GB}GB${CL}"
     echo ""
 
     case "${STORAGE_LAYOUT_MODE:-unselected}" in
@@ -1973,10 +2156,10 @@ function final_start_prompt() {
     esac
 
     echo -e "${YW}Storage:${CL}"
-    echo -e "  ${BL}Mode:${CL} ${GN}${storage_mode_label}${CL}"
-    echo -e "  ${BL}Root/local:${CL} ${GN}${CURRENT_ROOT_SIZE_GB} GB → ${TARGET_ROOT_SIZE_GB} GB${CL}"
-    echo -e "  ${BL}local-lvm:${CL} ${GN}${local_lvm_summary}${CL}"
-    echo -e "  ${BL}Reserve free VG space:${CL} ${GN}${PVE_FREE_RESERVE_GB} GB${CL}"
+    echo -e "  ${BL}Mode:${CL} ${ANS}${storage_mode_label}${CL}"
+    echo -e "  ${BL}Root/local:${CL} ${GN}${CURRENT_ROOT_SIZE_GB} GB${CL} → ${ANS}${TARGET_ROOT_SIZE_GB} GB${CL}"
+    echo -e "  ${BL}local-lvm:${CL} ${ANS}${local_lvm_summary}${CL}"
+    echo -e "  ${BL}Reserve free VG space:${CL} ${ANS}${PVE_FREE_RESERVE_GB} GB${CL}"
     echo ""
 
     echo -e "${YW}GPU:${CL}"
@@ -1986,10 +2169,10 @@ function final_start_prompt() {
     echo ""
 
     echo -e "${YW}Security:${CL}"
-    echo -e "  ${BL}SSH hardening:${CL} ${GN}${SSH_HARDENING_APPLIED:-audit-only}${CL}"
+    echo -e "  ${BL}SSH hardening:${CL} ${ANS}${SSH_HARDENING_APPLIED:-audit-only}${CL}"
     echo -e "  ${BL}Proxmox firewall:${CL} ${GN}LAN-only ${LAN_CIDR:-not-detected}${CL}"
     echo -e "  ${BL}Public host 80/443:${CL} ${ANS}$(yes_no_label "$ALLOW_PUBLIC_WEB")${CL}"
-    echo -e "  ${BL}CrowdSec:${CL} ${GN}install $(yes_no_label "$ENABLE_CROWDSEC") / console enrollment $(yes_no_label "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}")${CL}"
+    echo -e "  ${BL}CrowdSec:${CL} ${ANS}install $(yes_no_label "$ENABLE_CROWDSEC") / console enrollment $(yes_no_label "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}")${CL}"
     echo ""
 
     start_yn="$(timed_yes_no "Start Proxmox setup?" "y")"
@@ -2745,16 +2928,22 @@ function read_text_from_tty() {
     local prompt="$1"
     local default="${2:-}"
     local value=""
+    local final_value=""
+    local confirm_label=""
 
     if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-        printf '%b' "${YW}${prompt} [default: ${default}]: ${CL}" > /dev/tty
+        printf '%b' "${BFR}${YW}${prompt} [default: ${default}]: ${CL}" > /dev/tty
         IFS= read -r value < /dev/tty || true
-        printf '\033[1A\r\033[K' > /dev/tty
     else
-        IFS= read -r -p "${prompt} [default: ${default}]: " value || true
+        IFS= read -r value || true
     fi
 
-    printf '%s' "${value:-$default}"
+    final_value="${value:-$default}"
+    confirm_label="$(clean_prompt_label "$prompt")"
+    tty_print "${BFR}"
+    tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${final_value}${CL}"
+
+    printf '%s' "$final_value"
 }
 
 function read_secret_from_tty() {
@@ -3039,6 +3228,12 @@ INSTALL_BIOS_VERSION="$BIOS_VERSION"
 INSTALL_SYSTEM_PRODUCT="$SYSTEM_PRODUCT"
 INSTALL_SYSTEM_CHASSIS="$SYSTEM_CHASSIS"
 INSTALL_SYSTEM_TYPE="$SYSTEM_TYPE"
+INSTALL_OS_PRETTY="$OS_PRETTY"
+INSTALL_SYSTEM_ARCH="$SYSTEM_ARCH"
+INSTALL_CPU_MODEL_CLOCK="$CPU_MODEL_CLOCK"
+INSTALL_CPU_PHYSICAL_CORES="$CPU_PHYSICAL_CORES"
+INSTALL_CPU_THREADS="$CPU_THREADS"
+INSTALL_SYSTEM_RAM_GB="$SYSTEM_RAM_GB"
 INSTALL_IS_SSD="$IS_SSD"
 INSTALL_IGPU_FOUND="$IGPU_FOUND"
 INSTALL_DGPU_FOUND="$DGPU_FOUND"
@@ -3113,6 +3308,10 @@ INFO "BIOS version during install: \${INSTALL_BIOS_VERSION:-unknown}"
 INFO "System product during install: \${INSTALL_SYSTEM_PRODUCT:-unknown}"
 INFO "System chassis during install: \${INSTALL_SYSTEM_CHASSIS:-unknown}"
 INFO "System type detected during install: \$INSTALL_SYSTEM_TYPE"
+INFO "OS during install: \${INSTALL_OS_PRETTY:-unknown}"
+INFO "Architecture during install: \${INSTALL_SYSTEM_ARCH:-unknown}"
+INFO "CPU during install: \${INSTALL_CPU_MODEL_CLOCK:-unknown} / \${INSTALL_CPU_PHYSICAL_CORES:-0} cores / \${INSTALL_CPU_THREADS:-0} threads"
+INFO "System RAM during install: \${INSTALL_SYSTEM_RAM_GB:-0}GB"
 INFO "SSD detected during install: \$INSTALL_IS_SSD"
 INFO "Integrated GPU detected during install: \$INSTALL_IGPU_FOUND"
 INFO "Discrete GPU detected during install: \$INSTALL_DGPU_FOUND"
@@ -3405,6 +3604,13 @@ BIOS Version: $BIOS_VERSION
 System Product: $SYSTEM_PRODUCT
 System Chassis: $SYSTEM_CHASSIS
 System Type: $SYSTEM_TYPE
+System Vendor: $SYSTEM_VENDOR
+OS: $OS_PRETTY
+Architecture: $SYSTEM_ARCH
+CPU Model/Clock: $CPU_MODEL_CLOCK
+CPU Physical Cores: $CPU_PHYSICAL_CORES
+CPU Threads: $CPU_THREADS
+System RAM GB: $SYSTEM_RAM_GB
 SSD Detected: $IS_SSD
 Root FS Type: $ROOT_FS_TYPE
 Integrated GPU Name: $IGPU_NAME
@@ -3470,6 +3676,8 @@ function show_final_summary() {
     echo ""
 
     detail_line "SYSTEM TYPE" "$SYSTEM_TYPE"
+    detail_line "CPU" "${CPU_MODEL_CLOCK} / ${CPU_PHYSICAL_CORES} cores / ${CPU_THREADS} threads"
+    detail_line "SYSTEM RAM" "${SYSTEM_RAM_GB}GB"
     detail_line "STORAGE LAYOUT MODE" "$STORAGE_LAYOUT_MODE"
     detail_line "INTEGRATED GPU" "${IGPU_NAME} [${IGPU_VENDOR_DEVICE}] [${IGPU_BDF}]"
     detail_line "DISCRETE GPU" "${DGPU_NAME} [${DGPU_VENDOR_DEVICE}] [${DGPU_BDF}]"
