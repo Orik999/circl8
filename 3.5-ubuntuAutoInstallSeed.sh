@@ -971,7 +971,7 @@ wait_for_vm_ipv4() {
             return 1
         fi
 
-        tty_print "${BFR}${YW}timeout remaining:${CL} ${GN}${remaining}s${CL}"
+        tty_print "${BFR}${YW}  Timeout remaining:${CL} ${GN}${remaining}s${CL}"
         sleep "$interval_seconds"
     done
 }
