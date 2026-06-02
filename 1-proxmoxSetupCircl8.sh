@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.4.0"
+SCRIPT_VERSION="v1.4.1"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="batch3-preapply-ui-consistency"
+SCRIPT_BUILD="batch4-ui-storage-unit-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -354,6 +354,7 @@ function tty_read_yes_no_blocking() {
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
+    local confirm_mode="${3:-show}"
     local answer=""
     local key=""
     local default_label="Y/n"
@@ -414,7 +415,9 @@ function timed_yes_no() {
     confirm_label="$(clean_prompt_label "$prompt")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${final_label}${CL}"
+    if [ "$confirm_mode" != "quiet" ]; then
+        tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${final_label}${CL}"
+    fi
 
     echo "$answer"
 }
@@ -1143,7 +1146,6 @@ function print_gpu_detail_group() {
 
     [ -n "$lines" ] || return 0
 
-    echo ""
     echo -e "  ${YW}${title}:${CL}"
     while IFS='|' read -r bdf vendor_device boot_vga driver gpu_name vram; do
         [ -z "$bdf" ] && continue
@@ -1392,17 +1394,20 @@ function detect_system_ram_gb() {
 function disk_display_name() {
     local disk="$1"
     local model=""
-    local size=""
+    local size_bytes=""
+    local size_gb=""
     local kind=""
     local display=""
 
     model="$(lsblk -dn -o MODEL "/dev/${disk}" 2>/dev/null | xargs || true)"
-    size="$(lsblk -dn -o SIZE "/dev/${disk}" 2>/dev/null | xargs || true)"
-    size="${size/G/GB}"
+    size_bytes="$(lsblk -bdn -o SIZE "/dev/${disk}" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
+    if [[ "$size_bytes" =~ ^[0-9]+$ ]] && [ "$size_bytes" -gt 0 ]; then
+        size_gb="$(bytes_to_decimal_gb_ceil "$size_bytes")GB"
+    fi
     kind="$(disk_kind_label "$disk")"
 
-    if [ -n "$model" ] && [ -n "$size" ]; then
-        display="${model} ${size}"
+    if [ -n "$model" ] && [ -n "$size_gb" ]; then
+        display="${model} ${size_gb}"
     elif [ -n "$model" ]; then
         display="$model"
     elif [ -n "$kind" ]; then
@@ -1612,18 +1617,16 @@ function detect_gpu_and_collect_choice() {
     if [ "$DGPU_FOUND" == "yes" ]; then
         echo -e "${YW}Passthrough plan:${CL}"
         if [ "$SYSTEM_TYPE" == "Laptop" ] && [ "$IGPU_FOUND" == "yes" ]; then
-            echo -e "  ${YW}Keep integrated GPU reserved for host/laptop screen.${CL}"
+            echo -e "  ${BL}Integrated GPU:${CL} ${GN}reserved for host/laptop screen${CL}"
         fi
-        echo -e "  ${YW}Isolate discrete GPU same-slot functions only.${CL}"
+        echo -e "  ${BL}Isolation target:${CL} ${GN}discrete GPU same-slot functions only${CL}"
         echo ""
-        gpu_yn="$(timed_yes_no "Isolate discrete GPU for VM passthrough?" "y")"
+        gpu_yn="$(timed_yes_no "Isolate discrete GPU for VM passthrough?" "y" "quiet")"
 
         if [[ "$gpu_yn" =~ ^[Yy] ]]; then
             ENABLE_PASSTHROUGH="y"
-            msg_ok "Discrete GPU isolation selected."
         else
             ENABLE_PASSTHROUGH="n"
-            msg_warn "Discrete GPU isolation not selected."
         fi
     else
         msg_ok "No discrete GPU detected. GPU passthrough will be skipped"
@@ -1736,9 +1739,43 @@ function get_pve_free_bytes() {
     fi
 }
 
-function decimal_gb_to_mib_floor() {
+# --- STORAGE UNIT CONVERSION HELPERS ---
+# User-facing storage is decimal GB. LVM commands use binary MiB/GiB style units.
+# These helpers make the display/input boundary explicit so detected binary values are not merely relabelled as GB.
+function gib_to_display_gb() {
+    local gib="$1"
+    echo $(( (gib * 1073741824 + DECIMAL_GB_BYTES - 1) / DECIMAL_GB_BYTES ))
+}
+
+function display_gb_to_internal_gib() {
+    local gb="$1"
+    echo $(( (gb * DECIMAL_GB_BYTES + 1073741824 - 1) / 1073741824 ))
+}
+
+function display_gb_to_internal_mib_floor() {
     local gb="$1"
     echo $(( (gb * DECIMAL_GB_BYTES) / MIB_BYTES ))
+}
+
+function internal_mib_to_display_gb_floor() {
+    local mib="$1"
+    echo $(( (mib * MIB_BYTES) / DECIMAL_GB_BYTES ))
+}
+
+function internal_mib_to_display_gb_ceil() {
+    local mib="$1"
+    local bytes=$(( mib * MIB_BYTES ))
+
+    if [ "$bytes" -le 0 ]; then
+        echo "0"
+    else
+        echo $(( (bytes + DECIMAL_GB_BYTES - 1) / DECIMAL_GB_BYTES ))
+    fi
+}
+
+function decimal_gb_to_mib_floor() {
+    local gb="$1"
+    display_gb_to_internal_mib_floor "$gb"
 }
 
 function root_visible_gb_to_allocation_gb() {
@@ -1783,7 +1820,6 @@ function read_storage_gb_input() {
     local default_value="$2"
     local allow_zero="${3:-no}"
     local value=""
-    local confirm_label=""
 
     while true; do
         tty_print "${BFR}${YW}${prompt} [${default_value}]: ${CL}"
@@ -1798,9 +1834,7 @@ function read_storage_gb_input() {
 
         if [[ "$value" =~ ^[0-9]+$ ]]; then
             if [ "$allow_zero" == "yes" ] || [ "$value" -gt 0 ]; then
-                confirm_label="$(clean_prompt_label "$prompt")"
                 tty_print "${BFR}"
-                tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${value}${CL}"
                 echo "$value"
                 return 0
             fi
@@ -1852,9 +1886,9 @@ function detect_storage_layout_options() {
     pve_free_bytes="$(get_pve_free_bytes)"
 
     CURRENT_ROOT_SIZE_MIB="$(bytes_to_mib_floor "$root_size_bytes")"
-    CURRENT_ROOT_SIZE_GB="$(bytes_to_decimal_gb_ceil "$root_size_bytes")"
+    CURRENT_ROOT_SIZE_GB="$(internal_mib_to_display_gb_ceil "$CURRENT_ROOT_SIZE_MIB")"
     CURRENT_PVE_FREE_MIB="$(bytes_to_mib_floor "$pve_free_bytes")"
-    CURRENT_PVE_FREE_GB="$(bytes_to_decimal_gb_floor "$pve_free_bytes")"
+    CURRENT_PVE_FREE_GB="$(internal_mib_to_display_gb_floor "$CURRENT_PVE_FREE_MIB")"
     ROOT_DISK_SIZE_GB="$CURRENT_ROOT_SIZE_GB"
 
     return 0
@@ -1875,6 +1909,13 @@ function validate_storage_conflict_state() {
 }
 
 function calculate_storage_plan() {
+    local target_root_internal_gib=""
+    local reserve_internal_gib=""
+
+    target_root_internal_gib="$(display_gb_to_internal_gib "$TARGET_ROOT_SIZE_GB")"
+    reserve_internal_gib="$(display_gb_to_internal_gib "$PVE_FREE_RESERVE_GB")"
+    : "$target_root_internal_gib" "$reserve_internal_gib"
+
     TARGET_ROOT_SIZE_MIB="$(decimal_gb_to_mib_floor "$TARGET_ROOT_SIZE_GB")"
     ROOT_LV_ALLOCATION_GB="$(root_visible_gb_to_allocation_gb "$TARGET_ROOT_SIZE_GB")"
     ROOT_LV_ALLOCATION_MIB="$(decimal_gb_to_mib_floor "$ROOT_LV_ALLOCATION_GB")"
@@ -1886,14 +1927,14 @@ function calculate_storage_plan() {
 
     if [ "$ROOT_LV_ALLOCATION_MIB" -gt "$CURRENT_ROOT_SIZE_MIB" ]; then
         ROOT_GROWTH_MIB="$(( ROOT_LV_ALLOCATION_MIB - CURRENT_ROOT_SIZE_MIB ))"
-        ROOT_GROWTH_GB="$(mib_to_decimal_gb_floor "$ROOT_GROWTH_MIB")"
+        ROOT_GROWTH_GB="$(internal_mib_to_display_gb_floor "$ROOT_GROWTH_MIB")"
     fi
 
     LOCAL_LVM_DEFAULT_SIZE_MIB="$(( CURRENT_PVE_FREE_MIB - ROOT_GROWTH_MIB - PVE_FREE_RESERVE_MIB ))"
     if [ "$LOCAL_LVM_DEFAULT_SIZE_MIB" -lt 0 ]; then
         LOCAL_LVM_DEFAULT_SIZE_MIB="0"
     fi
-    LOCAL_LVM_DEFAULT_SIZE_GB="$(mib_to_decimal_gb_floor "$LOCAL_LVM_DEFAULT_SIZE_MIB")"
+    LOCAL_LVM_DEFAULT_SIZE_GB="$(internal_mib_to_display_gb_floor "$LOCAL_LVM_DEFAULT_SIZE_MIB")"
 }
 
 function validate_storage_builder_plan() {
@@ -1913,7 +1954,7 @@ function validate_storage_builder_plan() {
     fi
 
     total_required_mib="$(( ROOT_GROWTH_MIB + PVE_FREE_RESERVE_MIB + LOCAL_LVM_SIZE_MIB ))"
-    total_required_gb="$(mib_to_decimal_gb_floor "$total_required_mib")"
+    total_required_gb="$(internal_mib_to_display_gb_floor "$total_required_mib")"
 
     if [ "$total_required_mib" -gt "$CURRENT_PVE_FREE_MIB" ]; then
         msg_error "Storage plan needs about ${total_required_gb}GB decimal but only ${CURRENT_PVE_FREE_GB}GB decimal pve VG free space is available."
@@ -1995,7 +2036,7 @@ function collect_storage_layout_option() {
 
     calculate_storage_plan
 
-    create_lvm_yn="$(timed_yes_no "Create snapshot-ready local-lvm from remaining free space?" "y")"
+    create_lvm_yn="$(timed_yes_no "Create snapshot-ready local-lvm from remaining free space?" "y" "quiet")"
     if [[ "$create_lvm_yn" =~ ^[Nn] ]]; then
         CREATE_LOCAL_LVM="n"
         LOCAL_LVM_SIZE_GB="0"
@@ -2004,7 +2045,7 @@ function collect_storage_layout_option() {
         if [ "$LOCAL_LVM_DEFAULT_SIZE_GB" -le 0 ]; then
             msg_error "No pve VG space remains for local-lvm after root target growth and reserve. Reduce target root size or reserve, or choose not to create local-lvm."
         fi
-        LOCAL_LVM_SIZE_GB="$(read_storage_gb_input "Allocate local-lvm size in GB [all available: ${LOCAL_LVM_DEFAULT_SIZE_GB}GB]" "$LOCAL_LVM_DEFAULT_SIZE_GB" "no")"
+        LOCAL_LVM_SIZE_GB="$(read_storage_gb_input "Set local-lvm size in GB [max available: ${LOCAL_LVM_DEFAULT_SIZE_GB}]" "$LOCAL_LVM_DEFAULT_SIZE_GB" "no")"
     fi
 
     validate_storage_builder_plan
@@ -2099,7 +2140,7 @@ function collect_user_options() {
     echo -e "  ${YW}Keep public HTTP/HTTPS on the Ubuntu VM, not on the Proxmox host.${CL}"
     echo -e "  ${YW}Router port-forwarding should usually point to the VM.${CL}"
     echo ""
-    public_web_yn="$(timed_yes_no "Expose public HTTP/HTTPS 80/443 on Proxmox host firewall?" "n")"
+    public_web_yn="$(timed_yes_no "Expose public HTTP/HTTPS 80/443 on Proxmox host firewall?" "n" "quiet")"
 
     if [[ "$public_web_yn" =~ ^[Yy] ]]; then
         ALLOW_PUBLIC_WEB="y"
@@ -2119,7 +2160,7 @@ function final_start_prompt() {
     section "READY TO APPLY"
 
     echo -e "${YW}No changes have been applied yet.${CL}"
-    echo -e "${YW}Review the plan above before continuing.${CL}"
+    echo -e "${YW}Review the plan below before continuing.${CL}"
     echo ""
 
     host_summary="${SYSTEM_VENDOR} ${SYSTEM_PRODUCT}"
