@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.15"
+SCRIPT_VERSION="v1.2.16"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="dhcp-start-ip-detection-polish"
+SCRIPT_BUILD="final-spacing-cleanup"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -951,7 +951,6 @@ wait_for_vm_ipv4() {
 
     tty_println "${BL}Detecting VM IPv4 from QEMU Guest Agent:${CL}"
     tty_println "  VM: ${GN}${TARGET_VM_NAME} (${vmid})${CL}"
-    tty_println ""
 
     while true; do
         now_time="$(date +%s)"
@@ -1850,7 +1849,6 @@ show_ubuntu_pro_note() {
     echo -e "  ${BL}setup location:${CL} ${GN}inside Ubuntu VM${CL}"
     echo -e "  ${BL}guided setup:${CL} ${GN}Script 4${CL}"
     echo -e "  ${BL}manual command:${CL} ${GN}sudo pro attach <token>${CL}"
-    echo ""
 }
 # =========================================================
 #  ISO / AUTOINSTALL GENERATION
@@ -2164,7 +2162,6 @@ show_apply_summary() {
     echo -e "  ${BL}delete generated ISO after install:${CL} ${ANS}$(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")${CL}"
     echo -e "  ${BL}remove temporary workspace:${CL} ${ANS}$(yn_word "$CLEANUP_TEMP_WORKFILES")${CL}"
     echo -e "  ${BL}remove ISO generation tools after finish:${CL} ${ANS}$(yn_word "$CLEANUP_INSTALLED_TOOLS")${CL}"
-    echo ""
 }
 # --- 58. ATTACH AND START INSTALL ---
 attach_iso_and_start_install() {
