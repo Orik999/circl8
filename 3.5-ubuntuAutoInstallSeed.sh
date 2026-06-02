@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.14"
+SCRIPT_VERSION="v1.2.15"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="final-flow-readability-polish"
+SCRIPT_BUILD="dhcp-start-ip-detection-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -944,17 +944,20 @@ wait_for_vm_ipv4() {
     local start_time=""
     local now_time=""
     local elapsed=""
+    local remaining=""
     local ip=""
 
     start_time="$(date +%s)"
 
-    tty_println "${BL}Waiting for IPv4 from QEMU Guest Agent:${CL}"
-    tty_println "  timeout: ${GN}${timeout_seconds}s${CL}"
+    tty_println "${BL}Detecting VM IPv4 from QEMU Guest Agent:${CL}"
+    tty_println "  VM: ${GN}${TARGET_VM_NAME} (${vmid})${CL}"
     tty_println ""
 
     while true; do
         now_time="$(date +%s)"
         elapsed=$(( now_time - start_time ))
+        remaining=$(( timeout_seconds - elapsed ))
+        [ "$remaining" -lt 0 ] && remaining="0"
 
         ip="$(get_vm_ipv4_from_guest_agent "$vmid" || true)"
 
@@ -969,7 +972,7 @@ wait_for_vm_ipv4() {
             return 1
         fi
 
-        tty_print "${BFR}${YW}Waiting for IPv4: elapsed ${elapsed}s / ${timeout_seconds}s${CL}"
+        tty_print "${BFR}${YW}timeout remaining:${CL} ${GN}${remaining}s${CL}"
         sleep "$interval_seconds"
     done
 }
@@ -1301,15 +1304,14 @@ attach_start_display() {
 collect_attach_start_decision() {
     local attach_yn=""
 
-    attach_yn="$(timed_yes_no "Start unattended Ubuntu install after ISO preparation?" "y")"
+    echo -e "${WARN} ${RD}Starting Ubuntu autoinstall will wipe VM disk.${CL}"
+    attach_yn="$(timed_yes_no "Start unattended Ubuntu install?" "y")"
 
     if [[ "$attach_yn" =~ ^[Nn] ]]; then
         ATTACH_START_APPROVED="no"
     else
         ATTACH_START_APPROVED="yes"
     fi
-
-    detail_line "Start unattended Ubuntu install after ISO preparation" "$(attach_start_display)"
 }
 
 collect_missing_iso_tools_decision() {
@@ -1678,7 +1680,6 @@ detect_vm_mac() {
     echo ""
     echo -e "${YW}NETWORK / DHCP:${CL}"
     echo -e "  ${BL}VM MAC ADDRESS:${CL} ${GN}${TARGET_VM_MAC}${CL}"
-    echo -e "  ${BL}Ubuntu network mode:${CL} ${GN}DHCP${CL}"
     echo -e "  ${YW}Reminder: reserve this MAC in your router if you want a fixed VM IP.${CL}"
 }
 
@@ -1766,10 +1767,11 @@ detect_ssh_keys() {
 collect_network_inputs() {
     local dhcp_yn=""
 
-    dhcp_yn="$(timed_yes_no "Use DHCP networking inside Ubuntu?" "y" "Ubuntu network mode" "DHCP" "static")"
+    dhcp_yn="$(timed_yes_no "Use DHCP networking inside Ubuntu?" "y")"
 
     if [[ "$dhcp_yn" =~ ^[Nn] ]]; then
         NETWORK_MODE="static"
+        echo -e "${CM} ${BL}Ubuntu network mode:${CL} ${ANS}static${CL}"
 
         section "NETWORK CONFIGURATION"
 
@@ -1792,6 +1794,7 @@ collect_network_inputs() {
         done
     else
         NETWORK_MODE="dhcp"
+        echo -e "${CM} ${BL}Ubuntu network mode:${CL} ${ANS}DHCP${CL}"
     fi
 }
 # --- 44. POST-INSTALL INPUTS ---
@@ -1801,6 +1804,7 @@ collect_post_install_options() {
     section "POST-INSTALL OPTIONS"
 
     INSTALL_WAIT_MINUTES="$(timed_number_input "Enter autoinstall wait timeout in minutes" "$DEFAULT_INSTALL_WAIT_MINUTES" "10" "240")"
+    SSH_IP_DETECT_TIMEOUT_SECONDS="$(timed_number_input "Enter VM IPv4 detection timeout in seconds" "$SSH_IP_DETECT_TIMEOUT_SECONDS" "30" "600")"
 
     start_installed_yn="$(timed_yes_no "Start installed Ubuntu VM after cleanup?" "y")"
     [[ "$start_installed_yn" =~ ^[Nn] ]] && POST_INSTALL_START_VM="n" || POST_INSTALL_START_VM="y"
@@ -2153,17 +2157,13 @@ show_apply_summary() {
     echo -e "  ${BL}timeout:${CL} ${ANS}${INSTALL_WAIT_MINUTES} minutes${CL}"
     echo -e "  ${BL}start VM after cleanup:${CL} ${ANS}$(yn_word "$POST_INSTALL_START_VM")${CL}"
     echo -e "  ${BL}IP detection timeout:${CL} ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
-    echo -e "  ${BL}start unattended install after ISO preparation:${CL} ${ANS}$(attach_start_display)${CL}"
+    echo -e "  ${BL}start unattended Ubuntu install:${CL} ${ANS}$(attach_start_display)${CL}"
     echo ""
 
     echo -e "${YW}CLEANUP:${CL}"
     echo -e "  ${BL}delete generated ISO after install:${CL} ${ANS}$(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")${CL}"
     echo -e "  ${BL}remove temporary workspace:${CL} ${ANS}$(yn_word "$CLEANUP_TEMP_WORKFILES")${CL}"
     echo -e "  ${BL}remove ISO generation tools after finish:${CL} ${ANS}$(yn_word "$CLEANUP_INSTALLED_TOOLS")${CL}"
-    echo ""
-
-    echo -e "${RD}WARNING:${CL}"
-    echo -e "  ${RD}Starting this VM can begin Ubuntu autoinstall and wipe its VM disk.${CL}"
     echo ""
 }
 # --- 58. ATTACH AND START INSTALL ---
@@ -2509,8 +2509,8 @@ demo_network_configuration() {
 demo_post_install_options() {
     section "POST-INSTALL OPTIONS"
     demo_line "autoinstall wait timeout: ${INSTALL_WAIT_MINUTES} minutes"
+    demo_line "VM IPv4 detection timeout: ${SSH_IP_DETECT_TIMEOUT_SECONDS}s"
     demo_line "start installed VM after cleanup: $(yn_word "$POST_INSTALL_START_VM")"
-    demo_line "IP detection timeout: ${SSH_IP_DETECT_TIMEOUT_SECONDS}s"
 }
 
 demo_iso_selection() {
@@ -2535,7 +2535,8 @@ demo_preflight_questions() {
     demo_line "install missing ISO tools: $(install_missing_tools_display)"
     demo_line "VM status before apply: ${VM_STATUS_AT_PREFLIGHT}"
     demo_line "shutdown before apply: $(vm_shutdown_display)"
-    demo_line "start unattended Ubuntu install after ISO preparation: $(attach_start_display)"
+    echo -e "${WARN} ${RD}Starting Ubuntu autoinstall will wipe VM disk.${CL}"
+    demo_line "start unattended Ubuntu install: $(attach_start_display)"
 }
 
 demo_autoinstall_iso_preparation() {
@@ -2583,7 +2584,7 @@ demo_ready_to_apply() {
     echo -e "  timeout: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
     echo -e "  start VM after cleanup: ${GN}$(yn_word "$POST_INSTALL_START_VM")${CL}"
     echo -e "  IP detection timeout: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
-    echo -e "  start unattended install after ISO preparation: ${GN}$(attach_start_display)${CL}"
+    echo -e "  start unattended Ubuntu install: ${GN}$(attach_start_display)${CL}"
     echo ""
 
     echo -e "${YW}CLEANUP:${CL}"
@@ -2591,8 +2592,6 @@ demo_ready_to_apply() {
     echo -e "  remove temporary workspace: ${GN}$(yn_word "$CLEANUP_TEMP_WORKFILES")${CL}"
     echo -e "  remove ISO generation tools after finish: ${GN}$(yn_word "$CLEANUP_INSTALLED_TOOLS")${CL}"
     echo ""
-
-    echo -e "${RD}WARNING:${CL} Starting this VM can begin Ubuntu autoinstall and wipe its VM disk."
 }
 
 demo_preparing_system() {
@@ -2640,7 +2639,6 @@ run_ui_demo() {
     demo_vm_selection
     demo_identity_locale
     demo_ssh_key_detection
-    demo_network_configuration
     demo_post_install_options
     demo_iso_selection
     demo_ubuntu_pro_note
@@ -2674,9 +2672,9 @@ main() {
 
     select_vm
     detect_vm_mac
+    collect_network_inputs
     collect_user_locale_inputs
     detect_ssh_keys
-    collect_network_inputs
     collect_post_install_options
     select_ubuntu_iso
     show_ubuntu_pro_note
