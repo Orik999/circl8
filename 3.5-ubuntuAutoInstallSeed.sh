@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.16"
+SCRIPT_VERSION="v1.2.17"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="final-spacing-cleanup"
+SCRIPT_BUILD="final-next-step-router-reminder"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -1322,7 +1322,7 @@ collect_missing_iso_tools_decision() {
     if [ "${#MISSING_TOOL_PACKAGES[@]}" -gt 0 ]; then
         msg_warn "Missing required tools: ${MISSING_TOOL_PACKAGES[*]}"
         echo ""
-        install_yn="$(timed_yes_no "Install missing ISO tools now?" "y")"
+        install_yn="$(timed_yes_no "Install missing ISO tools?" "y")"
 
         if [[ "$install_yn" =~ ^[Nn] ]]; then
             INSTALL_MISSING_TOOLS_APPROVED="no"
@@ -2399,6 +2399,7 @@ show_final_output() {
         echo -e "  ${BL}SSH into Ubuntu:${CL} ${GN}ssh ${TARGET_USERNAME}@<assigned-ip>${CL}"
     fi
     echo -e "  ${BL}Run inside Ubuntu:${CL} ${GN}4-ubuntuVMsetup.sh${CL}"
+    echo -e "  ${BL}Reserve MAC in router:${CL} ${GN}${TARGET_VM_MAC} for fixed VM IP.${CL}"
     echo ""
     echo -e "${FLASH_ON}${RD}DO NOT RUN 4-ubuntuVMsetup.sh ON THE PROXMOX HOST.${FLASH_OFF}${CL}"
     echo ""
