@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.7"
-SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script1-final-display-polish"
+SCRIPT_VERSION="v1.3.8"
+SCRIPT_UPDATED="2026-06-02"
+SCRIPT_BUILD="proxmox92-hardware-authority-fixes"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -40,6 +40,11 @@ VERIFY_LOG="/var/log/pve9-postinstall-verify.log"
 COMPLETED_MARKER="/root/.pve9-postinstall-completed"
 
 HOSTNAME_SHORT="$(hostname -s)"
+PROXMOX_VERSION=""
+PROXMOX_KERNEL=""
+BIOS_VERSION=""
+SYSTEM_PRODUCT=""
+SYSTEM_CHASSIS=""
 SYSTEM_TYPE="Unknown"
 CHASSIS="Unknown"
 IS_VM="no"
@@ -63,6 +68,20 @@ DGPU_IDS=""
 DGPU_BDFS=""
 DGPU_VENDOR_IDS=""
 GPU_SUMMARY=""
+IGPU_NAME="not-detected"
+IGPU_BDF="not-detected"
+IGPU_VENDOR_DEVICE="not-detected"
+IGPU_DRIVER="not-detected"
+IGPU_BOOT_VGA="not-detected"
+IGPU_USE="host/laptop display"
+DGPU_NAME="not-detected"
+DGPU_BDF="not-detected"
+DGPU_VENDOR_DEVICE="not-detected"
+DGPU_DRIVER="not-detected"
+DGPU_VRAM="not detected"
+DGPU_BOOT_VGA="not-detected"
+DGPU_USE="VM passthrough candidate"
+GPU_SAME_SLOT_FUNCTIONS="none"
 
 STORAGE_SUMMARY=""
 ROOT_FS_TYPE=""
@@ -515,7 +534,7 @@ function countdown_exit() {
 # =========================================================
 
 # --- 20. PCI VENDOR NAME HELPER ---
-# Converts PCI vendor IDs into readable vendor names without using lspci.
+# Converts PCI vendor IDs into readable vendor names without using PCI command-line probing.
 function pci_vendor_name() {
     local vendor="$1"
 
@@ -529,7 +548,7 @@ function pci_vendor_name() {
 }
 
 # --- 21. GPU TYPE CLASSIFIER ---
-# Classifies GPUs using sysfs vendor/class/boot_vga instead of fragile lspci text matching.
+# Classifies GPUs using sysfs vendor/class/boot_vga instead of fragile PCI text matching.
 # This avoids misclassifying AMD APUs as passthrough dGPUs on laptops.
 function classify_gpu_type() {
     local vendor="$1"
@@ -567,9 +586,187 @@ function classify_gpu_type() {
     fi
 }
 
+
+# --- PCI/GPU DISPLAY NAME HELPERS ---
+# Build display-only GPU names from sysfs IDs and local pci.ids. No PCI command-line probing, vendor tools or online lookups are used.
+function normalize_pci_hex_id() {
+    local value="$1"
+    value="${value#0x}"
+    printf '%s\n' "$value" | tr '[:upper:]' '[:lower:]'
+}
+
+function first_readable_pci_ids_file() {
+    local candidate=""
+
+    for candidate in /usr/share/misc/pci.ids /usr/share/hwdata/pci.ids /usr/share/doc/pci.ids; do
+        [ -r "$candidate" ] && { echo "$candidate"; return 0; }
+    done
+
+    return 1
+}
+
+function lookup_pci_ids_device_name() {
+    local vendor_id="$1"
+    local device_id="$2"
+    local pci_ids_file=""
+
+    pci_ids_file="$(first_readable_pci_ids_file || true)"
+    [ -n "$pci_ids_file" ] || return 1
+
+    awk -v vendor="$vendor_id" -v device="$device_id" '
+        BEGIN { in_vendor=0 }
+        $0 ~ "^" vendor "[[:space:]]" { in_vendor=1; next }
+        /^[0-9a-fA-F]{4}[[:space:]]/ { if (in_vendor) exit; in_vendor=0 }
+        in_vendor && $1 == device {
+            $1=""; sub(/^[[:space:]]+/, ""); print; exit
+        }
+    ' "$pci_ids_file" 2>/dev/null | xargs || true
+}
+
+function gpu_vendor_label_from_id() {
+    local vendor_id="$1"
+
+    case "$vendor_id" in
+        8086) echo "Intel" ;;
+        10de) echo "NVIDIA" ;;
+        1002|1022) echo "AMD" ;;
+        *) echo "GPU" ;;
+    esac
+}
+
+function cleanup_gpu_model_name() {
+    local vendor_label="$1"
+    local model="$2"
+
+    model="$(printf '%s' "$model" | sed -E 's/ Corporation//g; s/\(R\)//g; s/\(TM\)//g; s/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/ /g')"
+
+    case "$vendor_label" in
+        Intel)
+            model="$(printf '%s' "$model" | sed -E 's/^Intel[[:space:]]+//; s/^HD Graphics/HD Graphics/; s/^UHD Graphics/UHD Graphics/')"
+            ;;
+        NVIDIA)
+            model="$(printf '%s' "$model" | sed -E 's/^NVIDIA[[:space:]]+//; s/^Corporation[[:space:]]+//')"
+            if [[ "$model" =~ ^([^[]+)[[:space:]]+\[([^]]+)\]$ ]]; then
+                model="${BASH_REMATCH[2]} [$(echo "${BASH_REMATCH[1]}" | xargs)]"
+            fi
+            ;;
+        AMD)
+            model="$(printf '%s' "$model" | sed -E 's/^Advanced Micro Devices, Inc\. \[AMD\/ATI\][[:space:]]+//; s/^AMD\/ATI[[:space:]]+//; s/^AMD[[:space:]]+//')"
+            ;;
+    esac
+
+    if [ -n "$model" ] && [ "$model" != "$vendor_label" ]; then
+        echo "${vendor_label} ${model}"
+    else
+        echo "${vendor_label} GPU"
+    fi
+}
+
+function get_pci_driver_for_bdf() {
+    local bdf="$1"
+    local driver_path="/sys/bus/pci/devices/${bdf}/driver"
+
+    if [ -L "$driver_path" ]; then
+        basename "$(readlink -f "$driver_path" 2>/dev/null || true)"
+    else
+        echo "not-bound"
+    fi
+}
+
+function gpu_display_name_from_ids() {
+    local vendor_hex="$1"
+    local device_hex="$2"
+    local vendor_id=""
+    local device_id=""
+    local vendor_label=""
+    local model=""
+
+    vendor_id="$(normalize_pci_hex_id "$vendor_hex")"
+    device_id="$(normalize_pci_hex_id "$device_hex")"
+    vendor_label="$(gpu_vendor_label_from_id "$vendor_id")"
+    model="$(lookup_pci_ids_device_name "$vendor_id" "$device_id")"
+
+    if [ -n "$model" ]; then
+        cleanup_gpu_model_name "$vendor_label" "$model"
+    else
+        echo "${vendor_label} GPU"
+    fi
+}
+
+function detect_nouveau_vram_for_bdf() {
+    local bdf="$1"
+    local log_text=""
+    local vram=""
+
+    log_text="$( { journalctl -k -b --no-pager 2>/dev/null || dmesg 2>/dev/null || true; } | grep -F "nouveau ${bdf}:" || true )"
+
+    vram="$(printf '%s\n' "$log_text" | sed -nE 's/.*fb: ([0-9]+ MiB [A-Za-z0-9]+).*/\1/p' | head -n 1)"
+    if [ -n "$vram" ]; then
+        echo "$vram"
+        return 0
+    fi
+
+    vram="$(printf '%s\n' "$log_text" | sed -nE 's/.*VRAM: ([0-9]+ MiB).*/\1/p' | head -n 1)"
+    [ -n "$vram" ] && echo "$vram" || echo "not detected"
+}
+
+function detect_amd_vram_for_bdf() {
+    local bdf="$1"
+    local card=""
+    local card_bdf=""
+    local bytes=""
+    local mib=""
+    local vram=""
+
+    for card in /sys/class/drm/card*/device; do
+        [ -e "$card" ] || continue
+        card_bdf="$(basename "$(readlink -f "$card" 2>/dev/null || true)")"
+        [ "$card_bdf" == "$bdf" ] || continue
+
+        if [ -r "${card}/mem_info_vram_total" ]; then
+            bytes="$(cat "${card}/mem_info_vram_total" 2>/dev/null || true)"
+            if [[ "$bytes" =~ ^[0-9]+$ ]] && [ "$bytes" -gt 0 ]; then
+                mib=$(( bytes / 1048576 ))
+                echo "${mib} MiB"
+                return 0
+            fi
+        fi
+    done
+
+    vram="$( { journalctl -k -b --no-pager 2>/dev/null || dmesg 2>/dev/null || true; } | grep -F "$bdf" | grep -Ei 'vram|VRAM' | sed -nE 's/.*VRAM[^0-9]*([0-9]+[[:space:]]*(MiB|MB|GiB|GB)).*/\1/p' | head -n 1 | xargs || true )"
+    [ -n "$vram" ] && echo "$vram"
+}
+
+function detect_gpu_vram_for_bdf() {
+    local bdf="$1"
+    local vendor_hex="$2"
+    local driver="$3"
+    local vendor_id=""
+    local vram=""
+
+    vendor_id="$(normalize_pci_hex_id "$vendor_hex")"
+
+    case "$vendor_id" in
+        10de)
+            if [ "$driver" == "nouveau" ]; then
+                detect_nouveau_vram_for_bdf "$bdf"
+            else
+                echo "not detected"
+            fi
+            ;;
+        1002|1022)
+            vram="$(detect_amd_vram_for_bdf "$bdf")"
+            [ -n "$vram" ] && echo "$vram" || echo "not detected"
+            ;;
+        *)
+            echo "not detected"
+            ;;
+    esac
+}
+
 # --- 22. SYSFS GPU DETECTION HELPER ---
-# Detects GPUs through /sys/bus/pci/devices instead of lspci.
-# This avoids lspci hangs on some fresh Proxmox/laptop PCI states.
+# Detects GPUs through /sys/bus/pci/devices instead of PCI command-line probing.
+# This avoids PCI query hangs on some fresh Proxmox/laptop PCI states.
 function detect_gpus_sysfs() {
     local dev=""
     local bdf=""
@@ -577,7 +774,6 @@ function detect_gpus_sysfs() {
     local vendor=""
     local device=""
     local boot_vga=""
-    local vendor_name=""
     local gpu_type=""
     local line=""
     local gpu_records=""
@@ -587,6 +783,9 @@ function detect_gpus_sysfs() {
     local func_vendor=""
     local func_device=""
     local id=""
+    local driver=""
+    local gpu_name=""
+    local vram=""
 
     GPU_ALL=""
     IGPU_LINES=""
@@ -597,6 +796,18 @@ function detect_gpus_sysfs() {
     DGPU_BDFS=""
     DGPU_VENDOR_IDS=""
     GPU_SUMMARY=""
+    IGPU_NAME="not-detected"
+    IGPU_BDF="not-detected"
+    IGPU_VENDOR_DEVICE="not-detected"
+    IGPU_DRIVER="not-detected"
+    IGPU_BOOT_VGA="not-detected"
+    DGPU_NAME="not-detected"
+    DGPU_BDF="not-detected"
+    DGPU_VENDOR_DEVICE="not-detected"
+    DGPU_DRIVER="not-detected"
+    DGPU_VRAM="not detected"
+    DGPU_BOOT_VGA="not-detected"
+    GPU_SAME_SLOT_FUNCTIONS="none"
 
     for dev in /sys/bus/pci/devices/*; do
         [ -e "$dev/class" ] || continue
@@ -625,20 +836,38 @@ function detect_gpus_sysfs() {
     while IFS='|' read -r bdf vendor device class boot_vga; do
         [ -z "$bdf" ] && continue
 
-        vendor_name="$(pci_vendor_name "$vendor")"
         gpu_type="$(classify_gpu_type "$vendor" "$class" "$boot_vga" "$gpu_count")"
-        line="${bdf} ${vendor_name} GPU [${vendor#0x}:${device#0x}] boot_vga=${boot_vga}"
+        driver="$(get_pci_driver_for_bdf "$bdf")"
+        gpu_name="$(gpu_display_name_from_ids "$vendor" "$device")"
+        vram="$(detect_gpu_vram_for_bdf "$bdf" "$vendor" "$driver")"
+        line="${bdf}|${vendor#0x}:${device#0x}|${boot_vga}|${driver}|${gpu_name}|${vram}"
 
         GPU_ALL+="${line}"$'\n'
 
         if [ "$gpu_type" == "integrated" ]; then
             IGPU_LINES+="${line}"$'\n'
             IGPU_FOUND="yes"
+            if [ "$IGPU_BDF" == "not-detected" ]; then
+                IGPU_NAME="$gpu_name"
+                IGPU_BDF="$bdf"
+                IGPU_VENDOR_DEVICE="${vendor#0x}:${device#0x}"
+                IGPU_DRIVER="$driver"
+                IGPU_BOOT_VGA="$boot_vga"
+            fi
         elif [ "$gpu_type" == "discrete" ]; then
             DGPU_LINES+="${line}"$'\n'
             DGPU_BDFS+="${bdf} "
             DGPU_FOUND="yes"
             DGPU_VENDOR_IDS+="${vendor} "
+
+            if [ "$DGPU_BDF" == "not-detected" ]; then
+                DGPU_NAME="$gpu_name"
+                DGPU_BDF="$bdf"
+                DGPU_VENDOR_DEVICE="${vendor#0x}:${device#0x}"
+                DGPU_DRIVER="$driver"
+                DGPU_BOOT_VGA="$boot_vga"
+                DGPU_VRAM="$vram"
+            fi
 
             gpu_slot="${bdf%.*}"
 
@@ -655,6 +884,14 @@ function detect_gpus_sysfs() {
                         DGPU_IDS+="${id},"
                     fi
                 fi
+
+                if [[ " ${GPU_SAME_SLOT_FUNCTIONS} " != *" $(basename "$func") "* ]]; then
+                    if [ "$GPU_SAME_SLOT_FUNCTIONS" == "none" ]; then
+                        GPU_SAME_SLOT_FUNCTIONS="$(basename "$func")"
+                    else
+                        GPU_SAME_SLOT_FUNCTIONS+=" $(basename "$func")"
+                    fi
+                fi
             done
         fi
     done <<< "$gpu_records"
@@ -666,18 +903,19 @@ function detect_gpus_sysfs() {
 # Builds a user-friendly integrated/discrete GPU summary from detected sysfs records.
 function build_gpu_summary() {
     local out=""
+    local bdf="" vendor_device="" boot_vga="" driver="" gpu_name="" vram=""
 
     if [ -n "$IGPU_LINES" ]; then
-        while read -r line; do
-            [ -z "$line" ] && continue
-            out+="Integrated: ${line}; "
+        while IFS='|' read -r bdf vendor_device boot_vga driver gpu_name vram; do
+            [ -z "$bdf" ] && continue
+            out+="Integrated: ${gpu_name} [${vendor_device}] [${bdf}] boot_vga=${boot_vga}; "
         done <<< "$IGPU_LINES"
     fi
 
     if [ -n "$DGPU_LINES" ]; then
-        while read -r line; do
-            [ -z "$line" ] && continue
-            out+="Discrete: ${line}; "
+        while IFS='|' read -r bdf vendor_device boot_vga driver gpu_name vram; do
+            [ -z "$bdf" ] && continue
+            out+="Discrete: ${gpu_name} [${vendor_device}] [${bdf}] VRAM=${vram} boot_vga=${boot_vga}; "
         done <<< "$DGPU_LINES"
     fi
 
@@ -775,15 +1013,22 @@ function detected_machine_gpu_label() {
 function print_gpu_detail_group() {
     local title="$1"
     local lines="$2"
-    local line=""
+    local use_label="$3"
+    local bdf="" vendor_device="" boot_vga="" driver="" gpu_name="" vram=""
 
     [ -n "$lines" ] || return 0
 
     echo ""
     echo -e "${BL}${title}:${CL}"
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        echo -e "  ${GN}${line}${CL}"
+    while IFS='|' read -r bdf vendor_device boot_vga driver gpu_name vram; do
+        [ -z "$bdf" ] && continue
+        echo -e "  ${GN}${gpu_name} [${vendor_device}] [${bdf}]${CL}"
+        if [ "$title" == "Discrete GPU" ]; then
+            echo -e "  ${BL}VRAM:${CL} ${GN}${vram:-not detected}${CL}"
+        fi
+        echo -e "  ${BL}driver:${CL} ${GN}${driver:-not-detected}${CL}"
+        echo -e "  ${BL}boot_vga:${CL} ${GN}${boot_vga}${CL}"
+        echo -e "  ${BL}use:${CL} ${GN}${use_label}${CL}"
     done <<< "$lines"
 }
 
@@ -917,6 +1162,29 @@ function show_fresh_install_warning() {
     echo -e "${YW}${CLF}Intended for FRESH Proxmox VE 9 installs only.${CL}"
 }
 
+
+# --- PROXMOX PLATFORM DETECTION ---
+# Captures exact host platform data before any isolation or post-install changes.
+function detect_proxmox_platform() {
+    local pve_raw=""
+
+    pve_raw="$(pveversion 2>/dev/null || true)"
+    PROXMOX_VERSION="$(printf '%s\n' "$pve_raw" | sed -nE 's|^pve-manager/([^/]+)/.*|\1|p' | head -n 1)"
+    [ -n "$PROXMOX_VERSION" ] || PROXMOX_VERSION="unknown"
+
+    PROXMOX_KERNEL="$(uname -r 2>/dev/null || echo unknown)"
+
+    if command -v dmidecode >/dev/null 2>&1; then
+        BIOS_VERSION="$(dmidecode -s bios-version 2>/dev/null | head -n 1 | xargs || true)"
+        SYSTEM_PRODUCT="$(dmidecode -s system-product-name 2>/dev/null | head -n 1 | xargs || true)"
+        SYSTEM_CHASSIS="$(dmidecode -s chassis-type 2>/dev/null | head -n 1 | xargs || true)"
+    fi
+
+    [ -n "$BIOS_VERSION" ] || BIOS_VERSION="unknown"
+    [ -n "$SYSTEM_PRODUCT" ] || SYSTEM_PRODUCT="unknown"
+    [ -n "$SYSTEM_CHASSIS" ] || SYSTEM_CHASSIS="unknown"
+}
+
 # --- 31. PRE-INSTALL HARDWARE AUDIT ---
 # Detects CPU vendor, chassis/system type, virtual machine state, SSD presence, LAN CIDR and storage summary.
 function audit_hardware() {
@@ -925,6 +1193,8 @@ function audit_hardware() {
     section "PRE-INSTALL HARDWARE AUDIT"
 
     msg_info "Auditing host hardware"
+
+    detect_proxmox_platform
 
     CPU_TYPE="$(grep -m1 "vendor_id" /proc/cpuinfo | awk '{print $3}' || true)"
 
@@ -939,7 +1209,7 @@ function audit_hardware() {
     fi
 
     if command -v dmidecode >/dev/null 2>&1; then
-        CHASSIS="$(dmidecode -s chassis-type 2>/dev/null || echo "Unknown")"
+        CHASSIS="${SYSTEM_CHASSIS:-Unknown}"
     fi
 
     if [[ "$CHASSIS" =~ (Laptop|Notebook|Portable) ]]; then
@@ -968,6 +1238,12 @@ function audit_hardware() {
     ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
 
     msg_ok "HOST HARDWARE AUDITED"
+    echo ""
+    echo -e "${BL}PROXMOX PLATFORM:${CL}"
+    echo -e "  ${BL}Proxmox:${CL} ${GN}${PROXMOX_VERSION}${CL}"
+    echo -e "  ${BL}Kernel:${CL} ${GN}${PROXMOX_KERNEL}${CL}"
+    echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_VERSION}${CL}"
+    echo -e "  ${BL}System:${CL} ${GN}${SYSTEM_PRODUCT}${CL}"
 }
 
 # --- 32. FRESH INSTALL DETECTION ---
@@ -1028,8 +1304,8 @@ function detect_gpu_and_collect_choice() {
     msg_ok "$(detected_machine_gpu_label)"
 
     if [ -n "${IGPU_LINES}${DGPU_LINES}" ]; then
-        print_gpu_detail_group "Integrated GPU" "$IGPU_LINES"
-        print_gpu_detail_group "Discrete GPU" "$DGPU_LINES"
+        print_gpu_detail_group "Integrated GPU" "$IGPU_LINES" "host/laptop display"
+        print_gpu_detail_group "Discrete GPU" "$DGPU_LINES" "VM passthrough candidate"
         echo ""
     else
         echo -e " ${BL}━━━━━▶${CL} No GPU details detected"
@@ -1543,6 +1819,12 @@ function final_start_prompt() {
 
     section "READY TO APPLY"
 
+    echo -e "${BL}PROXMOX PLATFORM:${CL}"
+    echo -e "  Proxmox: ${GN}${PROXMOX_VERSION}${CL}"
+    echo -e "  Kernel: ${GN}${PROXMOX_KERNEL}${CL}"
+    echo -e "  BIOS: ${GN}${BIOS_VERSION}${CL}"
+    echo -e "  System: ${GN}${SYSTEM_PRODUCT}${CL}"
+    echo ""
     echo -e "SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
     echo -e "ROOT FS: ${GN}${ROOT_FS_TYPE:-unknown}${CL}"
     echo -e "STORAGE: ${GN}${STORAGE_SUMMARY:-unknown}${CL}"
@@ -1886,7 +2168,7 @@ function apply_gpu_isolation() {
     fi
 
     msg_info "Adding VFIO modules to /etc/modules"
-    for module in vfio vfio_iommu_type1 vfio_pci vfio_virqfd; do
+    for module in vfio vfio_iommu_type1 vfio_pci; do
         grep -qxF "$module" /etc/modules || echo "$module" >> /etc/modules
     done
     msg_ok "VFIO MODULES ADDED TO /ETC/MODULES"
@@ -2281,13 +2563,7 @@ function apply_proxmox_firewall() {
         return 0
     fi
 
-    msg_info "Enabling datacenter firewall"
-    if grep -q "^firewall:" /etc/pve/datacenter.cfg 2>/dev/null; then
-        sed -i 's/^firewall:.*/firewall: 1/' /etc/pve/datacenter.cfg
-    else
-        echo "firewall: 1" >> /etc/pve/datacenter.cfg
-    fi
-    msg_ok "DATACENTER FIREWALL ENABLED"
+    msg_ok "Datacenter firewall config left unchanged"
 
     msg_info "Writing cluster firewall enable file"
     cat <<EOF > /etc/pve/firewall/cluster.fw
@@ -2379,10 +2655,13 @@ function read_secret_from_tty() {
 
     if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf '%b' "${YW}${prompt}: ${CL}" > /dev/tty
-        IFS= read -r value < /dev/tty || true
-        printf '\033[1A\r\033[K' > /dev/tty
+        IFS= read -r -s value < /dev/tty || true
+        printf '
+' > /dev/tty
+        printf '[1A[K' > /dev/tty
     else
-        IFS= read -r -p "${prompt}: " value || true
+        IFS= read -r -s -p "${prompt}: " value || true
+        echo >&2
     fi
 
     printf '%s' "$value"
@@ -2645,12 +2924,29 @@ YW="\033[33m"
 BL="\033[36m"
 CL="\033[0m"
 
+INSTALL_PROXMOX_VERSION="$PROXMOX_VERSION"
+INSTALL_PROXMOX_KERNEL="$PROXMOX_KERNEL"
+INSTALL_BIOS_VERSION="$BIOS_VERSION"
+INSTALL_SYSTEM_PRODUCT="$SYSTEM_PRODUCT"
+INSTALL_SYSTEM_CHASSIS="$SYSTEM_CHASSIS"
 INSTALL_SYSTEM_TYPE="$SYSTEM_TYPE"
 INSTALL_IS_SSD="$IS_SSD"
 INSTALL_IGPU_FOUND="$IGPU_FOUND"
 INSTALL_DGPU_FOUND="$DGPU_FOUND"
 INSTALL_DGPU_BDFS="$DGPU_BDFS"
 INSTALL_DGPU_IDS="$DGPU_IDS"
+INSTALL_IGPU_NAME="$IGPU_NAME"
+INSTALL_IGPU_BDF="$IGPU_BDF"
+INSTALL_IGPU_VENDOR_DEVICE="$IGPU_VENDOR_DEVICE"
+INSTALL_IGPU_DRIVER="$IGPU_DRIVER"
+INSTALL_IGPU_BOOT_VGA="$IGPU_BOOT_VGA"
+INSTALL_DGPU_NAME="$DGPU_NAME"
+INSTALL_DGPU_BDF="$DGPU_BDF"
+INSTALL_DGPU_VENDOR_DEVICE="$DGPU_VENDOR_DEVICE"
+INSTALL_DGPU_DRIVER="$DGPU_DRIVER"
+INSTALL_DGPU_VRAM="$DGPU_VRAM"
+INSTALL_DGPU_BOOT_VGA="$DGPU_BOOT_VGA"
+INSTALL_GPU_SAME_SLOT_FUNCTIONS="$GPU_SAME_SLOT_FUNCTIONS"
 INSTALL_ENABLE_PASSTHROUGH="$ENABLE_PASSTHROUGH"
 INSTALL_ENABLE_PERFORMANCE="$ENABLE_PERFORMANCE"
 INSTALL_ENABLE_CROWDSEC="$ENABLE_CROWDSEC"
@@ -2702,10 +2998,18 @@ echo "Date: \$(date)"
 echo "Host: \$(hostname)"
 echo ""
 
+INFO "Proxmox version during install: \${INSTALL_PROXMOX_VERSION:-unknown}"
+INFO "Kernel version during install: \${INSTALL_PROXMOX_KERNEL:-unknown}"
+INFO "BIOS version during install: \${INSTALL_BIOS_VERSION:-unknown}"
+INFO "System product during install: \${INSTALL_SYSTEM_PRODUCT:-unknown}"
+INFO "System chassis during install: \${INSTALL_SYSTEM_CHASSIS:-unknown}"
 INFO "System type detected during install: \$INSTALL_SYSTEM_TYPE"
 INFO "SSD detected during install: \$INSTALL_IS_SSD"
 INFO "Integrated GPU detected during install: \$INSTALL_IGPU_FOUND"
 INFO "Discrete GPU detected during install: \$INSTALL_DGPU_FOUND"
+INFO "Integrated GPU during install: \${INSTALL_IGPU_NAME:-not-detected} [\${INSTALL_IGPU_VENDOR_DEVICE:-not-detected}] [\${INSTALL_IGPU_BDF:-not-detected}] driver=\${INSTALL_IGPU_DRIVER:-not-detected} boot_vga=\${INSTALL_IGPU_BOOT_VGA:-not-detected}"
+INFO "Discrete GPU during install: \${INSTALL_DGPU_NAME:-not-detected} [\${INSTALL_DGPU_VENDOR_DEVICE:-not-detected}] [\${INSTALL_DGPU_BDF:-not-detected}] driver=\${INSTALL_DGPU_DRIVER:-not-detected} VRAM=\${INSTALL_DGPU_VRAM:-not detected} boot_vga=\${INSTALL_DGPU_BOOT_VGA:-not-detected}"
+INFO "GPU same-slot functions during install: \${INSTALL_GPU_SAME_SLOT_FUNCTIONS:-none}"
 INFO "Discrete GPU passthrough selected: \$(YESNO "\$INSTALL_ENABLE_PASSTHROUGH")"
 INFO "CPU performance selected: \$(YESNO "\$INSTALL_ENABLE_PERFORMANCE")"
 INFO "SSH hardening applied during install: \$INSTALL_SSH_HARDENING_APPLIED"
@@ -2851,7 +3155,7 @@ FIREWALL_STATUS="\$(pve-firewall status 2>&1 || true)"
 if echo "\$FIREWALL_STATUS" | grep -q "Status: enabled/running"; then PASS "Proxmox firewall status enabled/running"; else FAIL "Proxmox firewall status is not enabled/running: \$FIREWALL_STATUS"; fi
 if systemctl is-active --quiet pve-firewall; then PASS "Proxmox firewall service active"; else FAIL "Proxmox firewall service inactive"; fi
 if [ -f /etc/pve/firewall/cluster.fw ] && grep -q "enable: 1" /etc/pve/firewall/cluster.fw 2>/dev/null; then PASS "Cluster firewall enable file present"; else FAIL "Cluster firewall enable file missing"; fi
-if grep -q "firewall: 1" /etc/pve/datacenter.cfg 2>/dev/null; then PASS "Datacenter firewall enabled"; else FAIL "Datacenter firewall not enabled"; fi
+if grep -Eq "^firewall:[[:space:]]*[0-9]+" /etc/pve/datacenter.cfg 2>/dev/null; then WARN "datacenter.cfg contains a legacy firewall key; Script 1 no longer writes that key on Proxmox 9.2"; else PASS "datacenter.cfg firewall schema left untouched"; fi
 if [ -f "/etc/pve/nodes/\$(hostname -s)/host.fw" ]; then PASS "Node firewall file exists"; else WARN "Node firewall file missing"; fi
 
 if [ "\$INSTALL_ALLOW_PUBLIC_WEB" == "y" ]; then
@@ -2985,9 +3289,30 @@ function write_completion_marker() {
     msg_info "Writing PVE9 post-install completion marker"
     cat <<EOF > "$COMPLETED_MARKER"
 PVE9 Post Install completed on: $(date)
+Script 1 Marker Source of Truth: Later scripts should prefer this marker for GPU/platform hardware data and fallback to local detection only if missing or incomplete.
+Proxmox Version: $PROXMOX_VERSION
+Kernel Version: $PROXMOX_KERNEL
+BIOS Version: $BIOS_VERSION
+System Product: $SYSTEM_PRODUCT
+System Chassis: $SYSTEM_CHASSIS
 System Type: $SYSTEM_TYPE
 SSD Detected: $IS_SSD
 Root FS Type: $ROOT_FS_TYPE
+Integrated GPU Name: $IGPU_NAME
+Integrated GPU BDF: $IGPU_BDF
+Integrated GPU Vendor Device: $IGPU_VENDOR_DEVICE
+Integrated GPU Driver: $IGPU_DRIVER
+Integrated GPU boot_vga: $IGPU_BOOT_VGA
+Integrated GPU Use: $IGPU_USE
+Discrete GPU Name: $DGPU_NAME
+Discrete GPU BDF: $DGPU_BDF
+Discrete GPU Vendor Device: $DGPU_VENDOR_DEVICE
+Discrete GPU Driver Before Isolation: $DGPU_DRIVER
+Discrete GPU VRAM: $DGPU_VRAM
+Discrete GPU boot_vga: $DGPU_BOOT_VGA
+Discrete GPU Use: $DGPU_USE
+GPU Same-slot Functions: $GPU_SAME_SLOT_FUNCTIONS
+GPU Passthrough Selected: $(yes_no_label "$ENABLE_PASSTHROUGH")
 GPU Passthrough: $(yes_no_label "$ENABLE_PASSTHROUGH")
 CPU Performance: $(yes_no_label "$ENABLE_PERFORMANCE")
 CrowdSec: $(yes_no_label "$ENABLE_CROWDSEC")
@@ -3028,8 +3353,18 @@ EOF
 function show_final_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
+    echo -e "${BL}PROXMOX PLATFORM:${CL}"
+    detail_line "PROXMOX" "$PROXMOX_VERSION"
+    detail_line "KERNEL" "$PROXMOX_KERNEL"
+    detail_line "BIOS" "$BIOS_VERSION"
+    detail_line "SYSTEM" "$SYSTEM_PRODUCT"
+    echo ""
+
     detail_line "SYSTEM TYPE" "$SYSTEM_TYPE"
     detail_line "STORAGE LAYOUT MODE" "$STORAGE_LAYOUT_MODE"
+    detail_line "INTEGRATED GPU" "${IGPU_NAME} [${IGPU_VENDOR_DEVICE}] [${IGPU_BDF}]"
+    detail_line "DISCRETE GPU" "${DGPU_NAME} [${DGPU_VENDOR_DEVICE}] [${DGPU_BDF}]"
+    detail_line "DISCRETE GPU VRAM" "$DGPU_VRAM"
     detail_line "GPU PASSTHROUGH" "$(yes_no_label "$ENABLE_PASSTHROUGH")"
     detail_line "CPU PERFORMANCE" "$(yes_no_label "$ENABLE_PERFORMANCE")"
     detail_line "CROWDSEC" "$(yes_no_label "$ENABLE_CROWDSEC")"
