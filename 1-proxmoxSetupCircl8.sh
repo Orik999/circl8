@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.4.8"
+SCRIPT_VERSION="v1.4.9"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="vfio-idle-d3-shutdown-stability"
+SCRIPT_BUILD="nf-conntrack-warning-cleanup"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -2746,9 +2746,15 @@ function apply_ssh_security() {
 function apply_sysctl_tuning() {
     section "SYSCTL HARDENING & NETWORK TUNING"
 
-    msg_info "Preparing nf_conntrack sysctl availability"
+    msg_info "Configuring nf_conntrack early load"
+    mkdir -p /etc/modules-load.d
+    printf '%s\n' 'nf_conntrack' > /etc/modules-load.d/circl8-nf_conntrack.conf
+    rm -f /etc/sysctl.d/99-circl8-nf-conntrack.conf
+    if [ -f /etc/sysctl.d/99-pve9-hardening-network.conf ]; then
+        sed -i -E '/^[[:space:]]*net\.netfilter\.nf_conntrack_max[[:space:]]*=[[:space:]]*1048576[[:space:]]*$/d' /etc/sysctl.d/99-pve9-hardening-network.conf
+    fi
     modprobe nf_conntrack 2>/dev/null || true
-    msg_ok "NF_CONNTRACK SYSCTL AVAILABILITY CHECKED"
+    msg_ok "NF_CONNTRACK EARLY LOAD CONFIGURED"
 
     msg_info "Writing sysctl hardening and network tuning file"
     cat <<EOF > /etc/sysctl.d/99-pve9-hardening-network.conf
@@ -2783,12 +2789,6 @@ net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_keepalive_intvl = 60
 net.ipv4.tcp_keepalive_probes = 5
 EOF
-
-    if [ -e /proc/sys/net/netfilter/nf_conntrack_max ]; then
-        echo "net.netfilter.nf_conntrack_max = 1048576" >> /etc/sysctl.d/99-pve9-hardening-network.conf
-    else
-        msg_warn "nf_conntrack_max sysctl unavailable; skipping that setting"
-    fi
     msg_ok "SYSCTL HARDENING / NETWORK TUNING FILE WRITTEN"
 
     msg_info "Applying sysctl settings"
@@ -3509,6 +3509,8 @@ if grep -q "if (false)\\|NoMoreNagging" /usr/share/javascript/proxmox-widget-too
 if [ -f /etc/sysctl.d/99-pve9-hardening-network.conf ]; then PASS "Sysctl hardening file present"; else FAIL "Sysctl hardening file missing"; fi
 if sysctl net.ipv4.tcp_syncookies 2>/dev/null | grep -q "= 1"; then PASS "TCP SYN cookies enabled"; else FAIL "TCP SYN cookies not enabled"; fi
 if sysctl net.core.somaxconn 2>/dev/null | awk '{print \$3}' | grep -Eq "^[0-9]+$"; then PASS "Network tuning sysctl readable"; else WARN "Network tuning sysctl not readable"; fi
+if grep -q '^nf_conntrack[[:space:]]' /proc/modules 2>/dev/null; then INFO "nf_conntrack module: loaded"; else WARN "nf_conntrack module: not-loaded"; fi
+if [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then INFO "nf_conntrack_max live value: \$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo unavailable)"; else INFO "nf_conntrack_max live value: unavailable"; fi
 
 echo ""
 echo -e "\${YW}Verification complete. Log saved to \$VERIFY_LOG\${CL}"
