@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.4.2"
+SCRIPT_VERSION="v1.4.3"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="batch5-final-preapply-storage-ui-fix"
+SCRIPT_BUILD="batch6-gpu-spacing-transient-prompts"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -228,6 +228,12 @@ function tty_println() {
     else
         echo -e "$*" >&2
     fi
+}
+
+# --- TRANSIENT PROMPT CLEAR HELPER ---
+# Clears a full-line prompt after read(ENTER) has moved the cursor to the next line.
+function tty_clear_previous_line() {
+    tty_print "\033[1A\r\033[2K"
 }
 
 # =========================================================
@@ -1161,6 +1167,7 @@ function print_gpu_detail_group() {
             echo -e "    ${BL}Same-slot functions:${CL} ${GN}${GPU_SAME_SLOT_FUNCTIONS}${CL}"
         fi
     done <<< "$lines"
+    echo ""
 }
 # --- 26. REALTEK NIC DETECTION HELPER ---
 # Detects common Realtek Linux drivers so unstable offload features can be disabled safely.
@@ -1606,7 +1613,6 @@ function detect_gpu_and_collect_choice() {
     if [ -n "${IGPU_LINES}${DGPU_LINES}" ]; then
         print_gpu_detail_group "Integrated" "$IGPU_LINES" "reserved for host/laptop screen"
         print_gpu_detail_group "Discrete" "$DGPU_LINES" "VM passthrough candidate"
-        echo ""
     else
         echo -e "  ${BL}Detected:${CL} ${GN}No GPU details detected${CL}"
     fi
@@ -1796,13 +1802,13 @@ function read_storage_gb_input() {
 
         if [[ "$value" =~ ^[0-9]+$ ]]; then
             if [ "$allow_zero" == "yes" ] || [ "$value" -gt 0 ]; then
-                tty_print "${BFR}"
+                tty_clear_previous_line
                 echo "$value"
                 return 0
             fi
         fi
 
-        tty_print "${BFR}"
+        tty_clear_previous_line
         tty_println "${RD}Enter a whole number greater than zero.${CL}"
     done
 }
