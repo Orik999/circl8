@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.4.7"
+SCRIPT_VERSION="v1.4.8"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="final-summary-warning-cleanup"
+SCRIPT_BUILD="vfio-idle-d3-shutdown-stability"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -92,6 +92,7 @@ DGPU_VRAM="not detected"
 DGPU_BOOT_VGA="not-detected"
 DGPU_USE="VM passthrough candidate"
 GPU_SAME_SLOT_FUNCTIONS="none"
+VFIO_DISABLE_IDLE_D3="no"
 
 STORAGE_SUMMARY=""
 ROOT_FS_TYPE=""
@@ -2488,7 +2489,8 @@ EOF
     msg_ok "HOST GPU DRIVERS BLACKLISTED FOR SELECTED DGPU VENDOR"
 
     msg_info "Writing VFIO PCI device IDs"
-    echo "options vfio-pci ids=$DGPU_IDS disable_vga=1" > /etc/modprobe.d/vfio.conf
+    echo "options vfio-pci ids=$DGPU_IDS disable_vga=1 disable_idle_d3=1" > /etc/modprobe.d/vfio.conf
+    VFIO_DISABLE_IDLE_D3="yes"
     msg_ok "VFIO PCI DEVICE IDS CONFIGURED ($DGPU_IDS)"
 
     msg_info "Updating initramfs for VFIO"
@@ -3255,6 +3257,7 @@ INSTALL_DGPU_DRIVER="$DGPU_DRIVER"
 INSTALL_DGPU_VRAM="$DGPU_VRAM"
 INSTALL_DGPU_BOOT_VGA="$DGPU_BOOT_VGA"
 INSTALL_GPU_SAME_SLOT_FUNCTIONS="$GPU_SAME_SLOT_FUNCTIONS"
+INSTALL_VFIO_DISABLE_IDLE_D3="$VFIO_DISABLE_IDLE_D3"
 INSTALL_ENABLE_PASSTHROUGH="$ENABLE_PASSTHROUGH"
 INSTALL_ENABLE_PERFORMANCE="$ENABLE_PERFORMANCE"
 INSTALL_ENABLE_CROWDSEC="$ENABLE_CROWDSEC"
@@ -3322,6 +3325,7 @@ INFO "Discrete GPU detected during install: \$INSTALL_DGPU_FOUND"
 INFO "Integrated GPU during install: \${INSTALL_IGPU_NAME:-not-detected} [\${INSTALL_IGPU_VENDOR_DEVICE:-not-detected}] [\${INSTALL_IGPU_BDF:-not-detected}] driver=\${INSTALL_IGPU_DRIVER:-not-detected} boot_vga=\${INSTALL_IGPU_BOOT_VGA:-not-detected}"
 INFO "Discrete GPU during install: \${INSTALL_DGPU_NAME:-not-detected} [\${INSTALL_DGPU_VENDOR_DEVICE:-not-detected}] [\${INSTALL_DGPU_BDF:-not-detected}] driver=\${INSTALL_DGPU_DRIVER:-not-detected} VRAM=\${INSTALL_DGPU_VRAM:-not detected} boot_vga=\${INSTALL_DGPU_BOOT_VGA:-not-detected}"
 INFO "GPU same-slot functions during install: \${INSTALL_GPU_SAME_SLOT_FUNCTIONS:-none}"
+INFO "VFIO disable_idle_d3 during install: \$(YESNO "\$INSTALL_VFIO_DISABLE_IDLE_D3")"
 INFO "Discrete GPU passthrough selected: \$(YESNO "\$INSTALL_ENABLE_PASSTHROUGH")"
 INFO "CPU performance selected: \$(YESNO "\$INSTALL_ENABLE_PERFORMANCE")"
 INFO "SSH hardening applied during install: \$INSTALL_SSH_HARDENING_APPLIED"
@@ -3633,6 +3637,7 @@ Discrete GPU Use: $DGPU_USE
 GPU Same-slot Functions: $GPU_SAME_SLOT_FUNCTIONS
 GPU Passthrough Selected: $(yes_no_label "$ENABLE_PASSTHROUGH")
 GPU Passthrough: $(yes_no_label "$ENABLE_PASSTHROUGH")
+VFIO disable_idle_d3: $(yes_no_label "$VFIO_DISABLE_IDLE_D3")
 CPU Performance: $(yes_no_label "$ENABLE_PERFORMANCE")
 CrowdSec: $(yes_no_label "$ENABLE_CROWDSEC")
 CrowdSec Console Enrollment: $CROWDSEC_CONSOLE_ENROLLMENT
@@ -3710,6 +3715,7 @@ function show_final_summary() {
     echo -e "  ${BL}Discrete GPU:${CL} ${GN}${DGPU_NAME} [${DGPU_VENDOR_DEVICE}] [${DGPU_BDF}]${CL}"
     echo -e "  ${BL}Discrete GPU VRAM:${CL} ${GN}$(display_vram_value "$DGPU_VRAM")${CL}"
     echo -e "  ${BL}GPU passthrough:${CL} ${ANS}$(yes_no_label "$ENABLE_PASSTHROUGH")${CL}"
+    echo -e "  ${BL}VFIO disable_idle_d3:${CL} ${ANS}$(yes_no_label "$VFIO_DISABLE_IDLE_D3")${CL}"
     echo ""
 
     echo -e "${YW}SECURITY:${CL}"
