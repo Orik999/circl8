@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.13"
+SCRIPT_VERSION="v1.2.14"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="unified-ui-final-output-polish"
+SCRIPT_BUILD="final-flow-readability-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -386,6 +386,9 @@ timed_yes_no() {
     local default_label="Y/n"
     local final_label=""
     local confirm_label=""
+    local confirm_label_override="${3:-}"
+    local yes_confirm_value="${4:-}"
+    local no_confirm_value="${5:-}"
     local deadline=""
     local now=""
     local remaining=""
@@ -438,7 +441,13 @@ timed_yes_no() {
 
     [ -z "$answer" ] && answer="$default"
     final_label="$(yes_no_label "$answer")"
-    confirm_label="${prompt%\?}"
+    confirm_label="${confirm_label_override:-${prompt%\?}}"
+
+    if [[ "$answer" =~ ^[Yy]$ ]] && [ -n "$yes_confirm_value" ]; then
+        final_label="$yes_confirm_value"
+    elif [[ "$answer" =~ ^[Nn]$ ]] && [ -n "$no_confirm_value" ]; then
+        final_label="$no_confirm_value"
+    fi
 
     tty_print "${BFR}"
     tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${final_label}${CL}"
@@ -596,12 +605,17 @@ timed_menu_select() {
     local options=("$@")
     local idx=""
     local selected=""
+    local display_title="${title} options"
+
+    if [ "$title" == "Keyboard Layout" ]; then
+        display_title="Keyboard layout options"
+    fi
 
     tty_println ""
-    tty_println "${BL}${title}:${CL}"
+    tty_println "${YW}${display_title}:${CL}"
 
     for i in "${!options[@]}"; do
-        tty_println "$((i+1))) ${options[$i]}"
+        tty_println "  ${GN}$((i+1))) ${options[$i]}${CL}"
     done
 
     idx="$(timed_number_input "Select ${title} option number" "$default_index" "1" "${#options[@]}")"
@@ -846,6 +860,7 @@ wait_for_vm_poweroff() {
     local now_time=""
     local elapsed=""
     local status=""
+    local status_display=""
     local elapsed_min=""
     local elapsed_sec=""
     local progress_drawn="no"
@@ -858,7 +873,7 @@ wait_for_vm_poweroff() {
     echo -e "  VM: ${GN}${TARGET_VM_NAME} (${vmid})${CL}"
     echo ""
     echo -e "${YW}Waiting for the VM to power off after installation.${CL}"
-    echo -e "${YW}Do not manually restart the VM during this stage.${CL}"
+    echo -e "${RD}Do not manually restart the VM during this stage.${CL}"
     echo ""
 
     while true; do
@@ -895,9 +910,16 @@ wait_for_vm_poweroff() {
         if [ "$progress_drawn" == "yes" ]; then
             tty_print "\033[3A\033[J"
         fi
+        status_display="${status:-unknown}"
+        if [ "$status_display" == "running" ]; then
+            status_display="${FLASH_ON}${YW}running${FLASH_OFF}${CL}"
+        else
+            status_display="${YW}${status_display}${CL}"
+        fi
+
         tty_println "${YW}Waiting for VM poweroff:${CL}"
         tty_println "${YW}  elapsed: ${elapsed_min}m ${elapsed_sec}s / ${timeout_minutes}m${CL}"
-        tty_println "${YW}  status:  ${status:-unknown}${CL}"
+        tty_println "${YW}  status:${CL}  ${status_display}"
         progress_drawn="yes"
         sleep 10
     done
@@ -1279,7 +1301,7 @@ attach_start_display() {
 collect_attach_start_decision() {
     local attach_yn=""
 
-    attach_yn="$(timed_yes_no "Attach generated autoinstall ISO and start VM after preparation?" "y")"
+    attach_yn="$(timed_yes_no "Start unattended Ubuntu install after ISO preparation?" "y")"
 
     if [[ "$attach_yn" =~ ^[Nn] ]]; then
         ATTACH_START_APPROVED="no"
@@ -1287,7 +1309,7 @@ collect_attach_start_decision() {
         ATTACH_START_APPROVED="yes"
     fi
 
-    detail_line "Attach and start after preparation" "$(attach_start_display)"
+    detail_line "Start unattended Ubuntu install after ISO preparation" "$(attach_start_display)"
 }
 
 collect_missing_iso_tools_decision() {
@@ -1623,8 +1645,6 @@ ensure_vm_stopped_before_apply() {
         return 0
     fi
 
-    section "VM SHUTDOWN BEFORE APPLY"
-
     msg_warn "VM ${TARGET_VMID} is currently running"
     echo -e "${YW}The VM must be stopped before attaching installer media safely.${CL}"
     echo ""
@@ -1635,11 +1655,11 @@ ensure_vm_stopped_before_apply() {
 
     msg_info "Shutting down VM ${TARGET_VMID}"
     if qm shutdown "$TARGET_VMID" --timeout 60 >/dev/null 2>&1; then
-        msg_ok "VM SHUTDOWN COMPLETE"
+        msg_ok "VM shutdown complete."
     else
         msg_warn "Graceful shutdown failed or timed out; forcing stop"
         run_cmd "stopping VM ${TARGET_VMID}" qm stop "$TARGET_VMID"
-        msg_ok "VM STOPPED"
+        msg_ok "VM stopped."
     fi
     TARGET_VM_STATUS="stopped"
 }
@@ -1658,6 +1678,7 @@ detect_vm_mac() {
     echo ""
     echo -e "${YW}NETWORK / DHCP:${CL}"
     echo -e "  ${BL}VM MAC ADDRESS:${CL} ${GN}${TARGET_VM_MAC}${CL}"
+    echo -e "  ${BL}Ubuntu network mode:${CL} ${GN}DHCP${CL}"
     echo -e "  ${YW}Reminder: reserve this MAC in your router if you want a fixed VM IP.${CL}"
 }
 
@@ -1745,16 +1766,12 @@ detect_ssh_keys() {
 collect_network_inputs() {
     local dhcp_yn=""
 
-    section "NETWORK CONFIGURATION"
-
-    echo -e "${YW}Recommendation:${CL}"
-    echo -e "  ${YW}Use DHCP inside Ubuntu and keep the router reservation from VM selection.${CL}"
-    echo ""
-
-    dhcp_yn="$(timed_yes_no "Use DHCP networking inside Ubuntu?" "y")"
+    dhcp_yn="$(timed_yes_no "Use DHCP networking inside Ubuntu?" "y" "Ubuntu network mode" "DHCP" "static")"
 
     if [[ "$dhcp_yn" =~ ^[Nn] ]]; then
         NETWORK_MODE="static"
+
+        section "NETWORK CONFIGURATION"
 
         while true; do
             STATIC_IP_CIDR="$(timed_text_input "Enter static IP/CIDR" "192.168.1.50/24")"
@@ -1777,7 +1794,6 @@ collect_network_inputs() {
         NETWORK_MODE="dhcp"
     fi
 }
-
 # --- 44. POST-INSTALL INPUTS ---
 collect_post_install_options() {
     local start_installed_yn=""
@@ -1825,15 +1841,13 @@ select_ubuntu_iso() {
 # --- 46. UBUNTU PRO NOTE ---
 show_ubuntu_pro_note() {
     echo ""
-    echo -e "${BL}Ubuntu Pro:${CL}"
-    echo -e "  ${YW}Not attached by this script.${CL}"
-    echo -e "  ${YW}Script 4 can offer Ubuntu Pro attachment inside the VM.${CL}"
-    echo ""
-    echo -e "${BL}Manual command:${CL}"
-    echo -e "  ${GN}sudo pro attach <token>${CL}"
+    echo -e "${YW}UBUNTU PRO:${CL}"
+    echo -e "  ${BL}status:${CL} ${GN}not attached${CL}"
+    echo -e "  ${BL}setup location:${CL} ${GN}inside Ubuntu VM${CL}"
+    echo -e "  ${BL}guided setup:${CL} ${GN}Script 4${CL}"
+    echo -e "  ${BL}manual command:${CL} ${GN}sudo pro attach <token>${CL}"
     echo ""
 }
-
 # =========================================================
 #  ISO / AUTOINSTALL GENERATION
 # =========================================================
@@ -2139,7 +2153,7 @@ show_apply_summary() {
     echo -e "  ${BL}timeout:${CL} ${ANS}${INSTALL_WAIT_MINUTES} minutes${CL}"
     echo -e "  ${BL}start VM after cleanup:${CL} ${ANS}$(yn_word "$POST_INSTALL_START_VM")${CL}"
     echo -e "  ${BL}IP detection timeout:${CL} ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
-    echo -e "  ${BL}attach and start after preparation:${CL} ${ANS}$(attach_start_display)${CL}"
+    echo -e "  ${BL}start unattended install after ISO preparation:${CL} ${ANS}$(attach_start_display)${CL}"
     echo ""
 
     echo -e "${YW}CLEANUP:${CL}"
@@ -2345,7 +2359,7 @@ show_final_output() {
     [ "$INSTALL_POWERED_OFF" == "yes" ] && autoinstall_completed="yes"
     [ -n "$ASSIGNED_IPV4" ] && ipv4_detected="yes"
 
-    section_flash_success "     ━━━━━━━━━━━━━━━━━    INSTALL COMPLETE    ━━━━━━━━━━━━━━━━━"
+    section_flash_success "  ━━━━━━━━━━━━━━━━    INSTALL COMPLETE    ━━━━━━━━━━━━━━━━"
 
     echo -e "${YW}VM SUMMARY:${CL}"
     echo -e "  ${BL}VM:${CL} ${ANS}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
@@ -2382,8 +2396,12 @@ show_final_output() {
     fi
 
     echo -e "${YW}NEXT STEP:${CL}"
-    echo -e "  ${BL}Run:${CL} ${GN}4-ubuntuVMsetup.sh${CL}"
-    echo -e "  ${YW}Run Script 4 inside the Ubuntu VM, not on Proxmox.${CL}"
+    if [ -n "$SSH_COMMAND" ]; then
+        echo -e "  ${BL}SSH into Ubuntu:${CL} ${GN}${SSH_COMMAND}${CL}"
+    else
+        echo -e "  ${BL}SSH into Ubuntu:${CL} ${GN}ssh ${TARGET_USERNAME}@<assigned-ip>${CL}"
+    fi
+    echo -e "  ${BL}Run inside Ubuntu:${CL} ${GN}4-ubuntuVMsetup.sh${CL}"
     echo ""
     echo -e "${FLASH_ON}${RD}DO NOT RUN 4-ubuntuVMsetup.sh ON THE PROXMOX HOST.${FLASH_OFF}${CL}"
     echo ""
@@ -2466,7 +2484,8 @@ demo_vm_selection() {
     section "VM SELECTION"
     msg_ok "Selected VM: ${TARGET_VM_NAME} (${TARGET_VMID})"
     demo_line "VM MAC address: ${TARGET_VM_MAC}"
-    demo_line "Router reservation recommended for this MAC."
+    demo_line "Ubuntu network mode: DHCP"
+    demo_line "Reserve this MAC in your router if you want a fixed VM IP."
 }
 
 demo_identity_locale() {
@@ -2484,9 +2503,7 @@ demo_ssh_key_detection() {
 }
 
 demo_network_configuration() {
-    section "NETWORK CONFIGURATION"
-    demo_line "mode: ${NETWORK_MODE}"
-    demo_line "Use DHCP and keep the router reservation from VM selection."
+    demo_line "Ubuntu network mode: DHCP"
 }
 
 demo_post_install_options() {
@@ -2504,10 +2521,11 @@ demo_iso_selection() {
 
 demo_ubuntu_pro_note() {
     echo ""
-    echo -e "${BL}Ubuntu Pro:${CL}"
-    demo_line "Not attached by this script."
-    demo_line "Script 4 can offer Ubuntu Pro attachment inside the VM."
-    demo_line "Manual command: sudo pro attach <token>"
+    echo -e "${YW}UBUNTU PRO:${CL}"
+    echo -e "  ${BL}status:${CL} ${GN}not attached${CL}"
+    echo -e "  ${BL}setup location:${CL} ${GN}inside Ubuntu VM${CL}"
+    echo -e "  ${BL}guided setup:${CL} ${GN}Script 4${CL}"
+    echo -e "  ${BL}manual command:${CL} ${GN}sudo pro attach <token>${CL}"
 }
 
 demo_preflight_questions() {
@@ -2517,11 +2535,11 @@ demo_preflight_questions() {
     demo_line "install missing ISO tools: $(install_missing_tools_display)"
     demo_line "VM status before apply: ${VM_STATUS_AT_PREFLIGHT}"
     demo_line "shutdown before apply: $(vm_shutdown_display)"
-    demo_line "attach and start after preparation: $(attach_start_display)"
+    demo_line "start unattended Ubuntu install after ISO preparation: $(attach_start_display)"
 }
 
 demo_autoinstall_iso_preparation() {
-    section "AUTOINSTALL ISO PREPARATION"
+    section "AUTOINSTALL BUILD / APPLY"
     msg_ok "Existing generated ISO check complete."
     msg_ok "Required ISO tools available."
     msg_ok "Autoinstall configuration created."
@@ -2565,7 +2583,7 @@ demo_ready_to_apply() {
     echo -e "  timeout: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
     echo -e "  start VM after cleanup: ${GN}$(yn_word "$POST_INSTALL_START_VM")${CL}"
     echo -e "  IP detection timeout: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
-    echo -e "  attach and start after preparation: ${GN}$(attach_start_display)${CL}"
+    echo -e "  start unattended install after ISO preparation: ${GN}$(attach_start_display)${CL}"
     echo ""
 
     echo -e "${YW}CLEANUP:${CL}"
@@ -2578,7 +2596,6 @@ demo_ready_to_apply() {
 }
 
 demo_preparing_system() {
-    section "PREPARING SYSTEM"
     msg_ok "VM ${TARGET_VMID} shutdown complete."
     msg_ok "Installer ISO attached."
     msg_ok "VM boot order configured."
@@ -2591,7 +2608,7 @@ demo_install_monitoring() {
     echo -e "  VM: ${GN}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
     echo ""
     echo -e "${YW}Waiting for the VM to power off after installation.${CL}"
-    echo -e "${YW}Do not manually restart the VM during this stage.${CL}"
+    echo -e "${RD}Do not manually restart the VM during this stage.${CL}"
     echo ""
     msg_ok "Ubuntu autoinstall completed. (${INSTALL_DURATION_TEXT})"
     msg_ok "VM ${TARGET_VMID} powered off after install."
