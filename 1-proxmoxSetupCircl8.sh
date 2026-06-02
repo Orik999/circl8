@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.4.1"
+SCRIPT_VERSION="v1.4.2"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="batch4-ui-storage-unit-polish"
+SCRIPT_BUILD="batch5-final-preapply-storage-ui-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -129,7 +129,6 @@ LOCAL_LVM_STORAGE_EXISTS="no"
 LOCAL_LVM_CFG_EXISTS="no"
 PVE_DATA_EXISTS="no"
 PVE_DATA_IS_THINPOOL="no"
-DECIMAL_GB_BYTES=1000000000
 MIB_BYTES=1048576
 CURRENT_ROOT_SIZE_GB="0"
 CURRENT_ROOT_SIZE_MIB="0"
@@ -1402,7 +1401,7 @@ function disk_display_name() {
     model="$(lsblk -dn -o MODEL "/dev/${disk}" 2>/dev/null | xargs || true)"
     size_bytes="$(lsblk -bdn -o SIZE "/dev/${disk}" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
     if [[ "$size_bytes" =~ ^[0-9]+$ ]] && [ "$size_bytes" -gt 0 ]; then
-        size_gb="$(bytes_to_decimal_gb_ceil "$size_bytes")GB"
+        size_gb="$(bytes_to_ui_gb_ceil "$size_bytes")GB"
     fi
     kind="$(disk_kind_label "$disk")"
 
@@ -1620,7 +1619,6 @@ function detect_gpu_and_collect_choice() {
             echo -e "  ${BL}Integrated GPU:${CL} ${GN}reserved for host/laptop screen${CL}"
         fi
         echo -e "  ${BL}Isolation target:${CL} ${GN}discrete GPU same-slot functions only${CL}"
-        echo ""
         gpu_yn="$(timed_yes_no "Isolate discrete GPU for VM passthrough?" "y" "quiet")"
 
         if [[ "$gpu_yn" =~ ^[Yy] ]]; then
@@ -1740,60 +1738,30 @@ function get_pve_free_bytes() {
 }
 
 # --- STORAGE UNIT CONVERSION HELPERS ---
-# User-facing storage is decimal GB. LVM commands use binary MiB/GiB style units.
-# These helpers make the display/input boundary explicit so detected binary values are not merely relabelled as GB.
-function gib_to_display_gb() {
-    local gib="$1"
-    echo $(( (gib * 1073741824 + DECIMAL_GB_BYTES - 1) / DECIMAL_GB_BYTES ))
-}
-
-function display_gb_to_internal_gib() {
-    local gb="$1"
-    echo $(( (gb * DECIMAL_GB_BYTES + 1073741824 - 1) / 1073741824 ))
-}
-
-function display_gb_to_internal_mib_floor() {
-    local gb="$1"
-    echo $(( (gb * DECIMAL_GB_BYTES) / MIB_BYTES ))
-}
-
-function internal_mib_to_display_gb_floor() {
+# Script 1 storage UI intentionally follows Proxmox/LVM convention: values shown as GB map 1:1 to GiB-sized LVM units.
+# Example: 50.00 GiB is displayed as 50 GB, and user input 100 GB becomes 102400 MiB for lvextend/lvcreate.
+function internal_mib_to_ui_gb() {
     local mib="$1"
-    echo $(( (mib * MIB_BYTES) / DECIMAL_GB_BYTES ))
+    echo $(( mib / 1024 ))
 }
 
-function internal_mib_to_display_gb_ceil() {
-    local mib="$1"
-    local bytes=$(( mib * MIB_BYTES ))
+function ui_gb_to_internal_mib() {
+    local gb="$1"
+    echo $(( gb * 1024 ))
+}
 
+function bytes_to_ui_gb_floor() {
+    local bytes="$1"
+    echo $(( bytes / 1073741824 ))
+}
+
+function bytes_to_ui_gb_ceil() {
+    local bytes="$1"
     if [ "$bytes" -le 0 ]; then
         echo "0"
     else
-        echo $(( (bytes + DECIMAL_GB_BYTES - 1) / DECIMAL_GB_BYTES ))
+        echo $(( (bytes + 1073741824 - 1) / 1073741824 ))
     fi
-}
-
-function decimal_gb_to_mib_floor() {
-    local gb="$1"
-    display_gb_to_internal_mib_floor "$gb"
-}
-
-function root_visible_gb_to_allocation_gb() {
-    local visible_gb="$1"
-
-    case "${ROOT_FS_TYPE:-unknown}" in
-        ext2|ext3|ext4)
-            echo $(( (visible_gb * 102 + 99) / 100 ))
-            ;;
-        *)
-            echo "$visible_gb"
-            ;;
-    esac
-}
-
-function mib_to_decimal_gb_floor() {
-    local mib="$1"
-    echo $(( (mib * MIB_BYTES) / DECIMAL_GB_BYTES ))
 }
 
 function bytes_to_mib_floor() {
@@ -1801,18 +1769,12 @@ function bytes_to_mib_floor() {
     echo $(( bytes / MIB_BYTES ))
 }
 
-function bytes_to_decimal_gb_floor() {
-    local bytes="$1"
-    echo $(( bytes / DECIMAL_GB_BYTES ))
-}
+function root_visible_gb_to_allocation_gb() {
+    local visible_gb="$1"
 
-function bytes_to_decimal_gb_ceil() {
-    local bytes="$1"
-    if [ "$bytes" -le 0 ]; then
-        echo "0"
-    else
-        echo $(( (bytes + DECIMAL_GB_BYTES - 1) / DECIMAL_GB_BYTES ))
-    fi
+    # Proxmox Web UI and LVM report these values as GiB-style GB.
+    # Do not inflate ext filesystems here: 100 GB user input must become 102400 MiB.
+    echo "$visible_gb"
 }
 
 function read_storage_gb_input() {
@@ -1886,9 +1848,9 @@ function detect_storage_layout_options() {
     pve_free_bytes="$(get_pve_free_bytes)"
 
     CURRENT_ROOT_SIZE_MIB="$(bytes_to_mib_floor "$root_size_bytes")"
-    CURRENT_ROOT_SIZE_GB="$(internal_mib_to_display_gb_ceil "$CURRENT_ROOT_SIZE_MIB")"
+    CURRENT_ROOT_SIZE_GB="$(internal_mib_to_ui_gb "$CURRENT_ROOT_SIZE_MIB")"
     CURRENT_PVE_FREE_MIB="$(bytes_to_mib_floor "$pve_free_bytes")"
-    CURRENT_PVE_FREE_GB="$(internal_mib_to_display_gb_floor "$CURRENT_PVE_FREE_MIB")"
+    CURRENT_PVE_FREE_GB="$(internal_mib_to_ui_gb "$CURRENT_PVE_FREE_MIB")"
     ROOT_DISK_SIZE_GB="$CURRENT_ROOT_SIZE_GB"
 
     return 0
@@ -1909,17 +1871,10 @@ function validate_storage_conflict_state() {
 }
 
 function calculate_storage_plan() {
-    local target_root_internal_gib=""
-    local reserve_internal_gib=""
-
-    target_root_internal_gib="$(display_gb_to_internal_gib "$TARGET_ROOT_SIZE_GB")"
-    reserve_internal_gib="$(display_gb_to_internal_gib "$PVE_FREE_RESERVE_GB")"
-    : "$target_root_internal_gib" "$reserve_internal_gib"
-
-    TARGET_ROOT_SIZE_MIB="$(decimal_gb_to_mib_floor "$TARGET_ROOT_SIZE_GB")"
+    TARGET_ROOT_SIZE_MIB="$(ui_gb_to_internal_mib "$TARGET_ROOT_SIZE_GB")"
     ROOT_LV_ALLOCATION_GB="$(root_visible_gb_to_allocation_gb "$TARGET_ROOT_SIZE_GB")"
-    ROOT_LV_ALLOCATION_MIB="$(decimal_gb_to_mib_floor "$ROOT_LV_ALLOCATION_GB")"
-    PVE_FREE_RESERVE_MIB="$(decimal_gb_to_mib_floor "$PVE_FREE_RESERVE_GB")"
+    ROOT_LV_ALLOCATION_MIB="$(ui_gb_to_internal_mib "$ROOT_LV_ALLOCATION_GB")"
+    PVE_FREE_RESERVE_MIB="$(ui_gb_to_internal_mib "$PVE_FREE_RESERVE_GB")"
     ROOT_GROWTH_MIB="0"
     ROOT_GROWTH_GB="0"
     LOCAL_LVM_DEFAULT_SIZE_MIB="0"
@@ -1927,14 +1882,14 @@ function calculate_storage_plan() {
 
     if [ "$ROOT_LV_ALLOCATION_MIB" -gt "$CURRENT_ROOT_SIZE_MIB" ]; then
         ROOT_GROWTH_MIB="$(( ROOT_LV_ALLOCATION_MIB - CURRENT_ROOT_SIZE_MIB ))"
-        ROOT_GROWTH_GB="$(internal_mib_to_display_gb_floor "$ROOT_GROWTH_MIB")"
+        ROOT_GROWTH_GB="$(internal_mib_to_ui_gb "$ROOT_GROWTH_MIB")"
     fi
 
     LOCAL_LVM_DEFAULT_SIZE_MIB="$(( CURRENT_PVE_FREE_MIB - ROOT_GROWTH_MIB - PVE_FREE_RESERVE_MIB ))"
     if [ "$LOCAL_LVM_DEFAULT_SIZE_MIB" -lt 0 ]; then
         LOCAL_LVM_DEFAULT_SIZE_MIB="0"
     fi
-    LOCAL_LVM_DEFAULT_SIZE_GB="$(internal_mib_to_display_gb_floor "$LOCAL_LVM_DEFAULT_SIZE_MIB")"
+    LOCAL_LVM_DEFAULT_SIZE_GB="$(internal_mib_to_ui_gb "$LOCAL_LVM_DEFAULT_SIZE_MIB")"
 }
 
 function validate_storage_builder_plan() {
@@ -1950,14 +1905,14 @@ function validate_storage_builder_plan() {
         if [ "$LOCAL_LVM_SIZE_GB" -le 0 ]; then
             msg_error "local-lvm size must be greater than zero when local-lvm creation is selected."
         fi
-        LOCAL_LVM_SIZE_MIB="$(decimal_gb_to_mib_floor "$LOCAL_LVM_SIZE_GB")"
+        LOCAL_LVM_SIZE_MIB="$(ui_gb_to_internal_mib "$LOCAL_LVM_SIZE_GB")"
     fi
 
     total_required_mib="$(( ROOT_GROWTH_MIB + PVE_FREE_RESERVE_MIB + LOCAL_LVM_SIZE_MIB ))"
-    total_required_gb="$(internal_mib_to_display_gb_floor "$total_required_mib")"
+    total_required_gb="$(internal_mib_to_ui_gb "$total_required_mib")"
 
     if [ "$total_required_mib" -gt "$CURRENT_PVE_FREE_MIB" ]; then
-        msg_error "Storage plan needs about ${total_required_gb}GB decimal but only ${CURRENT_PVE_FREE_GB}GB decimal pve VG free space is available."
+        msg_error "Storage plan needs about ${total_required_gb}GB but only ${CURRENT_PVE_FREE_GB}GB pve VG free space is available."
     fi
 }
 
@@ -2137,9 +2092,8 @@ function collect_user_options() {
     echo -e "${YW}PROXMOX HOST WEB PORTS${CL}"
     echo ""
     echo -e "${YW}Recommendation:${CL}"
-    echo -e "  ${YW}Keep public HTTP/HTTPS on the Ubuntu VM, not on the Proxmox host.${CL}"
-    echo -e "  ${YW}Router port-forwarding should usually point to the VM.${CL}"
-    echo ""
+    echo -e "  ${BL}Public HTTP/HTTPS:${CL} ${GN}keep on the Ubuntu VM${CL}"
+    echo -e "  ${BL}Router forwarding:${CL} ${GN}point to the VM, not Proxmox${CL}"
     public_web_yn="$(timed_yes_no "Expose public HTTP/HTTPS 80/443 on Proxmox host firewall?" "n" "quiet")"
 
     if [[ "$public_web_yn" =~ ^[Yy] ]]; then
@@ -2265,8 +2219,8 @@ function apply_root_target_growth() {
         return 0
     fi
 
-    msg_info "Extending root LV allocation to ${ROOT_LV_ALLOCATION_GB}GB decimal for ${TARGET_ROOT_SIZE_GB}GB visible target"
-    run_cmd "extending root LV allocation to ${ROOT_LV_ALLOCATION_GB}GB decimal" lvextend -L "${ROOT_LV_ALLOCATION_MIB}M" /dev/pve/root
+    msg_info "Extending root LV allocation to ${ROOT_LV_ALLOCATION_GB}GB for ${TARGET_ROOT_SIZE_GB}GB target"
+    run_cmd "extending root LV allocation to ${ROOT_LV_ALLOCATION_GB}GB" lvextend -L "${ROOT_LV_ALLOCATION_MIB}M" /dev/pve/root
     msg_ok "Root/local extended to target visible size"
 
     resize_root_filesystem
@@ -2277,7 +2231,7 @@ function create_local_lvm_thinpool() {
         msg_error "local-lvm or /dev/pve/data already exists. Refusing to create or reuse storage automatically."
     fi
 
-    msg_info "Creating local-lvm thinpool (${LOCAL_LVM_SIZE_GB}GB decimal)"
+    msg_info "Creating local-lvm thinpool (${LOCAL_LVM_SIZE_GB}GB)"
     run_cmd "creating local-lvm thinpool" lvcreate --type thin-pool -L "${LOCAL_LVM_SIZE_MIB}M" -n data pve
     msg_ok "local-lvm thinpool created"
 
