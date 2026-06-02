@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.4.6"
+SCRIPT_VERSION="v1.4.7"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="batch9-crowdsec-key-line-clear"
+SCRIPT_BUILD="final-summary-warning-cleanup"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -198,14 +198,6 @@ function section_flash_success() {
     echo -e "${BORDER}"
     echo -e "${GN}${CLF}$1${CL}"
     echo -e "${BORDER}"
-}
-
-# --- DETAIL LINE HELPER ---
-# Prints clean script 1-style detail lines for summaries and audit output.
-function detail_line() {
-    local label="$1"
-    local value="$2"
-    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
 }
 
 # --- 6. TTY PRINT HELPER ---
@@ -2332,6 +2324,13 @@ EOF
     run_cmd "updating APT package lists" env DEBIAN_FRONTEND=noninteractive apt-get update
     msg_ok "APT PACKAGE LISTS UPDATED"
 
+    msg_info "Refreshing Proxmox package cache"
+    mkdir -p /var/lib/pve-manager
+    if command -v pveupdate >/dev/null 2>&1; then
+        run_optional pveupdate
+    fi
+    msg_ok "PROXMOX PACKAGE CACHE REFRESH REQUESTED"
+
     msg_info "Upgrading system packages"
     run_cmd "upgrading system packages" env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade
     msg_ok "SYSTEM PACKAGES UPGRADED"
@@ -2745,6 +2744,10 @@ function apply_ssh_security() {
 function apply_sysctl_tuning() {
     section "SYSCTL HARDENING & NETWORK TUNING"
 
+    msg_info "Preparing nf_conntrack sysctl availability"
+    modprobe nf_conntrack 2>/dev/null || true
+    msg_ok "NF_CONNTRACK SYSCTL AVAILABILITY CHECKED"
+
     msg_info "Writing sysctl hardening and network tuning file"
     cat <<EOF > /etc/sysctl.d/99-pve9-hardening-network.conf
 # PVE9 security hardening
@@ -2777,8 +2780,13 @@ net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_keepalive_intvl = 60
 net.ipv4.tcp_keepalive_probes = 5
-net.netfilter.nf_conntrack_max = 1048576
 EOF
+
+    if [ -e /proc/sys/net/netfilter/nf_conntrack_max ]; then
+        echo "net.netfilter.nf_conntrack_max = 1048576" >> /etc/sysctl.d/99-pve9-hardening-network.conf
+    else
+        msg_warn "nf_conntrack_max sysctl unavailable; skipping that setting"
+    fi
     msg_ok "SYSCTL HARDENING / NETWORK TUNING FILE WRITTEN"
 
     msg_info "Applying sysctl settings"
@@ -3000,7 +3008,6 @@ function enroll_crowdsec_console() {
         else
             msg_warn "CrowdSec Console status is not confirmed yet; accept the engine in the CrowdSec Console"
         fi
-        echo -e "${YW}Validate/accept this engine in https://app.crowdsec.net${CL}"
     else
         msg_warn "CrowdSec Console enrollment failed; review cscli console status manually"
         CROWDSEC_CONSOLE_ENROLLMENT="error"
@@ -3663,38 +3670,65 @@ EOF
 # --- FINAL SUMMARY ---
 # Shows a visible finished marker before reboot so the user can confirm the script completed.
 function show_final_summary() {
-    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+    local local_lvm_summary="${LOCAL_LVM_SIZE_GB} GB"
 
-    echo -e "${BL}PROXMOX PLATFORM:${CL}"
-    detail_line "PROXMOX" "$PROXMOX_VERSION"
-    detail_line "KERNEL" "$PROXMOX_KERNEL"
-    detail_line "BIOS" "$BIOS_VERSION"
-    detail_line "SYSTEM" "$SYSTEM_PRODUCT"
+    case "${STORAGE_LAYOUT_MODE:-}" in
+        preserve_local_lvm) local_lvm_summary="preserved" ;;
+        extend_root_only|skip_root_expansion) local_lvm_summary="not created" ;;
+    esac
+
+    section_flash_success "FINISHED"
+
+    echo ""
+    echo -e "${YW}PROXMOX PLATFORM:${CL}"
+    echo -e "  ${BL}Proxmox:${CL} ${GN}${PROXMOX_VERSION}${CL}"
+    echo -e "  ${BL}Kernel:${CL} ${GN}${PROXMOX_KERNEL}${CL}"
+    echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_VERSION}${CL}"
     echo ""
 
-    detail_line "SYSTEM TYPE" "$SYSTEM_TYPE"
-    detail_line "CPU" "${CPU_MODEL_CLOCK} / ${CPU_PHYSICAL_CORES} cores / ${CPU_THREADS} threads"
-    detail_line "SYSTEM RAM" "${SYSTEM_RAM_GB}GB"
-    detail_line "STORAGE LAYOUT MODE" "$STORAGE_LAYOUT_MODE"
-    detail_line "INTEGRATED GPU" "${IGPU_NAME} [${IGPU_VENDOR_DEVICE}] [${IGPU_BDF}]"
-    detail_line "DISCRETE GPU" "${DGPU_NAME} [${DGPU_VENDOR_DEVICE}] [${DGPU_BDF}]"
-    detail_line "DISCRETE GPU VRAM" "$DGPU_VRAM"
-    detail_line "GPU PASSTHROUGH" "$(yes_no_label "$ENABLE_PASSTHROUGH")"
-    detail_line "CPU PERFORMANCE" "$(yes_no_label "$ENABLE_PERFORMANCE")"
-    detail_line "CROWDSEC" "$(yes_no_label "$ENABLE_CROWDSEC")"
-    detail_line "PROXMOX FIREWALL" "$PVE_FIREWALL_APPLIED"
-    detail_line "SSH HARDENING" "$SSH_HARDENING_APPLIED"
-    detail_line "REALTEK OPTIMIZED" "$(yes_no_label "$REALTEK_OPTIMIZED")"
-    detail_line "NUMLOCK" "$(yes_no_label "$NUMLOCK_CONFIGURED")"
-    detail_line "VERIFY LOG" "$VERIFY_LOG"
+    echo -e "${YW}HOST MACHINE:${CL}"
+    echo -e "  ${BL}Vendor:${CL} ${GN}${SYSTEM_VENDOR}${CL}"
+    echo -e "  ${BL}Model:${CL} ${GN}${SYSTEM_PRODUCT}${CL}"
+    echo -e "  ${BL}Type:${CL} ${GN}${SYSTEM_TYPE}${CL}"
+    echo ""
+
+    echo -e "${YW}CPU:${CL}"
+    echo -e "  ${BL}Model/Clock:${CL} ${GN}${CPU_MODEL_CLOCK}${CL}"
+    echo -e "  ${BL}Cores/Threads:${CL} ${GN}${CPU_PHYSICAL_CORES} / ${CPU_THREADS}${CL}"
+    echo -e "  ${BL}System RAM:${CL} ${GN}${SYSTEM_RAM_GB}GB${CL}"
+    echo ""
+
+    echo -e "${YW}STORAGE:${CL}"
+    echo -e "  ${BL}Layout mode:${CL} ${GN}${STORAGE_LAYOUT_MODE}${CL}"
+    echo -e "  ${BL}Root/local:${CL} ${GN}${TARGET_ROOT_SIZE_GB} GB${CL}"
+    echo -e "  ${BL}local-lvm:${CL} ${GN}${local_lvm_summary}${CL}"
+    echo -e "  ${BL}Reserve free VG space:${CL} ${GN}${PVE_FREE_RESERVE_GB} GB${CL}"
+    echo ""
+
+    echo -e "${YW}GPU:${CL}"
+    echo -e "  ${BL}Integrated GPU:${CL} ${GN}${IGPU_NAME} [${IGPU_VENDOR_DEVICE}] [${IGPU_BDF}]${CL}"
+    echo -e "  ${BL}Discrete GPU:${CL} ${GN}${DGPU_NAME} [${DGPU_VENDOR_DEVICE}] [${DGPU_BDF}]${CL}"
+    echo -e "  ${BL}Discrete GPU VRAM:${CL} ${GN}$(display_vram_value "$DGPU_VRAM")${CL}"
+    echo -e "  ${BL}GPU passthrough:${CL} ${ANS}$(yes_no_label "$ENABLE_PASSTHROUGH")${CL}"
+    echo ""
+
+    echo -e "${YW}SECURITY:${CL}"
+    echo -e "  ${BL}SSH hardening:${CL} ${ANS}${SSH_HARDENING_APPLIED}${CL}"
+    echo -e "  ${BL}Proxmox firewall:${CL} ${GN}${PVE_FIREWALL_APPLIED}${CL}"
+    echo -e "  ${BL}CrowdSec:${CL} ${ANS}$(yes_no_label "$ENABLE_CROWDSEC")${CL}"
+    echo -e "  ${BL}Realtek optimized:${CL} ${ANS}$(yes_no_label "$REALTEK_OPTIMIZED")${CL}"
+    echo -e "  ${BL}Numlock:${CL} ${ANS}$(yes_no_label "$NUMLOCK_CONFIGURED")${CL}"
+    echo ""
+
+    echo -e "${YW}VERIFY:${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
 
     if [ "${CROWDSEC_CONSOLE_ENROLLMENT:-no}" == "pending" ] || { [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" == "yes" ] && [ "${CROWDSEC_CONSOLE_ENROLLMENT:-no}" != "no" ]; }; then
         echo ""
-        echo -e "${BL}CROWDSEC CONSOLE NEXT STEP${CL}"
-        echo -e "  ${YW}Validate/accept CrowdSec engine in https://app.crowdsec.net${CL}"
-        echo -e "  Engine name: ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME:-proxmox-${HOSTNAME_SHORT}}${CL}"
+        echo -e "${YW}CROWDSEC CONSOLE NEXT STEP:${CL}"
+        echo -e "  ${BL}Engine name:${CL} ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME:-proxmox-${HOSTNAME_SHORT}}${CL}"
+        echo -e "  ${YW}Validate/accept this engine in CrowdSec Console.${CL}"
     fi
-#    echo ""
 }
 
 # --- 54. FINAL REBOOT COUNTDOWN ---
