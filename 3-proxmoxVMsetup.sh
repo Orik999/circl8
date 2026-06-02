@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.3.4"
+SCRIPT_VERSION="v1.3.5"
 SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="cpu-details-marker-ui-polish"
+SCRIPT_BUILD="marker-yesno-recreate-mac-default"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -89,6 +89,8 @@ CUSTOM_MAC_SELECTED="no"
 RECREATE_EXISTING_VM="no"
 RECREATE_EXISTING_VMID=""
 RECREATE_EXISTING_VM_NAME=""
+RECREATE_EXISTING_MAC=""
+MAC_SOURCE=""
 
 ADVANCED_SETTINGS="n"
 MACHINE_TYPE="q35"
@@ -643,7 +645,29 @@ function marker_value_or_unknown() {
     echo "$value"
 }
 
-# --- 22A. PREVIOUS MARKER SUMMARY DISPLAY ---
+# --- 22A. MARKER BOOLEAN DISPLAY HELPER ---
+# Normalises old y/n marker values and new yes/no marker values for previous-run display.
+function marker_yes_no_value_or_unknown() {
+    local marker_file="$1"
+    local key="$2"
+    local value=""
+
+    value="$(marker_value_or_unknown "$marker_file" "$key")"
+
+    case "$value" in
+        y|Y|yes|YES|Yes|true|TRUE|True|1)
+            echo "yes"
+            ;;
+        n|N|no|NO|No|false|FALSE|False|0)
+            echo "no"
+            ;;
+        *)
+            echo "$value"
+            ;;
+    esac
+}
+
+# --- 22B. PREVIOUS MARKER SUMMARY DISPLAY ---
 # Displays previous run marker details using the unified Circl8 UI style.
 function show_previous_marker_summary() {
     local marker_file="$1"
@@ -654,7 +678,7 @@ function show_previous_marker_summary() {
     local marker_cpu_pair="unknown"
 
     completed_on="$(marker_value_or_unknown "$marker_file" "Proxmox VM Setup completed on")"
-    marker_recreate="$(marker_value_or_unknown "$marker_file" "Recreate Existing VM")"
+    marker_recreate="$(marker_yes_no_value_or_unknown "$marker_file" "Recreate Existing VM")"
     marker_cpu_cores="$(marker_value_or_unknown "$marker_file" "CPU Physical Cores")"
     marker_cpu_threads="$(marker_value_or_unknown "$marker_file" "CPU Threads")"
 
@@ -685,13 +709,13 @@ function show_previous_marker_summary() {
     echo ""
 
     echo -e "${YW}GPU SUMMARY:${CL}"
-    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "GPU Passthrough")${CL}"
+    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "GPU Passthrough")${CL}"
     echo -e "  ${BL}GPU DEVICES:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "GPU Functions Attached")${CL}"
     echo ""
 
     echo -e "${YW}NETWORK / DHCP:${CL}"
     echo -e "  ${BL}VM MAC ADDRESS:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "VM MAC Address")${CL}"
-    echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Custom MAC Selected")${CL}"
+    echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "Custom MAC Selected")${CL}"
     echo ""
 
     echo -e "${YW}PLATFORM SETTINGS:${CL}"
@@ -700,10 +724,10 @@ function show_previous_marker_summary() {
     echo -e "  ${BL}EFI FORMAT MODE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "EFI Format Mode")${CL}"
     echo -e "  ${BL}EFI FORMAT:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "EFI Format")${CL}"
     echo -e "  ${BL}CPU TYPE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "CPU Type")${CL}"
-    echo -e "  ${BL}BALLOONING:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Ballooning Enabled")${CL}"
-    echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "QEMU Guest Agent")${CL}"
-    echo -e "  ${BL}DISCARD/TRIM:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Discard/TRIM")${CL}"
-    echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Advanced Settings Used")${CL}"
+    echo -e "  ${BL}BALLOONING:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "Ballooning Enabled")${CL}"
+    echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "QEMU Guest Agent")${CL}"
+    echo -e "  ${BL}DISCARD/TRIM:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "Discard/TRIM")${CL}"
+    echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "Advanced Settings Used")${CL}"
 
     if [ "$marker_recreate" == "yes" ]; then
         echo ""
@@ -771,12 +795,14 @@ function reset_recreate_state() {
     RECREATE_EXISTING_VM="no"
     RECREATE_EXISTING_VMID=""
     RECREATE_EXISTING_VM_NAME=""
+    RECREATE_EXISTING_MAC=""
 }
 
 # --- 23D. EXISTING VMID ACTION HELPER ---
 # Handles VMID collisions immediately during input collection without destroying anything yet.
 function handle_existing_vmid() {
     local existing_name=""
+    local existing_mac=""
     local action=""
 
     if ! vm_exists "$VMID"; then
@@ -786,6 +812,7 @@ function handle_existing_vmid() {
     fi
 
     existing_name="$(get_vm_name "$VMID")"
+    existing_mac="$(get_vm_mac_from_config "$VMID" || true)"
 
     echo ""
     echo -e "${YW}Existing VM detected:${CL}"
@@ -805,7 +832,15 @@ function handle_existing_vmid() {
             RECREATE_EXISTING_VM="yes"
             RECREATE_EXISTING_VMID="$VMID"
             RECREATE_EXISTING_VM_NAME="$existing_name"
+            RECREATE_EXISTING_MAC="$existing_mac"
             tty_println "${CM} ${BL}Existing VM recreate selected:${CL} ${ANS}VM ${VMID}${CL}"
+
+            if [ -n "$RECREATE_EXISTING_MAC" ]; then
+                msg_ok "Existing VM MAC detected: ${RECREATE_EXISTING_MAC}"
+            else
+                msg_warn "Existing VM MAC could not be detected; normal MAC selection will be used"
+            fi
+
             msg_warn "VM ${VMID} will be destroyed and recreated after final confirmation"
             return 0
             ;;
@@ -2013,6 +2048,7 @@ function collect_advanced_settings() {
 # The selected MAC is explicitly written into net0 so router DHCP reservation remains stable.
 function collect_mac_configuration() {
     local custom_mac_yn=""
+    local reuse_mac_yn=""
     local entered_mac=""
 
     section "VM NETWORK / ROUTER DHCP RESERVATION"
@@ -2022,6 +2058,25 @@ function collect_mac_configuration() {
     echo -e "  ${YW}Reserve a static IP in your router using the VM MAC address.${CL}"
     echo -e "  ${YW}Use this MAC in your router reservation if you want a fixed VM IP.${CL}"
     echo ""
+
+    if [ "$RECREATE_EXISTING_VM" == "yes" ] && [ -n "$RECREATE_EXISTING_MAC" ]; then
+        echo -e "${YW}Existing VM MAC detected:${CL}"
+        echo -e "  ${BL}VM MAC ADDRESS:${CL} ${GN}${RECREATE_EXISTING_MAC}${CL}"
+        echo ""
+
+        reuse_mac_yn="$(timed_yes_no "Reuse existing VM MAC address?" "y")"
+
+        if [[ "$reuse_mac_yn" =~ ^[Yy] ]]; then
+            if mac_address_allowed_for_selection "$RECREATE_EXISTING_MAC"; then
+                VM_MAC_ADDRESS="$RECREATE_EXISTING_MAC"
+                CUSTOM_MAC_SELECTED="yes"
+                MAC_SOURCE="reused-existing"
+                tty_println "${CM} ${BL}VM MAC address:${CL} ${ANS}${VM_MAC_ADDRESS}${CL}"
+                echo -e "${YW}Use this MAC in your router reservation if you want a fixed VM IP.${CL}"
+                return 0
+            fi
+        fi
+    fi
 
     msg_info "Generating suggested VM MAC address"
     SUGGESTED_MAC_ADDRESS="$(generate_proxmox_mac)"
@@ -2047,8 +2102,10 @@ function collect_mac_configuration() {
 
             if [ "$VM_MAC_ADDRESS" == "$SUGGESTED_MAC_ADDRESS" ]; then
                 CUSTOM_MAC_SELECTED="no"
+                MAC_SOURCE="generated"
             else
                 CUSTOM_MAC_SELECTED="yes"
+                MAC_SOURCE="custom"
             fi
 
             break
@@ -2056,6 +2113,7 @@ function collect_mac_configuration() {
     else
         VM_MAC_ADDRESS="$SUGGESTED_MAC_ADDRESS"
         CUSTOM_MAC_SELECTED="no"
+        MAC_SOURCE="generated"
     fi
 
     echo -e "${BL}VM MAC ADDRESS:${CL} ${GN}${VM_MAC_ADDRESS}${CL}"
@@ -2379,10 +2437,11 @@ OS Disk: ${DISK_GB_INPUT}GB
 Storage: ${STORAGE_ID}
 Storage Type: ${STORAGE_TYPE}
 ISO: ${ISO_PATH:-none}
-GPU Passthrough: ${ENABLE_GPU}
+GPU Passthrough: $(yes_no_label "$ENABLE_GPU")
 GPU Functions Attached: ${GPU_FUNCTIONS_ATTACHED:-none}
 VM MAC Address: ${VM_MAC_ADDRESS}
-Custom MAC Selected: ${CUSTOM_MAC_SELECTED}
+MAC Source: ${MAC_SOURCE:-unknown}
+Custom MAC Selected: $(yes_no_label "$CUSTOM_MAC_SELECTED")
 Boot Order: ${BOOT_ORDER:-unknown}
 Verify Log: ${VERIFY_LOG}
 Machine Type: ${MACHINE_TYPE}
@@ -2390,16 +2449,17 @@ BIOS: ${BIOS_TYPE}
 EFI Format Mode: ${EFI_FORMAT_MODE}
 EFI Format: ${EFI_FORMAT}
 CPU Type: ${CPU_TYPE_VM}
-Ballooning Enabled: ${BALLOONING_ENABLED}
+Ballooning Enabled: $(yes_no_label "$BALLOONING_ENABLED")
 Balloon Value: ${BALLOON_VALUE}
 Network Model: ${NETWORK_MODEL}
-QEMU Guest Agent: ${QEMU_AGENT_ENABLED}
+QEMU Guest Agent: $(yes_no_label "$QEMU_AGENT_ENABLED")
 Disk Controller: ${DISK_CONTROLLER}
-Discard/TRIM: ${DISCARD_ENABLED}
-Advanced Settings Used: ${ADVANCED_SETTINGS}
-Recreate Existing VM: ${RECREATE_EXISTING_VM}
+Discard/TRIM: $(yes_no_label "$DISCARD_ENABLED")
+Advanced Settings Used: $(yes_no_label "$ADVANCED_SETTINGS")
+Recreate Existing VM: $(yes_no_label "$RECREATE_EXISTING_VM")
 Recreated VMID: ${RECREATE_EXISTING_VMID:-none}
 Recreated VM Name: ${RECREATE_EXISTING_VM_NAME:-none}
+Recreated VM MAC: ${RECREATE_EXISTING_MAC:-none}
 EOF
 
     msg_ok "completion marker written"
@@ -2530,6 +2590,9 @@ function show_final_summary() {
     echo -e "${YW}NETWORK / DHCP:${CL}"
     echo -e "  ${BL}VM MAC ADDRESS:${CL} ${ANS}${VM_MAC_ADDRESS}${CL}"
     echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${ANS}$(yes_no_label "$CUSTOM_MAC_SELECTED")${CL}"
+    if [ -n "$MAC_SOURCE" ]; then
+        echo -e "  ${BL}MAC SOURCE:${CL} ${GN}${MAC_SOURCE}${CL}"
+    fi
     echo -e "  ${YW}Reminder: reserve this MAC in your router if you want a fixed VM IP.${CL}"
     echo ""
 
