@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.4.4"
+SCRIPT_VERSION="v1.4.5"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="batch7-transient-crowdsec-cleanup"
+SCRIPT_BUILD="batch8-crowdsec-key-visible-input"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -2951,11 +2951,12 @@ function read_secret_from_tty() {
 
     if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf '%b' "${YW}${prompt}: ${CL}" > /dev/tty
-        IFS= read -r -s value < /dev/tty || true
+        IFS= read -r value < /dev/tty || true
         printf '\n' > /dev/tty
         tty_clear_previous_line
     else
-        IFS= read -r -s -p "${prompt}: " value || true
+        printf '%s: ' "$prompt" >&2
+        IFS= read -r value || true
         echo >&2
     fi
 
