@@ -15,6 +15,7 @@ RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
 GN="$(printf '\033[1;92m')"
 DGN="$(printf '\033[32m')"
+ANS="$(printf '\033[1;95m')"
 CL="$(printf '\033[m')"
 CLF="$(printf '\033[5m')"
 BFR="\\r\\033[K"
@@ -27,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.3.8"
+SCRIPT_VERSION="v1.3.9"
 SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="proxmox92-hardware-authority-fixes"
+SCRIPT_BUILD="batch2-ui-readability-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -44,7 +45,12 @@ PROXMOX_VERSION=""
 PROXMOX_KERNEL=""
 BIOS_VERSION=""
 SYSTEM_PRODUCT=""
+SYSTEM_VENDOR=""
 SYSTEM_CHASSIS=""
+BIOS_DATE=""
+OS_PRETTY=""
+SYSTEM_ARCH=""
+HOST_TYPE_LABEL="Unknown"
 SYSTEM_TYPE="Unknown"
 CHASSIS="Unknown"
 IS_VM="no"
@@ -148,16 +154,17 @@ TEMP_FILES=()
 # --- 3. HEADER FUNCTION ---
 # Displays the one-line PVE9 Post Install ASCII banner.
 function header_info {
-echo -e "${RD}
-██████╗ ██╗   ██╗███████╗ █████╗     ██████╗  ██████╗ ███████╗████████╗    ██╗███╗   ██╗███████╗████████╗ █████╗ ██╗     ██╗     
-██╔══██╗██║   ██║██╔════╝██╔══██╗    ██╔══██╗██╔═══██╗██╔════╝╚══██╔══╝    ██║████╗  ██║██╔════╝╚══██╔══╝██╔══██╗██║     ██║     
-██████╔╝██║   ██║█████╗  ╚██████║    ██████╔╝██║   ██║███████╗   ██║       ██║██╔██╗ ██║███████╗   ██║   ███████║██║     ██║     
-██╔═══╝ ╚██╗ ██╔╝██╔══╝   ╚═══██║    ██╔═══╝ ██║   ██║╚════██║   ██║       ██║██║╚██╗██║╚════██║   ██║   ██╔══██║██║     ██║     
-██║      ╚████╔╝ ███████╗ █████╔╝    ██║     ╚██████╔╝███████║   ██║       ██║██║ ╚████║███████║   ██║   ██║  ██║███████╗███████╗
-╚═╝       ╚═══╝  ╚══════╝ ╚════╝     ╚═╝      ╚═════╝ ╚══════╝   ╚═╝       ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚══════╝
-${CL}"
+    echo -e "${RD}"
+    echo "██████╗ ██████╗  ██████╗ ██╗  ██╗███╗   ███╗ ██████╗ ██╗  ██╗"
+    echo "██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝████╗ ████║██╔═══██╗╚██╗██╔╝"
+    echo "██████╔╝██████╔╝██║   ██║ ╚███╔╝ ██╔████╔██║██║   ██║ ╚███╔╝ "
+    echo "██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗ ██║╚██╔╝██║██║   ██║ ██╔██╗ "
+    echo "██║     ██║  ██║╚██████╔╝██╔╝ ██╗██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗"
+    echo "╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝"
+    echo ""
+    echo "Proxmox Setup"
+    echo -e "${CL}"
 }
-
 # --- 4. MESSAGE HELPER FUNCTIONS ---
 # Provides clean display -> apply -> success status lines.
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
@@ -290,6 +297,14 @@ function yes_no_label() {
     fi
 }
 
+function clean_prompt_label() {
+    local label="$1"
+
+    label="${label%\?}"
+    label="${label%:}"
+    printf '%s' "$label"
+}
+
 # --- 13. BLOCKING YES/NO HELPER ---
 # Used after SPACE is pressed during a timed Y/n prompt.
 # The countdown disappears and the prompt waits for Y/N/ENTER.
@@ -338,6 +353,7 @@ function timed_yes_no() {
     local key=""
     local default_label="Y/n"
     local final_label=""
+    local confirm_label=""
     local deadline=""
     local now=""
     local remaining=""
@@ -390,9 +406,10 @@ function timed_yes_no() {
 
     [ -z "$answer" ] && answer="$default"
     final_label="$(yes_no_label "$answer")"
+    confirm_label="$(clean_prompt_label "$prompt")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    tty_println "${CM} ${BL}${confirm_label}:${CL} ${ANS}${final_label}${CL}"
 
     echo "$answer"
 }
@@ -733,7 +750,7 @@ function detect_amd_vram_for_bdf() {
         fi
     done
 
-    vram="$( { journalctl -k -b --no-pager 2>/dev/null || dmesg 2>/dev/null || true; } | grep -F "$bdf" | grep -Ei 'vram|VRAM' | sed -nE 's/.*VRAM[^0-9]*([0-9]+[[:space:]]*(MiB|MB|GiB|GB)).*/\1/p' | head -n 1 | xargs || true )"
+    vram="$( { journalctl -k -b --no-pager 2>/dev/null || dmesg 2>/dev/null || true; } | grep -F "$bdf" | grep -Ei 'vram|VRAM' | sed -nE 's/.*VRAM[^0-9]*([0-9]+[[:space:]]*(MiB|MB|G[iI]B|GB)).*/\1/p' | head -n 1 | xargs || true )"
     [ -n "$vram" ] && echo "$vram"
 }
 
@@ -940,6 +957,99 @@ function build_storage_summary() {
     echo "$out" | xargs
 }
 
+function disk_kind_label() {
+    local disk="$1"
+    local rota=""
+
+    rota="$(lsblk -dn -o ROTA "/dev/${disk}" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
+    if [ "$rota" == "0" ]; then
+        echo "SSD"
+    elif [ "$rota" == "1" ]; then
+        echo "HDD"
+    else
+        echo "Disk"
+    fi
+}
+
+function root_parent_disk_name() {
+    local source="${ROOT_SOURCE:-}"
+    local resolved=""
+    local name=""
+    local parent=""
+    local type=""
+
+    [ -n "$source" ] || source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    [ -n "$source" ] || return 0
+
+    resolved="$(readlink -f "$source" 2>/dev/null || true)"
+    [ -n "$resolved" ] || resolved="$source"
+    name="$(basename "$resolved")"
+
+    while [ -n "$name" ]; do
+        type="$(lsblk -dn -o TYPE "/dev/${name}" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
+        if [ "$type" == "disk" ]; then
+            echo "$name"
+            return 0
+        fi
+
+        parent="$(lsblk -no PKNAME "/dev/${name}" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
+        [ -n "$parent" ] || break
+        name="$parent"
+    done
+
+    return 0
+}
+function display_storage_detected_block() {
+    local root_disk=""
+    local disk=""
+    local secondary_count="0"
+
+    root_disk="$(root_parent_disk_name)"
+
+    echo -e "${YW}Detected:${CL}"
+    if [ -n "$root_disk" ]; then
+        echo -e "  ${BL}System disk:${CL} ${GN}$(disk_kind_label "$root_disk") (${root_disk})${CL}"
+    else
+        echo -e "  ${BL}System disk:${CL} ${GN}not detected${CL}"
+    fi
+
+    while read -r disk; do
+        [ -z "$disk" ] && continue
+        [ "$disk" == "$root_disk" ] && continue
+        secondary_count=$((secondary_count + 1))
+        if [ "$secondary_count" -eq 1 ]; then
+            echo -e "  ${BL}Secondary disk:${CL} ${GN}$(disk_kind_label "$disk") (${disk})${CL}"
+        else
+            echo -e "  ${BL}Secondary disk ${secondary_count}:${CL} ${GN}$(disk_kind_label "$disk") (${disk})${CL}"
+        fi
+    done < <(lsblk -dn -o NAME,TYPE | awk '$2 == "disk" {print $1}')
+
+    if [ "$secondary_count" -eq 0 ]; then
+        echo -e "  ${BL}Secondary disk:${CL} ${GN}not detected${CL}"
+    fi
+
+    echo -e "  ${BL}Root filesystem:${CL} ${GN}${ROOT_FS_TYPE:-unknown} (${ROOT_SOURCE:-unknown})${CL}"
+    echo -e "  ${BL}Existing local-lvm:${CL} ${GN}${LOCAL_LVM_EXISTS}${CL}"
+}
+
+function display_vram_value() {
+    local raw="$1"
+    local amount=""
+    local suffix=""
+
+    if [[ "$raw" =~ ^([0-9]+)[[:space:]]+MiB(.*)$ ]]; then
+        amount="${BASH_REMATCH[1]}"
+        suffix="${BASH_REMATCH[2]}"
+        if [ "$amount" -gt 0 ] && [ $(( amount % 1024 )) -eq 0 ]; then
+            echo "$(( amount / 1024 )) GB${suffix}"
+        else
+            echo "${amount} MiB${suffix}"
+        fi
+    else
+        echo "${raw:-not detected}"
+    fi
+}
+
 
 # --- LAN CIDR HELPER ---
 # Converts a host IPv4/prefix such as 192.168.1.11/24 into the real network CIDR 192.168.1.0/24.
@@ -1019,19 +1129,23 @@ function print_gpu_detail_group() {
     [ -n "$lines" ] || return 0
 
     echo ""
-    echo -e "${BL}${title}:${CL}"
+    echo -e "  ${YW}${title}:${CL}"
     while IFS='|' read -r bdf vendor_device boot_vga driver gpu_name vram; do
         [ -z "$bdf" ] && continue
-        echo -e "  ${GN}${gpu_name} [${vendor_device}] [${bdf}]${CL}"
-        if [ "$title" == "Discrete GPU" ]; then
-            echo -e "  ${BL}VRAM:${CL} ${GN}${vram:-not detected}${CL}"
+        echo -e "    ${BL}Name:${CL} ${GN}${gpu_name} [${vendor_device}] [${bdf}]${CL}"
+        if [ "$title" == "Discrete" ]; then
+            echo -e "    ${BL}VRAM:${CL} ${GN}$(display_vram_value "${vram:-not detected}")${CL}"
+            echo -e "    ${BL}Driver before isolation:${CL} ${GN}${driver:-not-detected}${CL}"
+        else
+            echo -e "    ${BL}Driver:${CL} ${GN}${driver:-not-detected}${CL}"
         fi
-        echo -e "  ${BL}driver:${CL} ${GN}${driver:-not-detected}${CL}"
-        echo -e "  ${BL}boot_vga:${CL} ${GN}${boot_vga}${CL}"
-        echo -e "  ${BL}use:${CL} ${GN}${use_label}${CL}"
+        echo -e "    ${BL}Boot VGA:${CL} ${GN}${boot_vga}${CL}"
+        echo -e "    ${BL}Use:${CL} ${GN}${use_label}${CL}"
+        if [ "$title" == "Discrete" ]; then
+            echo -e "    ${BL}Same-slot functions:${CL} ${GN}${GPU_SAME_SLOT_FUNCTIONS}${CL}"
+        fi
     done <<< "$lines"
 }
-
 # --- 26. REALTEK NIC DETECTION HELPER ---
 # Detects common Realtek Linux drivers so unstable offload features can be disabled safely.
 function detect_realtek_iface() {
@@ -1237,13 +1351,20 @@ function audit_hardware() {
     ROOT_FS_TYPE="$(findmnt -n -o FSTYPE / 2>/dev/null || true)"
     ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
 
-    msg_ok "HOST HARDWARE AUDITED"
+    msg_ok "Host hardware audited"
     echo ""
-    echo -e "${BL}PROXMOX PLATFORM:${CL}"
+    echo -e "${YW}PROXMOX PLATFORM:${CL}"
     echo -e "  ${BL}Proxmox:${CL} ${GN}${PROXMOX_VERSION}${CL}"
     echo -e "  ${BL}Kernel:${CL} ${GN}${PROXMOX_KERNEL}${CL}"
+    echo -e "  ${BL}OS:${CL} ${GN}${OS_PRETTY}${CL}"
+    echo -e "  ${BL}Architecture:${CL} ${GN}${SYSTEM_ARCH}${CL}"
+    echo ""
+    echo -e "${YW}HOST MACHINE:${CL}"
+    echo -e "  ${BL}Type:${CL} ${GN}${HOST_TYPE_LABEL}${CL}"
+    echo -e "  ${BL}Vendor:${CL} ${GN}${SYSTEM_VENDOR}${CL}"
+    echo -e "  ${BL}Model:${CL} ${GN}${SYSTEM_PRODUCT}${CL}"
     echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_VERSION}${CL}"
-    echo -e "  ${BL}System:${CL} ${GN}${SYSTEM_PRODUCT}${CL}"
+    echo -e "  ${BL}BIOS date:${CL} ${GN}${BIOS_DATE}${CL}"
 }
 
 # --- 32. FRESH INSTALL DETECTION ---
@@ -1288,7 +1409,7 @@ function check_fresh_install_state() {
         countdown_exit 30 "For safety this script will not continue on a non-fresh-looking node."
     fi
 
-    msg_ok "FRESH INSTALL CHECK PASSED"
+    msg_ok "Fresh install check passed"
 }
 
 # --- 33. GPU DETECTION AND PROMPT ---
@@ -1303,33 +1424,33 @@ function detect_gpu_and_collect_choice() {
     GPU_SUMMARY="$(build_gpu_summary)"
     msg_ok "$(detected_machine_gpu_label)"
 
+    echo ""
+    echo -e "${YW}GPU:${CL}"
     if [ -n "${IGPU_LINES}${DGPU_LINES}" ]; then
-        print_gpu_detail_group "Integrated GPU" "$IGPU_LINES" "host/laptop display"
-        print_gpu_detail_group "Discrete GPU" "$DGPU_LINES" "VM passthrough candidate"
+        print_gpu_detail_group "Integrated" "$IGPU_LINES" "reserved for host/laptop screen"
+        print_gpu_detail_group "Discrete" "$DGPU_LINES" "VM passthrough candidate"
         echo ""
     else
-        echo -e " ${BL}━━━━━▶${CL} No GPU details detected"
+        echo -e "  ${BL}Detected:${CL} ${GN}No GPU details detected${CL}"
     fi
 
     ENABLE_PASSTHROUGH="n"
 
     if [ "$DGPU_FOUND" == "yes" ]; then
+        echo -e "${YW}Passthrough plan:${CL}"
         if [ "$SYSTEM_TYPE" == "Laptop" ] && [ "$IGPU_FOUND" == "yes" ]; then
-            echo -e "${YW}Integrated GPU will be kept for laptop screen.${CL}"
-            echo -e "${YW}Only the discrete GPU and same-slot function devices will be isolated.${CL}"
-        else
-            echo -e "${YW}Only the discrete GPU and same-slot function devices will be isolated.${CL}"
+            echo -e "  ${YW}Keep integrated GPU reserved for host/laptop screen.${CL}"
         fi
-
+        echo -e "  ${YW}Isolate discrete GPU same-slot functions only.${CL}"
         echo ""
         gpu_yn="$(timed_yes_no "Isolate discrete GPU for VM passthrough?" "y")"
 
         if [[ "$gpu_yn" =~ ^[Yy] ]]; then
             ENABLE_PASSTHROUGH="y"
-            msg_ok "Discrete GPU passthrough will be activated"
+            msg_ok "Discrete GPU isolation selected."
         else
             ENABLE_PASSTHROUGH="n"
-            msg_warn "Discrete GPU passthrough will not be activated"
+            msg_warn "Discrete GPU isolation not selected."
         fi
     else
         msg_ok "No discrete GPU detected. GPU passthrough will be skipped"
@@ -1339,13 +1460,11 @@ function detect_gpu_and_collect_choice() {
 # --- 34. STORAGE DETECTION DISPLAY ---
 # Displays detected disk type summary before final start prompt.
 function show_storage_detection() {
-    section "STORAGE DETECTION"
+    section "STORAGE PLAN"
 
-    msg_ok "DETECTED STORAGE TYPE"
-    echo -e " ${BL}━━━━━▶${CL} ${STORAGE_SUMMARY:-No disk summary detected}"
-    echo -e " ${BL}━━━━━▶${CL} ROOT FILESYSTEM: ${ROOT_FS_TYPE:-unknown} (${ROOT_SOURCE:-unknown})"
+    detect_storage_layout_options
+    display_storage_detected_block
 }
-
 # --- 35. USER OPTION COLLECTION ---
 # Collects optional choices using timed prompts.
 
@@ -1625,53 +1744,46 @@ function validate_storage_builder_plan() {
 
 function show_storage_plan() {
     echo ""
-    echo -e "${BL}Storage plan:${CL}"
-    detail_line "storage mode" "$STORAGE_LAYOUT_MODE"
+    echo -e "${YW}Plan:${CL}"
 
     case "$STORAGE_LAYOUT_MODE" in
         preserve_local_lvm)
-            detail_line "local-lvm detected" "yes"
-            detail_line "root/local expansion" "skipped"
-            detail_line "local-lvm creation" "skipped"
+            echo -e "  ${BL}Mode:${CL} ${GN}preserve local-lvm${CL}"
+            echo -e "  ${BL}Root/local expansion:${CL} ${GN}skipped${CL}"
+            echo -e "  ${BL}local-lvm creation:${CL} ${GN}skipped${CL}"
             ;;
         build_local_lvm)
-            detail_line "current root/local" "${CURRENT_ROOT_SIZE_GB}GB"
-            detail_line "target local visible size" "${TARGET_ROOT_SIZE_GB}GB"
-            detail_line "root LV allocation target" "${ROOT_LV_ALLOCATION_GB}GB"
-            detail_line "root growth needed" "${ROOT_GROWTH_GB}GB"
-            detail_line "current pve free" "${CURRENT_PVE_FREE_GB}GB"
-            detail_line "reserve free VG space" "${PVE_FREE_RESERVE_GB}GB"
-            detail_line "create local-lvm" "yes"
-            detail_line "local-lvm size" "${LOCAL_LVM_SIZE_GB}GB"
+            echo -e "  ${BL}Mode:${CL} ${GN}build local-lvm${CL}"
+            echo -e "  ${BL}Target root/local:${CL} ${GN}${TARGET_ROOT_SIZE_GB} GB${CL}"
+            echo -e "  ${BL}Create local-lvm:${CL} ${GN}yes${CL}"
+            echo -e "  ${BL}local-lvm size:${CL} ${GN}${LOCAL_LVM_SIZE_GB} GB${CL}"
+            echo -e "  ${BL}Reserve free VG space:${CL} ${GN}${PVE_FREE_RESERVE_GB} GB${CL}"
             ;;
         extend_root_only)
-            detail_line "current root/local" "${CURRENT_ROOT_SIZE_GB}GB"
-            detail_line "target local visible size" "${TARGET_ROOT_SIZE_GB}GB"
-            detail_line "root LV allocation target" "${ROOT_LV_ALLOCATION_GB}GB"
-            detail_line "root growth needed" "${ROOT_GROWTH_GB}GB"
-            detail_line "create local-lvm" "no"
-            detail_line "reserve free VG space" "${PVE_FREE_RESERVE_GB}GB"
+            echo -e "  ${BL}Mode:${CL} ${GN}extend root only${CL}"
+            echo -e "  ${BL}Target root/local:${CL} ${GN}${TARGET_ROOT_SIZE_GB} GB${CL}"
+            echo -e "  ${BL}Create local-lvm:${CL} ${GN}no${CL}"
+            echo -e "  ${BL}Reserve free VG space:${CL} ${GN}${PVE_FREE_RESERVE_GB} GB${CL}"
             ;;
         skip_root_expansion)
-            detail_line "root/local expansion" "skipped"
-            detail_line "local-lvm creation" "skipped"
+            echo -e "  ${BL}Mode:${CL} ${GN}skip root expansion${CL}"
+            echo -e "  ${BL}Root/local expansion:${CL} ${GN}skipped${CL}"
+            echo -e "  ${BL}local-lvm creation:${CL} ${GN}skipped${CL}"
             ;;
     esac
 }
-
 # --- STORAGE LAYOUT OPTION COLLECTOR ---
 # Preserves installer-created local-lvm or builds the requested root/local + local-lvm layout from free pve VG space.
 function collect_storage_layout_option() {
     local create_lvm_yn=""
     local default_target="100"
 
-    section "STORAGE LAYOUT OPTION"
-
     detect_storage_layout_options
 
-    detail_line "Current root/local size" "${CURRENT_ROOT_SIZE_GB}GB"
-    detail_line "Current pve VG free" "${CURRENT_PVE_FREE_GB}GB"
-    detail_line "local-lvm detected" "$LOCAL_LVM_EXISTS"
+    echo ""
+    echo -e "${YW}Current layout:${CL}"
+    echo -e "  ${BL}Root/local:${CL} ${GN}${CURRENT_ROOT_SIZE_GB} GB${CL}"
+    echo -e "  ${BL}Free pve VG space:${CL} ${GN}${CURRENT_PVE_FREE_GB} GB${CL}"
 
     if [ "$LOCAL_LVM_EXISTS" == "yes" ]; then
         STORAGE_LAYOUT_MODE="preserve_local_lvm"
@@ -1759,7 +1871,7 @@ function collect_user_options() {
     else
         ENABLE_CROWDSEC="y"
         CROWDSEC_CONSOLE_ENGINE_NAME="proxmox-${HOSTNAME_SHORT}"
-        enroll_yn="$(timed_yes_no "Enroll Proxmox CrowdSec in CrowdSec Console?" "n")"
+        enroll_yn="$(timed_yes_no "Enroll Proxmox CrowdSec?" "n")"
         if [[ "$enroll_yn" =~ ^[Yy] ]]; then
             CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="yes"
             CROWDSEC_CONSOLE_ENROLLMENT="requested"
@@ -1800,10 +1912,13 @@ function collect_user_options() {
     fi
 
     echo ""
-    echo -e "${BL}PROXMOX HOST WEB PORTS${CL}"
-    echo -e "${YW}Traefik normally handles public HTTP/HTTPS from inside the Ubuntu VM.${CL}"
-    echo -e "${YW}For this setup, router port-forwarding should usually point to the VM, not the Proxmox host.${CL}"
-    public_web_yn="$(timed_yes_no "Expose public HTTP/HTTPS 80/443 on Proxmox host firewall:" "n")"
+    echo -e "${YW}PROXMOX HOST WEB PORTS${CL}"
+    echo ""
+    echo -e "${YW}Recommendation:${CL}"
+    echo -e "  ${YW}Keep public HTTP/HTTPS on the Ubuntu VM, not on the Proxmox host.${CL}"
+    echo -e "  ${YW}Router port-forwarding should usually point to the VM.${CL}"
+    echo ""
+    public_web_yn="$(timed_yes_no "Expose public HTTP/HTTPS 80/443 on Proxmox host firewall?" "n")"
 
     if [[ "$public_web_yn" =~ ^[Yy] ]]; then
         ALLOW_PUBLIC_WEB="y"
@@ -1816,74 +1931,68 @@ function collect_user_options() {
 # Starts post-install only after detection and user choices are collected.
 function final_start_prompt() {
     local start_yn=""
+    local local_lvm_summary=""
+    local storage_mode_label=""
+    local host_summary=""
 
     section "READY TO APPLY"
 
-    echo -e "${BL}PROXMOX PLATFORM:${CL}"
-    echo -e "  Proxmox: ${GN}${PROXMOX_VERSION}${CL}"
-    echo -e "  Kernel: ${GN}${PROXMOX_KERNEL}${CL}"
-    echo -e "  BIOS: ${GN}${BIOS_VERSION}${CL}"
-    echo -e "  System: ${GN}${SYSTEM_PRODUCT}${CL}"
-    echo ""
-    echo -e "SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
-    echo -e "ROOT FS: ${GN}${ROOT_FS_TYPE:-unknown}${CL}"
-    echo -e "STORAGE: ${GN}${STORAGE_SUMMARY:-unknown}${CL}"
-    echo ""
-    echo -e "${BL}Storage:${CL}"
-    case "${STORAGE_LAYOUT_MODE:-unselected}" in
-        preserve_local_lvm)
-            echo -e "  storage mode: ${GN}preserve_local_lvm${CL}"
-            echo -e "  local-lvm detected: ${GN}yes${CL}"
-            echo -e "  root/local expansion: ${GN}skipped${CL}"
-            echo -e "  local-lvm creation: ${GN}skipped${CL}"
-            ;;
-        build_local_lvm)
-            echo -e "  current root/local: ${GN}${CURRENT_ROOT_SIZE_GB}GB${CL}"
-            echo -e "  target local visible size: ${GN}${TARGET_ROOT_SIZE_GB}GB${CL}"
-            echo -e "  root LV allocation target: ${GN}${ROOT_LV_ALLOCATION_GB}GB${CL}"
-            echo -e "  root growth needed: ${GN}${ROOT_GROWTH_GB}GB${CL}"
-            echo -e "  current pve free: ${GN}${CURRENT_PVE_FREE_GB}GB${CL}"
-            echo -e "  reserve free VG space: ${GN}${PVE_FREE_RESERVE_GB}GB${CL}"
-            echo -e "  create local-lvm: ${GN}yes${CL}"
-            echo -e "  local-lvm size: ${GN}${LOCAL_LVM_SIZE_GB}GB${CL}"
-            echo -e "  storage mode: ${GN}build_local_lvm${CL}"
-            ;;
-        extend_root_only)
-            echo -e "  storage mode: ${GN}extend_root_only${CL}"
-            echo -e "  current root/local: ${GN}${CURRENT_ROOT_SIZE_GB}GB${CL}"
-            echo -e "  target local visible size: ${GN}${TARGET_ROOT_SIZE_GB}GB${CL}"
-            echo -e "  root LV allocation target: ${GN}${ROOT_LV_ALLOCATION_GB}GB${CL}"
-            echo -e "  root growth needed: ${GN}${ROOT_GROWTH_GB}GB${CL}"
-            echo -e "  create local-lvm: ${GN}no${CL}"
-            ;;
-        skip_root_expansion)
-            echo -e "  storage mode: ${GN}skip_root_expansion${CL}"
-            echo -e "  root/local expansion: ${GN}skipped${CL}"
-            echo -e "  local-lvm creation: ${GN}skipped${CL}"
-            ;;
-        *)
-            echo -e "  storage mode: ${GN}${STORAGE_LAYOUT_MODE:-unselected}${CL}"
-            ;;
-    esac
-    echo ""
-    echo -e "DEFAULT IFACE: ${GN}${DEFAULT_IFACE:-unknown}${CL}"
-    echo -e "LAN CIDR ALLOWED FOR SSH/WEBUI: ${GN}${LAN_CIDR:-not-detected}${CL}"
-    echo -e "GPU PASSTHROUGH: ${GN}$(yes_no_label "$ENABLE_PASSTHROUGH")${CL}"
-    echo -e "CPU PERFORMANCE: ${GN}$(yes_no_label "$ENABLE_PERFORMANCE")${CL}"
-    echo -e "PUBLIC HOST 80/443: ${GN}$(yes_no_label "$ALLOW_PUBLIC_WEB")${CL}"
-    echo ""
-    echo -e "${BL}SSH:${CL}"
-    echo -e "  root keys detected: ${GN}$([ "${SSH_ROOT_KEY_COUNT:-0}" -gt 0 ] && echo yes || echo no), ${SSH_ROOT_KEY_COUNT:-0} key line(s)${CL}"
-    echo -e "  hardening: ${GN}${SSH_HARDENING_APPLIED:-audit-only}${CL}"
-    echo ""
-    echo -e "${BL}CrowdSec:${CL}"
-    echo -e "  install: ${GN}$(yes_no_label "$ENABLE_CROWDSEC")${CL}"
-    echo -e "  firewall bouncer: ${GN}$(yes_no_label "$ENABLE_CROWDSEC")${CL}"
-    echo -e "  console enrollment: ${GN}$(yes_no_label "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}")${CL}"
-    echo -e "  console engine name: ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME:-proxmox-${HOSTNAME_SHORT}}${CL}"
+    echo -e "${YW}No changes have been applied yet.${CL}"
+    echo -e "${YW}Review the plan above before continuing.${CL}"
     echo ""
 
-    start_yn="$(timed_yes_no "Start the PVE9 Post Install Script?" "y")"
+    host_summary="${SYSTEM_VENDOR} ${SYSTEM_PRODUCT}"
+    host_summary="$(printf '%s' "$host_summary" | xargs || true)"
+
+    echo -e "${YW}Platform:${CL}"
+    echo -e "  ${BL}Proxmox:${CL} ${GN}${PROXMOX_VERSION}${CL} / ${BL}Kernel:${CL} ${GN}${PROXMOX_KERNEL}${CL}"
+    echo -e "  ${BL}Host:${CL} ${GN}${host_summary} / ${HOST_TYPE_LABEL}${CL}"
+    echo ""
+
+    case "${STORAGE_LAYOUT_MODE:-unselected}" in
+        preserve_local_lvm)
+            storage_mode_label="preserve local-lvm"
+            local_lvm_summary="preserve existing"
+            ;;
+        build_local_lvm)
+            storage_mode_label="build local-lvm"
+            local_lvm_summary="create, ${LOCAL_LVM_SIZE_GB} GB"
+            ;;
+        extend_root_only)
+            storage_mode_label="extend root only"
+            local_lvm_summary="not created"
+            ;;
+        skip_root_expansion)
+            storage_mode_label="skip root expansion"
+            local_lvm_summary="not changed"
+            ;;
+        *)
+            storage_mode_label="${STORAGE_LAYOUT_MODE:-unselected}"
+            local_lvm_summary="unknown"
+            ;;
+    esac
+
+    echo -e "${YW}Storage:${CL}"
+    echo -e "  ${BL}Mode:${CL} ${GN}${storage_mode_label}${CL}"
+    echo -e "  ${BL}Root/local:${CL} ${GN}${CURRENT_ROOT_SIZE_GB} GB → ${TARGET_ROOT_SIZE_GB} GB${CL}"
+    echo -e "  ${BL}local-lvm:${CL} ${GN}${local_lvm_summary}${CL}"
+    echo -e "  ${BL}Reserve free VG space:${CL} ${GN}${PVE_FREE_RESERVE_GB} GB${CL}"
+    echo ""
+
+    echo -e "${YW}GPU:${CL}"
+    echo -e "  ${BL}Integrated:${CL} ${GN}${IGPU_NAME} / reserved for host screen${CL}"
+    echo -e "  ${BL}Discrete:${CL} ${GN}${DGPU_NAME} / $(display_vram_value "$DGPU_VRAM")${CL}"
+    echo -e "  ${BL}Passthrough:${CL} ${ANS}$(yes_no_label "$ENABLE_PASSTHROUGH")${CL}"
+    echo ""
+
+    echo -e "${YW}Security:${CL}"
+    echo -e "  ${BL}SSH hardening:${CL} ${GN}${SSH_HARDENING_APPLIED:-audit-only}${CL}"
+    echo -e "  ${BL}Proxmox firewall:${CL} ${GN}LAN-only ${LAN_CIDR:-not-detected}${CL}"
+    echo -e "  ${BL}Public host 80/443:${CL} ${ANS}$(yes_no_label "$ALLOW_PUBLIC_WEB")${CL}"
+    echo -e "  ${BL}CrowdSec:${CL} ${GN}install $(yes_no_label "$ENABLE_CROWDSEC") / console enrollment $(yes_no_label "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}")${CL}"
+    echo ""
+
+    start_yn="$(timed_yes_no "Start Proxmox setup?" "y")"
 
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
@@ -1895,7 +2004,6 @@ function final_start_prompt() {
 
     return 0
 }
-
 # =========================================================
 #  APPLY FUNCTIONS
 # =========================================================
@@ -2206,7 +2314,7 @@ EOF
     run_cmd "updating initramfs for VFIO" update-initramfs -u -k all
     msg_ok "INITRAMFS UPDATED FOR VFIO"
 
-    msg_ok "GPU ISOLATED"
+    msg_ok "Discrete GPU isolated for passthrough."
 }
 
 
@@ -2658,7 +2766,8 @@ function read_secret_from_tty() {
         IFS= read -r -s value < /dev/tty || true
         printf '
 ' > /dev/tty
-        printf '[1A[K' > /dev/tty
+        printf '[1A
+[K' > /dev/tty
     else
         IFS= read -r -s -p "${prompt}: " value || true
         echo >&2
@@ -3405,8 +3514,8 @@ function main() {
     init_script
 
     show_fresh_install_warning
-    audit_hardware
     check_fresh_install_state
+    audit_hardware
     detect_gpu_and_collect_choice
     show_storage_detection
     collect_storage_layout_option
