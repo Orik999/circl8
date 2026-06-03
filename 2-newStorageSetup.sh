@@ -111,17 +111,14 @@ TEMP_FILES=()
 # --- 3. HEADER FUNCTION ---
 # Displays the New Storage Setup ASCII banner.
 function header_info {
-    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-    echo -e "${GN}${CLF}   ███████╗████████╗ ██████╗ ██████╗  █████╗  ██████╗ ███████╗${CL}"
-    echo -e "${GN}${CLF}   ██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗██╔══██╗██╔════╝ ██╔════╝${CL}"
-    echo -e "${GN}${CLF}   ███████╗   ██║   ██║   ██║██████╔╝███████║██║  ███╗█████╗  ${CL}"
-    echo -e "${GN}${CLF}   ╚════██║   ██║   ██║   ██║██╔══██╗██╔══██║██║   ██║██╔══╝  ${CL}"
-    echo -e "${GN}${CLF}   ███████║   ██║   ╚██████╔╝██║  ██║██║  ██║╚██████╔╝███████╗${CL}"
-    echo -e "${GN}${CLF}   ╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝${CL}"
-    echo -e "${GN}${CLF}                         Storage Setup                         ${CL}"
-    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+    echo -e "${GN}$   ███████╗████████╗ ██████╗ ██████╗  █████╗  ██████╗ ███████╗${CL}"
+    echo -e "${GN}$   ██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗██╔══██╗██╔════╝ ██╔════╝${CL}"
+    echo -e "${GN}$   ███████╗   ██║   ██║   ██║██████╔╝███████║██║  ███╗█████╗  ${CL}"
+    echo -e "${GN}$   ╚════██║   ██║   ██║   ██║██╔══██╗██╔══██║██║   ██║██╔══╝  ${CL}"
+    echo -e "${GN}$   ███████║   ██║   ╚██████╔╝██║  ██║██║  ██║╚██████╔╝███████╗${CL}"
+    echo -e "${GN}$   ╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝${CL}"
+    echo -e "${GN}${CLF} Storage Setup ${CL}"
 }
-
 
 # --- 4. MESSAGE HELPER FUNCTIONS ---
 # Provides consistent status messages for display -> apply -> success flow.
@@ -1604,8 +1601,8 @@ function print_selected_data_risk_report() {
     local risk_report="$1"
     local warning=""
     local normalized=""
-
-    echo -e "${BL}Data that will be removed:${CL}"
+    echo ""
+    echo -e "${YW}Data that will be removed:${CL}"
 
     if [ -z "$risk_report" ]; then
         echo -e "  ${GN}-${CL} none detected"
@@ -1786,7 +1783,6 @@ function inspect_selected_disk() {
 # --- 37. SELECTED DISK SUMMARY ---
 # Shows selected disk details and one detailed risk report.
 function show_selected_disk_summary() {
-    echo ""
     section "SELECTED DISK"
 
     echo -e "${YW}Disk:${CL}"
