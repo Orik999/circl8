@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.4"
+SCRIPT_VERSION="v1.4.5"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="recreate-flow-ui-next-step"
+SCRIPT_BUILD="final-ui-flow-consolidation"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -103,6 +103,8 @@ SELECTED_EXISTING_CONTENT=""
 SELECTED_STORAGE_CONFLICT_REASON=""
 RESET_SECTION_SHOWN="no"
 CREATE_SECTION_SHOWN="no"
+TUNING_SECTION_SHOWN="no"
+COMPLETION_MARKER_WRITTEN="no"
 
 TEMP_FILES=()
 
@@ -1176,14 +1178,28 @@ function check_previous_marker() {
 function begin_reset_section_once() {
     if [ "$RESET_SECTION_SHOWN" != "yes" ]; then
         section "RESETTING / RECREATING DISK"
+        echo -e "${YW}Resetting:${CL}"
         RESET_SECTION_SHOWN="yes"
     fi
 }
 
 function begin_create_section_once() {
+    if [ "$RESET_SECTION_SHOWN" != "yes" ]; then
+        section "RESETTING / RECREATING DISK"
+        RESET_SECTION_SHOWN="yes"
+    fi
+
     if [ "$CREATE_SECTION_SHOWN" != "yes" ]; then
-        section "CREATING NEW STORAGE"
+        echo ""
+        echo -e "${YW}Recreating:${CL}"
         CREATE_SECTION_SHOWN="yes"
+    fi
+}
+
+function begin_tuning_section_once() {
+    if [ "$TUNING_SECTION_SHOWN" != "yes" ]; then
+        section "OPTIMIZING / TUNING STORAGE DRIVE"
+        TUNING_SECTION_SHOWN="yes"
     fi
 }
 
@@ -1394,11 +1410,11 @@ function detect_selected_disk_storage_context() {
 
 function show_existing_storage_context() {
     echo -e "${YW}Existing storage:${CL}"
-    echo -e "  ${BL}Disk:${CL} ${ANS}${SELECTED_DISK}${CL}"
-    echo -e "  ${BL}Storage ID:${CL} ${ANS}${SELECTED_EXISTING_STORAGE_ID:-$STORAGE_ID_DEFAULT}${CL}"
-    echo -e "  ${BL}VG:${CL} ${ANS}${SELECTED_EXISTING_VG:-$VG_NAME_DEFAULT}${CL}"
-    echo -e "  ${BL}Thinpool:${CL} ${ANS}${SELECTED_EXISTING_THINPOOL:-$THINPOOL_NAME_DEFAULT}${CL}"
-    echo -e "  ${BL}Content:${CL} ${ANS}${SELECTED_EXISTING_CONTENT:-$CONTENT_TYPES}${CL}"
+    echo -e "  ${BL}Disk:${CL} ${GN}${SELECTED_DISK}${CL}"
+    echo -e "  ${BL}Storage ID:${CL} ${GN}${SELECTED_EXISTING_STORAGE_ID:-$STORAGE_ID_DEFAULT}${CL}"
+    echo -e "  ${BL}VG:${CL} ${GN}${SELECTED_EXISTING_VG:-$VG_NAME_DEFAULT}${CL}"
+    echo -e "  ${BL}Thinpool:${CL} ${GN}${SELECTED_EXISTING_THINPOOL:-$THINPOOL_NAME_DEFAULT}${CL}"
+    echo -e "  ${BL}Content:${CL} ${GN}${SELECTED_EXISTING_CONTENT:-$CONTENT_TYPES}${CL}"
     if [ -n "${THINPOOL_DATA_GB:-}" ] && [ "$THINPOOL_DATA_GB" != "0" ]; then
         echo -e "  ${BL}Thinpool data:${CL} ${GN}${THINPOOL_DATA_GB} GB${CL}"
     fi
@@ -1413,6 +1429,8 @@ function choose_selected_disk_action() {
     detect_selected_disk_storage_context
 
     section "SELECTED DISK / STATUS"
+    echo -e " ${CM} ${GN}SELECTED DISK INSPECTED${CL}"
+    echo ""
 
     echo -e "${YW}Disk:${CL}"
     echo -e "  ${BL}Path:${CL} ${ANS}${SELECTED_DISK}${CL}"
@@ -1432,7 +1450,7 @@ function choose_selected_disk_action() {
             echo -e "  ${BL}2)${CL} Cancel"
             echo ""
             action="$(timed_number_input "Select action" "1" "1" "2" "quiet")"
-            msg_ok "Selected action: ${action}"
+            echo -e "${BFR} ${CM} ${GN}Selected action:${CL} ${ANS}${action}${CL}"
             case "$action" in
                 1) SELECTED_DISK_ACTION="create" ;;
                 2) echo -e "${YW}No changes made.${CL}"; exit 0 ;;
@@ -1456,7 +1474,7 @@ function choose_selected_disk_action() {
             echo -e "  ${BL}2)${CL} Cancel"
             echo ""
             action="$(timed_number_input "Select action" "2" "1" "2" "quiet")"
-            msg_ok "Selected action: ${action}"
+            echo -e "${BFR} ${CM} ${GN}Selected action:${CL} ${ANS}${action}${CL}"
             case "$action" in
                 1) SELECTED_DISK_ACTION="recreate" ;;
                 2) echo -e "${YW}No changes made.${CL}"; exit 0 ;;
@@ -1475,7 +1493,7 @@ function choose_selected_disk_action() {
             echo -e "  ${BL}3)${CL} Cancel"
             echo ""
             action="$(timed_number_input "Select action" "1" "1" "3" "quiet")"
-            msg_ok "Selected action: ${action}"
+            echo -e "${BFR} ${CM} ${GN}Selected action:${CL} ${ANS}${action}${CL}"
             case "$action" in
                 1) SELECTED_DISK_ACTION="validate-register" ;;
                 2) SELECTED_DISK_ACTION="recreate" ;;
@@ -1493,7 +1511,7 @@ function choose_selected_disk_action() {
             echo -e "  ${BL}1)${CL} Cancel"
             echo ""
             action="$(timed_number_input "Select action" "1" "1" "1" "quiet")"
-            msg_ok "Selected action: ${action}"
+            echo -e "${BFR} ${CM} ${GN}Selected action:${CL} ${ANS}${action}${CL}"
             echo -e "${YW}No changes made.${CL}"
             exit 0
             ;;
@@ -1736,7 +1754,7 @@ function select_disk() {
     show_disk_lists
     echo ""
     disk_idx="$(timed_number_input "Select disk number to format" "1" "1" "${#SAFE_DISKS[@]}" "quiet")"
-    msg_ok "Selected disk: ${disk_idx}"
+    echo -e "${BFR} ${CM} ${GN}Selected disk:${CL} ${ANS}${disk_idx}${CL}"
 
     selected_entry="${SAFE_DISKS[$((disk_idx-1))]}"
     SELECTED_DISK_NAME="$(echo "$selected_entry" | cut -d'|' -f1)"
@@ -1757,8 +1775,6 @@ function select_disk() {
 function inspect_selected_disk() {
     local rota=""
     local tran=""
-
-    msg_info "Inspecting selected disk"
 
     rota="$(lsblk -dn -o ROTA "$SELECTED_DISK" | xargs)"
     tran="$(lsblk -dn -o TRAN "$SELECTED_DISK" | xargs || true)"
@@ -1793,13 +1809,14 @@ function inspect_selected_disk() {
         HAS_DATA="no"
     fi
 
-    msg_ok "SELECTED DISK INSPECTED"
 }
 
 # --- 37. SELECTED DISK SUMMARY ---
 # Shows selected disk details and one detailed risk report.
 function show_selected_disk_summary() {
     section "SELECTED DISK / STATUS"
+    echo -e " ${CM} ${GN}SELECTED DISK INSPECTED${CL}"
+    echo ""
 
     echo -e "${YW}Disk:${CL}"
     echo -e "  ${BL}Path:${CL} ${ANS}${SELECTED_DISK}${CL}"
@@ -1827,7 +1844,7 @@ function first_destructive_confirmation() {
 }
 
 # =========================================================
-#  STORAGE CONFIGURATION INPUTS
+#  STORAGE INPUTS
 # =========================================================
 
 # --- 39. ADAPTIVE STORAGE NAMING ---
@@ -1854,7 +1871,7 @@ function set_default_storage_values_for_resume() {
 function collect_storage_names() {
     local valid_names="no"
 
-    section "STORAGE CONFIGURATION"
+    section "STORAGE CONFIG / PLAN"
 
     set_adaptive_storage_defaults
 
@@ -1875,7 +1892,7 @@ function collect_storage_names() {
     done
 }
 
-# --- 41. STORAGE CONFLICT CHECK ---
+# --- 41. STORAGE SAFETY CHECK ---
 # Prevents naming collisions with existing Proxmox storage, VGs or LVs.
 function check_storage_conflicts() {
     local proxmox_refs=""
@@ -1883,14 +1900,10 @@ function check_storage_conflicts() {
     local vg_parent_disks=""
     local mounted_lvs=""
 
-    section "CONFLICT CHECK"
-
-    msg_info "Checking for storage conflicts"
-
     if storage_id_exists "$STORAGE_ID"; then
         if storage_cfg_matches_expected "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"; then
             if [ "$SELECTED_DISK_ACTION" == "recreate" ] && [[ " ${EXISTING_VGS_ON_SELECTED_DISK} " == *" ${VG_NAME} "* ]]; then
-                msg_warn "Existing storage ${STORAGE_ID} matches selected disk and will be replaced after final confirmation."
+                :
             else
                 msg_error "Proxmox storage ID ${STORAGE_ID} is already registered correctly. Choose validate/register existing storage instead of a destructive path."
             fi
@@ -1925,7 +1938,7 @@ function check_storage_conflicts() {
         proxmox_refs="$(get_proxmox_storage_refs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK" | xargs || true)"
         if [ -n "$proxmox_refs" ]; then
             if [ "$SELECTED_DISK_ACTION" == "recreate" ]; then
-                msg_warn "Matching old Proxmox storage registration will be removed after final confirmation."
+                :
             else
                 echo ""
                 echo -e "${RD}Selected disk still backs existing Proxmox storage entries:${CL}"
@@ -1949,8 +1962,8 @@ function check_storage_conflicts() {
         fi
     fi
 
-    msg_ok "No blocking conflicts outside the selected disk."
 }
+
 
 # --- 42. EXPLICIT THINPOOL SIZING LOGIC ---
 # Uses Script 1-style UI units: visible GB maps directly to LVM GiB-style units.
@@ -2058,7 +2071,7 @@ function validate_secondary_storage_plan() {
 
 function display_storage_plan() {
     echo ""
-    section "STORAGE PLAN"
+    section "STORAGE CONFIG / PLAN"
 
     echo -e "${YW}Disk:${CL}"
     echo -e "  ${BL}Selected:${CL} ${GN}${SELECTED_DISK}${CL}"
@@ -2068,8 +2081,6 @@ function display_storage_plan() {
     echo -e "  ${BL}Action:${CL} ${ANS}$(selected_disk_action_label)${CL}"
     if [ "$HAS_DATA" == "yes" ]; then
         echo -e "  ${BL}Data risk:${CL} ${RD}destructive reuse${CL}"
-        echo -e "  ${BL}Existing VG(s):${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK:-none}${CL}"
-        echo -e "  ${BL}Existing PV(s):${CL} ${YW}${EXISTING_PVS_ON_SELECTED_DISK:-none}${CL}"
     else
         echo -e "  ${BL}Data risk:${CL} ${GN}none detected${CL}"
     fi
@@ -2126,25 +2137,12 @@ function collect_content_types() {
 function final_destructive_confirmation() {
     local final_yn=""
 
-    section "READY TO CREATE STORAGE"
-
+    echo ""
     echo -e "${YW}Final warning:${CL}"
     echo -e "  ${RD}All data on ${SELECTED_DISK} will be destroyed.${CL}"
     if [ "$SELECTED_DISK_ACTION" == "recreate" ]; then
         echo -e "  ${RD}Existing matching Proxmox storage on this disk will be replaced.${CL}"
     fi
-    echo ""
-
-    echo -e "${YW}Plan:${CL}"
-    echo -e "  ${BL}Disk:${CL} ${GN}${SELECTED_DISK}${CL}"
-    echo -e "  ${BL}Action:${CL} ${ANS}$(selected_disk_action_label)${CL}"
-    echo -e "  ${BL}Storage ID:${CL} ${ANS}${STORAGE_ID}${CL}"
-    echo -e "  ${BL}VG:${CL} ${ANS}${VG_NAME}${CL}"
-    echo -e "  ${BL}Thinpool:${CL} ${ANS}${THINPOOL_NAME}${CL}"
-    echo -e "  ${BL}Thinpool data:${CL} ${ANS}${THINPOOL_DATA_GB} GB${CL}"
-    echo -e "  ${BL}Thinpool metadata:${CL} ${ANS}${THINPOOL_METADATA_GB} GB${CL}"
-    echo -e "  ${BL}Reserve free VG:${CL} ${ANS}${VG_RESERVE_GB} GB${CL}"
-    echo -e "  ${BL}Content:${CL} ${ANS}${CONTENT_TYPES}${CL}"
     echo ""
 
     final_yn="$(timed_yes_no "Proceed with disk wipe and storage creation?" "n")"
@@ -2441,7 +2439,7 @@ function register_proxmox_storage() {
 # --- 50. SSD TRIM LOGIC ---
 # Enables fstrim timer only for SSD/NVMe devices.
 function apply_trim_logic() {
-    section "SSD TRIM"
+    begin_tuning_section_once
 
     if [ "$IS_SSD" == "yes" ]; then
         msg_info "Enabling SSD TRIM"
@@ -2494,7 +2492,7 @@ function apply_io_scheduler_tuning() {
     local dev_name=""
     local scheduler_file=""
 
-    section "IO SCHEDULER TUNING"
+    begin_tuning_section_once
 
     dev_name="$(basename "$SELECTED_DISK")"
     scheduler_file="/sys/block/${dev_name}/queue/scheduler"
@@ -2538,13 +2536,13 @@ EOF
     msg_ok "IO SCHEDULER TUNED (${IO_SCHEDULER})"
 }
 
-# --- 53. SWAPPINESS AND ZFS ARC TUNING ---
+# --- 53. SWAPPINESS AND ZFS ARC SETTINGS ---
 # Adds safe host-level memory defaults useful for VM/database workloads.
 function apply_memory_tuning() {
     local total_mem_bytes=""
     local arc_max=""
 
-    section "MEMORY TUNING"
+    begin_tuning_section_once
 
     msg_info "Writing storage memory tuning sysctl file"
     cat <<EOF > /etc/sysctl.d/98-storage-memory-tuning.conf
@@ -2991,10 +2989,6 @@ function create_verification_report() {
 # --- 55. COMPLETION MARKER ---
 # Creates marker so later reruns can detect previous setup.
 function write_completion_marker() {
-    section "COMPLETION MARKER"
-
-    msg_info "Writing New Storage Setup completion marker"
-
     cat <<EOF > "$COMPLETED_MARKER"
 New Storage Setup completed on: $(date)
 Script 2 Marker Source of Truth: yes
@@ -3026,7 +3020,7 @@ VG_RESERVE_GB=$VG_RESERVE_GB
 VG_SAFETY_OVERHEAD_GB=$VG_SAFETY_OVERHEAD_GB
 EOF
 
-    msg_ok "COMPLETION MARKER WRITTEN"
+    COMPLETION_MARKER_WRITTEN="yes"
 }
 
 # --- 56. ISO NEXT STEP REMINDER ---
@@ -3065,6 +3059,10 @@ function show_iso_next_step_reminder() {
 # Shows final storage details.
 function show_final_summary() {
     section_flash_success "FINISHED"
+
+    if [ "$COMPLETION_MARKER_WRITTEN" == "yes" ]; then
+        echo -e " ${CM} ${GN}COMPLETION MARKER WRITTEN${CL}"
+    fi
 
     echo ""
     echo -e "${YW}Disk:${CL}"
