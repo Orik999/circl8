@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.3"
+SCRIPT_VERSION="v1.4.4"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="selected-disk-action-flow"
+SCRIPT_BUILD="recreate-flow-ui-next-step"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -101,6 +101,8 @@ SELECTED_EXISTING_VG=""
 SELECTED_EXISTING_THINPOOL=""
 SELECTED_EXISTING_CONTENT=""
 SELECTED_STORAGE_CONFLICT_REASON=""
+RESET_SECTION_SHOWN="no"
+CREATE_SECTION_SHOWN="no"
 
 TEMP_FILES=()
 
@@ -111,7 +113,7 @@ TEMP_FILES=()
 # --- 3. HEADER FUNCTION ---
 # Displays the New Storage Setup ASCII banner.
 function header_info {
-    echo -e "${GN}                                                                    ${CL}"
+    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
     echo -e "${GN}   ███████╗ ████████╗  ██████╗  ██████╗   █████╗   ██████╗  ███████╗${CL}"
     echo -e "${GN}   ██╔════╝ ╚══██╔══╝ ██╔═══██╗ ██╔══██╗ ██╔══██╗ ██╔════╝  ██╔════╝${CL}"
     echo -e "${GN}   ███████╗    ██║    ██║   ██║ ██████╔╝ ███████║ ██║  ███╗ █████╗  ${CL}"
@@ -119,8 +121,8 @@ function header_info {
     echo -e "${GN}   ███████║    ██║    ╚██████╔╝ ██║  ██║ ██║  ██║ ╚██████╔╝ ███████╗${CL}"
     echo -e "${GN}   ╚══════╝    ╚═╝     ╚═════╝  ╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝  ╚══════╝${CL}"
     echo -e "${YW}${CLF}                             Storage Setup                    ${CL}"
+    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 }
-
 # --- 4. MESSAGE HELPER FUNCTIONS ---
 # Provides consistent status messages for display -> apply -> success flow.
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
@@ -1169,6 +1171,31 @@ function check_previous_marker() {
     fi
 }
 
+# --- APPLY SECTION HELPERS ---
+# Consolidates reset/recreate and new-storage progress into clean high-level sections.
+function begin_reset_section_once() {
+    if [ "$RESET_SECTION_SHOWN" != "yes" ]; then
+        section "RESETTING / RECREATING DISK"
+        RESET_SECTION_SHOWN="yes"
+    fi
+}
+
+function begin_create_section_once() {
+    if [ "$CREATE_SECTION_SHOWN" != "yes" ]; then
+        section "CREATING NEW STORAGE"
+        CREATE_SECTION_SHOWN="yes"
+    fi
+}
+
+function selected_disk_action_label() {
+    case "$SELECTED_DISK_ACTION" in
+        create) echo "create fresh storage" ;;
+        recreate) echo "wipe/recreate" ;;
+        validate-register) echo "validate/register existing" ;;
+        *) echo "${SELECTED_DISK_ACTION:-unknown}" ;;
+    esac
+}
+
 # --- SELECTED-DISK MARKER / ACTION HELPERS ---
 # Previous run state is evaluated only after the user selects a target disk.
 function marker_exists() {
@@ -1385,33 +1412,37 @@ function choose_selected_disk_action() {
 
     detect_selected_disk_storage_context
 
-    section "SELECTED DISK STATUS"
+    section "SELECTED DISK / STATUS"
+
+    echo -e "${YW}Disk:${CL}"
+    echo -e "  ${BL}Path:${CL} ${ANS}${SELECTED_DISK}${CL}"
+    echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
+    echo -e "  ${BL}Type/Bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
+    echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
+    echo ""
 
     case "$SELECTED_DISK_STATUS" in
         fresh)
-            echo -e "${YW}Status:${CL} ${GN}fresh disk${CL}"
-            echo -e "${BL}Data risk:${CL} ${GN}none detected${CL}"
+            echo -e "${YW}Status:${CL}"
+            echo -e "  ${BL}State:${CL} ${GN}fresh disk${CL}"
+            echo -e "  ${BL}Risk:${CL} ${GN}none detected${CL}"
             echo ""
-            echo -e "${YW}Storage type:${CL}"
+            echo -e "${YW}Action:${CL}"
             echo -e "  ${BL}1)${CL} ${GN}LVM-thin VM storage, snapshot-ready recommended${CL}"
             echo -e "  ${BL}2)${CL} Cancel"
             echo ""
             action="$(timed_number_input "Select action" "1" "1" "2" "quiet")"
+            msg_ok "Selected action: ${action}"
             case "$action" in
-                1)
-                    SELECTED_DISK_ACTION="create"
-                    msg_ok "LVM-thin storage creation selected."
-                    ;;
-                2)
-                    echo -e "${YW}No changes made.${CL}"
-                    exit 0
-                    ;;
+                1) SELECTED_DISK_ACTION="create" ;;
+                2) echo -e "${YW}No changes made.${CL}"; exit 0 ;;
             esac
             ;;
         data-detected)
-            echo -e "${YW}Status:${CL} ${YW}data detected${CL}"
+            echo -e "${YW}Status:${CL}"
+            echo -e "  ${BL}State:${CL} ${YW}data detected${CL}"
+            echo -e "  ${BL}Risk:${CL} ${RD}destructive reuse / existing data${CL}"
             echo ""
-            echo -e "${YW}Data risk:${CL}"
             print_selected_data_risk_report "$DATA_RISK_REPORT"
             if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
                 echo -e "  ${BL}Existing VG(s):${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK}${CL}"
@@ -1420,58 +1451,49 @@ function choose_selected_disk_action() {
                 echo -e "  ${BL}Existing PV(s):${CL} ${YW}${EXISTING_PVS_ON_SELECTED_DISK}${CL}"
             fi
             echo ""
-            echo -e "${YW}Choose action:${CL}"
-            echo -e "  ${BL}1)${CL} ${RD}Wipe/recreate this disk as new Proxmox LVM-thin storage${CL}"
+            echo -e "${YW}Action:${CL}"
+            echo -e "  ${BL}1)${CL} ${RD}Wipe/recreate this disk as fresh storage${CL}"
             echo -e "  ${BL}2)${CL} Cancel"
             echo ""
             action="$(timed_number_input "Select action" "2" "1" "2" "quiet")"
+            msg_ok "Selected action: ${action}"
             case "$action" in
-                1)
-                    SELECTED_DISK_ACTION="recreate"
-                    msg_ok "Wipe/recreate selected."
-                    ;;
-                2)
-                    echo -e "${YW}No changes made.${CL}"
-                    exit 0
-                    ;;
+                1) SELECTED_DISK_ACTION="recreate" ;;
+                2) echo -e "${YW}No changes made.${CL}"; exit 0 ;;
             esac
             ;;
         previous-script2)
-            echo -e "${YW}Status:${CL} ${GN}previous Script 2 storage detected${CL}"
+            echo -e "${YW}Status:${CL}"
+            echo -e "  ${BL}State:${CL} ${GN}previous Script 2 storage detected${CL}"
+            echo -e "  ${BL}Risk:${CL} ${RD}destructive reuse / existing storage${CL}"
             echo ""
             show_existing_storage_context
             echo ""
-            echo -e "${YW}Choose action:${CL}"
+            echo -e "${YW}Action:${CL}"
             echo -e "  ${BL}1)${CL} ${GN}Validate/register existing storage without wiping${CL}"
             echo -e "  ${BL}2)${CL} ${RD}Wipe/recreate this disk as new storage${CL}"
             echo -e "  ${BL}3)${CL} Cancel"
             echo ""
             action="$(timed_number_input "Select action" "1" "1" "3" "quiet")"
+            msg_ok "Selected action: ${action}"
             case "$action" in
-                1)
-                    SELECTED_DISK_ACTION="validate-register"
-                    msg_ok "Validate/register existing storage selected."
-                    ;;
-                2)
-                    SELECTED_DISK_ACTION="recreate"
-                    msg_ok "Wipe/recreate selected."
-                    ;;
-                3)
-                    echo -e "${YW}No changes made.${CL}"
-                    exit 0
-                    ;;
+                1) SELECTED_DISK_ACTION="validate-register" ;;
+                2) SELECTED_DISK_ACTION="recreate" ;;
+                3) echo -e "${YW}No changes made.${CL}"; exit 0 ;;
             esac
             ;;
         storage-conflict)
-            echo -e "${YW}Status:${CL} ${RD}storage conflict detected${CL}"
-            echo -e "${BL}Reason:${CL} ${RD}${SELECTED_STORAGE_CONFLICT_REASON:-unknown}${CL}"
+            echo -e "${YW}Status:${CL}"
+            echo -e "  ${BL}State:${CL} ${RD}storage conflict detected${CL}"
+            echo -e "  ${BL}Reason:${CL} ${RD}${SELECTED_STORAGE_CONFLICT_REASON:-unknown}${CL}"
             echo ""
             echo -e "${YW}Recommended action:${CL} cancel and inspect manually."
             echo ""
-            echo -e "${YW}Choose action:${CL}"
+            echo -e "${YW}Action:${CL}"
             echo -e "  ${BL}1)${CL} Cancel"
             echo ""
-            timed_number_input "Select action" "1" "1" "1" "quiet" >/dev/null
+            action="$(timed_number_input "Select action" "1" "1" "1" "quiet")"
+            msg_ok "Selected action: ${action}"
             echo -e "${YW}No changes made.${CL}"
             exit 0
             ;;
@@ -1480,7 +1502,6 @@ function choose_selected_disk_action() {
             ;;
     esac
 }
-
 function prepare_names_from_existing_context() {
     VG_NAME="${SELECTED_EXISTING_VG:-$VG_NAME_DEFAULT}"
     THINPOOL_NAME="${SELECTED_EXISTING_THINPOOL:-$THINPOOL_NAME_DEFAULT}"
@@ -1602,7 +1623,7 @@ function print_selected_data_risk_report() {
     local risk_report="$1"
     local warning=""
     local normalized=""
-    echo ""
+
     echo -e "${YW}Data that will be removed:${CL}"
 
     if [ -z "$risk_report" ]; then
@@ -1715,6 +1736,7 @@ function select_disk() {
     show_disk_lists
     echo ""
     disk_idx="$(timed_number_input "Select disk number to format" "1" "1" "${#SAFE_DISKS[@]}" "quiet")"
+    msg_ok "Selected disk: ${disk_idx}"
 
     selected_entry="${SAFE_DISKS[$((disk_idx-1))]}"
     SELECTED_DISK_NAME="$(echo "$selected_entry" | cut -d'|' -f1)"
@@ -1724,24 +1746,17 @@ function select_disk() {
     SELECTED_DISK_ENTRY_TYPE="$(echo "$selected_entry" | cut -d'|' -f6)"
     SELECTED_DISK_REUSE_REASON="$(echo "$selected_entry" | cut -d'|' -f7-)"
 
+    : "$selected_size" "$selected_model"
+
     if [ ! -b "$SELECTED_DISK" ]; then
         msg_error "Selected disk is not a block device."
     fi
-
-    if [ "$SELECTED_DISK_ENTRY_TYPE" == "destructive-reuse" ]; then
-        msg_ok "Selected disk for destructive reuse: ${SELECTED_DISK} - ${selected_model:-unknown} - ${selected_size}"
-    else
-        msg_ok "Selected disk for storage creation: ${SELECTED_DISK} - ${selected_model:-unknown} - ${selected_size}"
-    fi
 }
-
 # --- 36. SELECTED DISK SMART DETECTION ---
 # Detects SSD/HDD, NVMe/SATA/USB, disk size and existing signatures.
 function inspect_selected_disk() {
     local rota=""
     local tran=""
-
-    section "SELECTED DISK INSPECTION"
 
     msg_info "Inspecting selected disk"
 
@@ -1784,32 +1799,14 @@ function inspect_selected_disk() {
 # --- 37. SELECTED DISK SUMMARY ---
 # Shows selected disk details and one detailed risk report.
 function show_selected_disk_summary() {
-    section "SELECTED DISK"
+    section "SELECTED DISK / STATUS"
 
     echo -e "${YW}Disk:${CL}"
     echo -e "  ${BL}Path:${CL} ${ANS}${SELECTED_DISK}${CL}"
     echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e "  ${BL}Type/bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
+    echo -e "  ${BL}Type/Bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
     echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
-    echo -e "  ${BL}Mode:${CL} ${ANS}${SELECTED_DISK_ENTRY_TYPE}${CL}"
-    echo ""
-
-    echo -e "${YW}Data risk:${CL}"
-    if [ "$HAS_DATA" == "yes" ]; then
-        echo -e "  ${BL}Risk:${CL} ${RD}destructive reuse${CL}"
-        echo -e "  ${BL}Existing VG(s):${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK:-none}${CL}"
-        echo -e "  ${BL}Existing PV(s):${CL} ${YW}${EXISTING_PVS_ON_SELECTED_DISK:-none}${CL}"
-    else
-        echo -e "  ${BL}Risk:${CL} ${GN}none detected${CL}"
-    fi
-
-    print_selected_data_risk_report "$DATA_RISK_REPORT"
-
-    echo ""
-    echo -e "${YW}Destructive action:${CL}"
-    echo -e "  ${RD}Continuing will erase/recreate storage on ${SELECTED_DISK}.${CL}"
 }
-
 
 # --- 38. FIRST DESTRUCTIVE CONFIRMATION ---
 # If disk has data, default is NO. If disk looks empty, default is YES.
@@ -1893,7 +1890,7 @@ function check_storage_conflicts() {
     if storage_id_exists "$STORAGE_ID"; then
         if storage_cfg_matches_expected "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"; then
             if [ "$SELECTED_DISK_ACTION" == "recreate" ] && [[ " ${EXISTING_VGS_ON_SELECTED_DISK} " == *" ${VG_NAME} "* ]]; then
-                msg_warn "Existing storage ${STORAGE_ID} matches selected disk and will be recreated after final confirmation."
+                msg_warn "Existing storage ${STORAGE_ID} matches selected disk and will be replaced after final confirmation."
             else
                 msg_error "Proxmox storage ID ${STORAGE_ID} is already registered correctly. Choose validate/register existing storage instead of a destructive path."
             fi
@@ -1907,17 +1904,6 @@ function check_storage_conflicts() {
     fi
 
     if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
-        proxmox_refs="$(get_proxmox_storage_refs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK" | xargs || true)"
-        if [ -n "$proxmox_refs" ]; then
-            echo ""
-            echo -e "${RD}Selected disk still backs existing Proxmox storage entries:${CL}"
-            get_proxmox_storage_refs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK" | sed 's/^/  - /'
-            echo ""
-            echo -e "${YW}Remove those Proxmox storage entries first, for example:${CL}"
-            echo -e "  ${GN}pvesm remove <storage-id>${CL}"
-            msg_error "Refusing to wipe a disk referenced by existing Proxmox storage."
-        fi
-
         for vg in $EXISTING_VGS_ON_SELECTED_DISK; do
             vg_parent_disks="$(get_parent_disks_for_vg "$vg" | xargs || true)"
             if [ "$vg_parent_disks" != "${SELECTED_DISK_NAME}" ]; then
@@ -1936,12 +1922,19 @@ function check_storage_conflicts() {
             msg_error "Refusing destructive reuse while selected-disk logical volumes are mounted."
         fi
 
-        echo ""
-        echo -e "${BL}Selected disk cleanup planned:${CL}"
-        for vg in $EXISTING_VGS_ON_SELECTED_DISK; do
-            echo -e "  ${YW}-${CL} remove existing VG ${vg} from ${SELECTED_DISK}"
-        done
-        echo -e "  ${YW}-${CL} create new Proxmox storage using the names selected above"
+        proxmox_refs="$(get_proxmox_storage_refs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK" | xargs || true)"
+        if [ -n "$proxmox_refs" ]; then
+            if [ "$SELECTED_DISK_ACTION" == "recreate" ]; then
+                msg_warn "Matching old Proxmox storage registration will be removed after final confirmation."
+            else
+                echo ""
+                echo -e "${RD}Selected disk still backs existing Proxmox storage entries:${CL}"
+                get_proxmox_storage_refs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK" | sed 's/^/  - /'
+                echo ""
+                echo -e "${YW}Choose validate/register existing storage or inspect manually before wiping.${CL}"
+                msg_error "Refusing to wipe a disk referenced by existing Proxmox storage."
+            fi
+        fi
     fi
 
     if vgs "$VG_NAME" >/dev/null 2>&1; then
@@ -1958,7 +1951,6 @@ function check_storage_conflicts() {
 
     msg_ok "No blocking conflicts outside the selected disk."
 }
-
 
 # --- 42. EXPLICIT THINPOOL SIZING LOGIC ---
 # Uses Script 1-style UI units: visible GB maps directly to LVM GiB-style units.
@@ -2071,8 +2063,9 @@ function display_storage_plan() {
     echo -e "${YW}Disk:${CL}"
     echo -e "  ${BL}Selected:${CL} ${GN}${SELECTED_DISK}${CL}"
     echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e "  ${BL}Type/bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
+    echo -e "  ${BL}Type/Bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
     echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
+    echo -e "  ${BL}Action:${CL} ${ANS}$(selected_disk_action_label)${CL}"
     if [ "$HAS_DATA" == "yes" ]; then
         echo -e "  ${BL}Data risk:${CL} ${RD}destructive reuse${CL}"
         echo -e "  ${BL}Existing VG(s):${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK:-none}${CL}"
@@ -2137,25 +2130,20 @@ function final_destructive_confirmation() {
 
     echo -e "${YW}Final warning:${CL}"
     echo -e "  ${RD}All data on ${SELECTED_DISK} will be destroyed.${CL}"
-    echo ""
-
-    echo -e "${YW}Disk safety:${CL}"
-    echo -e "  ${BL}Root/boot/PVE disks:${CL} ${GN}${ROOT_PARENT_DISKS:-none}${CL}"
-    echo -e "  ${BL}Mounted disks:${CL} ${GN}${MOUNTED_PARENT_DISKS:-none}${CL}"
-    echo -e "  ${BL}Existing LVM PV disks:${CL} ${GN}${PV_PARENT_DISKS:-none}${CL}"
-    echo -e "  ${BL}Selected disk existing VG(s):${CL} ${GN}${EXISTING_VGS_ON_SELECTED_DISK:-none}${CL}"
+    if [ "$SELECTED_DISK_ACTION" == "recreate" ]; then
+        echo -e "  ${RD}Existing matching Proxmox storage on this disk will be replaced.${CL}"
+    fi
     echo ""
 
     echo -e "${YW}Plan:${CL}"
     echo -e "  ${BL}Disk:${CL} ${GN}${SELECTED_DISK}${CL}"
-    echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
+    echo -e "  ${BL}Action:${CL} ${ANS}$(selected_disk_action_label)${CL}"
+    echo -e "  ${BL}Storage ID:${CL} ${ANS}${STORAGE_ID}${CL}"
     echo -e "  ${BL}VG:${CL} ${ANS}${VG_NAME}${CL}"
     echo -e "  ${BL}Thinpool:${CL} ${ANS}${THINPOOL_NAME}${CL}"
-    echo -e "  ${BL}Storage ID:${CL} ${ANS}${STORAGE_ID}${CL}"
     echo -e "  ${BL}Thinpool data:${CL} ${ANS}${THINPOOL_DATA_GB} GB${CL}"
     echo -e "  ${BL}Thinpool metadata:${CL} ${ANS}${THINPOOL_METADATA_GB} GB${CL}"
     echo -e "  ${BL}Reserve free VG:${CL} ${ANS}${VG_RESERVE_GB} GB${CL}"
-    echo -e "  ${BL}Safety overhead:${CL} ${GN}${VG_SAFETY_OVERHEAD_GB} GB${CL}"
     echo -e "  ${BL}Content:${CL} ${ANS}${CONTENT_TYPES}${CL}"
     echo ""
 
@@ -2167,6 +2155,57 @@ function final_destructive_confirmation() {
     return 0
 }
 
+# --- MATCHING STORAGE REGISTRATION REMOVAL FOR RECREATE ---
+# Removes only Proxmox storage registrations that point to VG(s) on the selected disk after final confirmation.
+function remove_matching_proxmox_storage_for_recreate() {
+    local refs=""
+    local ref=""
+    local sid=""
+    local vg=""
+    local vg_parent_disks=""
+    local mounted_lvs=""
+    local removed="no"
+
+    [ "$SELECTED_DISK_ACTION" == "recreate" ] || return 0
+
+    begin_reset_section_once
+
+    refs="$(get_proxmox_storage_refs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK" || true)"
+    if [ -z "$refs" ]; then
+        msg_ok "No old Proxmox storage registration to remove"
+        return 0
+    fi
+
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        sid="$(echo "$ref" | awk '{print $1}')"
+        vg="$(echo "$ref" | awk '{print $4}')"
+        [ -n "$sid" ] || continue
+        [ -n "$vg" ] || msg_error "Could not determine VG for Proxmox storage reference: ${ref}"
+
+        vg_parent_disks="$(get_parent_disks_for_vg "$vg" | xargs || true)"
+        if [ "$vg_parent_disks" != "${SELECTED_DISK_NAME}" ]; then
+            msg_error "Storage ${sid} points to VG ${vg} on disk(s) ${vg_parent_disks:-unknown}, not only ${SELECTED_DISK}."
+        fi
+
+        mounted_lvs="$(get_mounted_lvs_for_vgs "$vg")"
+        if [ -n "$mounted_lvs" ]; then
+            echo ""
+            echo -e "${RD}Mounted logical volumes block safe storage removal:${CL}"
+            echo "$mounted_lvs" | sed 's/^/  - /'
+            msg_error "Refusing to remove storage ${sid} while logical volumes are mounted."
+        fi
+
+        msg_info "Removing old Proxmox storage registration"
+        run_cmd "removing old Proxmox storage ${sid}" pvesm remove "$sid"
+        msg_ok "Old Proxmox storage registration removed"
+        removed="yes"
+    done <<< "$refs"
+
+    if [ "$removed" != "yes" ]; then
+        msg_ok "No old Proxmox storage registration to remove"
+    fi
+}
 
 # --- 45. EXISTING LVM CLEANUP ---
 # Removes old VG/PV metadata on the selected disk only after explicit destructive confirmation.
@@ -2176,42 +2215,36 @@ function destroy_existing_lvm_on_selected_disk() {
 
     [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ] || [ -n "$EXISTING_PVS_ON_SELECTED_DISK" ] || return 0
 
-    section "EXISTING LVM CLEANUP"
+    begin_reset_section_once
 
-    echo -e "${RD}Removing old LVM metadata from selected disk only:${CL} ${GN}${SELECTED_DISK}${CL}"
-    echo -e "${YW}Old VG(s):${CL} ${EXISTING_VGS_ON_SELECTED_DISK:-none}"
-    echo -e "${YW}Old PV(s):${CL} ${EXISTING_PVS_ON_SELECTED_DISK:-unknown}"
-
+    msg_info "Removing old LVM metadata"
     for vg in $EXISTING_VGS_ON_SELECTED_DISK; do
         run_cmd "removing existing volume group ${vg}" vgremove -ff -y "$vg"
     done
 
-    # Also clear orphan PV metadata where a PV exists on the selected disk but no VG is attached.
-    # This runs only after destructive confirmation and only for PV devices under SELECTED_DISK.
     for pv in $EXISTING_PVS_ON_SELECTED_DISK; do
         [ -b "$pv" ] || continue
         run_optional pvremove -ff -y "$pv"
     done
 
     run_optional pvscan --cache
-    msg_ok "OLD LVM METADATA REMOVED"
+    msg_ok "Old LVM metadata removed"
 }
-
 # --- 46. DISK WIPE ---
 # Clears old filesystem, partition and LVM signatures.
 # Failures are critical and stop the script.
 function wipe_selected_disk() {
-    section "DISK WIPE"
+    begin_reset_section_once
 
     msg_info "Wiping filesystem signatures"
     run_cmd "wiping filesystem signatures on ${SELECTED_DISK}" wipefs -a "$SELECTED_DISK"
-    msg_ok "FILESYSTEM SIGNATURES WIPED"
+    msg_ok "Filesystem signatures wiped"
 
     msg_info "Zapping partition table"
     run_cmd "zapping partition table on ${SELECTED_DISK}" sgdisk --zap-all "$SELECTED_DISK"
-    msg_ok "PARTITION TABLE ZAPPED"
+    msg_ok "Partition table zapped"
 
-    msg_info "Requesting kernel partition table reread"
+    msg_info "Preparing disk"
     run_optional blockdev --rereadpt "$SELECTED_DISK"
 
     if command -v partprobe >/dev/null 2>&1; then
@@ -2227,55 +2260,51 @@ function wipe_selected_disk() {
     fi
 
     sleep 2
-    msg_ok "DISK PREPARED"
+    msg_ok "Disk prepared"
 }
-
 
 # --- 46. LVM PHYSICAL VOLUME ---
 # Creates an aligned LVM physical volume on the whole disk.
 function create_lvm_physical_volume() {
-    section "LVM PHYSICAL VOLUME"
+    begin_create_section_once
 
-    msg_info "Creating LVM physical volume"
+    msg_info "Creating physical volume"
     run_cmd "creating LVM physical volume on ${SELECTED_DISK}" pvcreate -y --force "$SELECTED_DISK"
     PV_CREATED="yes"
-    msg_ok "PHYSICAL VOLUME CREATED"
+    msg_ok "Physical volume created"
 }
-
 # --- 47. LVM VOLUME GROUP ---
 # Creates dedicated VG for this secondary storage device.
 function create_lvm_volume_group() {
-    section "LVM VOLUME GROUP"
+    begin_create_section_once
 
-    msg_info "Creating LVM volume group"
+    msg_info "Creating volume group"
     run_cmd "creating LVM volume group ${VG_NAME}" vgcreate -y "$VG_NAME" "$SELECTED_DISK"
     VG_CREATED="yes"
-    msg_ok "VOLUME GROUP CREATED"
+    msg_ok "Volume group created"
 }
-
 # --- 48. LVM THINPOOL CREATION ---
 # Creates thinpool with adaptive free-space reserve and automatic metadata sizing.
 function create_lvm_thinpool() {
-    section "LVM THINPOOL"
+    begin_create_section_once
 
     ACTUAL_VG_FREE_MIB="$(get_actual_vg_free_mib "$VG_NAME")"
     ACTUAL_VG_FREE_GB="$(lvm_mib_to_ui_gb "$ACTUAL_VG_FREE_MIB")"
     validate_secondary_storage_plan "$ACTUAL_VG_FREE_GB"
 
-    msg_info "Creating LVM thinpool (${THINPOOL_DATA_GB}GB data, ${THINPOOL_METADATA_GB}GB metadata)"
+    msg_info "Creating thinpool"
     run_cmd "creating LVM thinpool ${VG_NAME}/${THINPOOL_NAME}" lvcreate -y -L "${THINPOOL_DATA_MIB}M" --poolmetadatasize "${THINPOOL_METADATA_GB}G" --thinpool "$THINPOOL_NAME" "$VG_NAME"
     THINPOOL_CREATED="yes"
-    msg_ok "LVM THINPOOL CREATED"
+    msg_ok "Thinpool created"
 
-    msg_info "Enabling LVM thinpool monitoring"
+    msg_info "Enabling thinpool monitoring"
     run_optional lvchange --monitor y "${VG_NAME}/${THINPOOL_NAME}"
-    msg_ok "LVM THINPOOL MONITORING ENABLED"
+    msg_ok "Thinpool monitoring enabled"
 
     msg_info "Backing up LVM metadata"
     run_cmd "backing up LVM metadata for ${VG_NAME}" vgcfgbackup "$VG_NAME"
-    msg_ok "LVM METADATA BACKED UP"
+    msg_ok "LVM metadata backed up"
 }
-
 
 # --- 49. EXISTING STORAGE RESUME / IDEMPOTENCY ---
 # Detects and handles the safe post-LVM/pre-registration recovery state.
@@ -2385,7 +2414,11 @@ function handle_existing_storage_resume() {
 # --- 50. PROXMOX STORAGE REGISTRATION ---
 # Registers the thinpool in Proxmox with selected content types.
 function register_proxmox_storage() {
-    section "PROXMOX STORAGE REGISTRATION"
+    if [ "$SELECTED_DISK_ACTION" == "validate-register" ]; then
+        section "PROXMOX STORAGE REGISTRATION"
+    else
+        begin_create_section_once
+    fi
 
     if storage_id_exists "$STORAGE_ID"; then
         msg_info "Proxmox storage ${STORAGE_ID} already exists; validating expected config"
@@ -2393,7 +2426,7 @@ function register_proxmox_storage() {
         return 0
     fi
 
-    msg_info "Registering storage in Proxmox"
+    msg_info "Registering Proxmox storage"
 
     run_cmd "registering Proxmox storage ${STORAGE_ID}" \
         pvesm add lvmthin "$STORAGE_ID" \
@@ -2403,9 +2436,8 @@ function register_proxmox_storage() {
 
     validate_registered_storage "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"
 
-    msg_ok "STORAGE REGISTERED"
+    msg_ok "Proxmox storage registered"
 }
-
 # --- 50. SSD TRIM LOGIC ---
 # Enables fstrim timer only for SSD/NVMe devices.
 function apply_trim_logic() {
@@ -2972,6 +3004,7 @@ Disk Type: $DISK_TYPE
 Disk Bus: $DISK_BUS
 Disk Model: ${DISK_MODEL:-unknown}
 Disk Size GB: $DISK_SIZE_GB
+Selected Action: $(selected_disk_action_label)
 Storage ID: $STORAGE_ID
 VG: $VG_NAME
 Thinpool: $THINPOOL_NAME
@@ -2983,6 +3016,7 @@ Content Types: $CONTENT_TYPES
 IO Scheduler: $IO_SCHEDULER
 Verify Log: $VERIFY_FILE
 SCRIPT2_STATUS=completed
+SELECTED_DISK_ACTION=$SELECTED_DISK_ACTION
 STORAGE_ID=$STORAGE_ID
 VG_NAME=$VG_NAME
 THINPOOL_NAME=$THINPOOL_NAME
@@ -3014,67 +3048,53 @@ function show_iso_next_step_reminder() {
 
     [ -n "$proxmox_ip" ] || proxmox_ip="<proxmox-ip>"
 
-    section "NEXT STEP BEFORE SCRIPT 3 / 3.5"
+    section "Next Step"
 
-    echo -e "${CLF}${YW}⚠ Make sure the Ubuntu Server ISO is available on the Proxmox host.${CL}"
+    echo -e "${YW}Upload Ubuntu Server ISO:${CL}"
     echo ""
-    echo -e "${BL}Option A - upload in Proxmox Web UI:${CL}"
-    echo -e "  node ${GN}${proxmox_node}${CL} / local / ISO Images / Upload"
+    echo -e "  ${BL}Proxmox Web UI:${CL}"
+    echo -e "    ${GN}https://${proxmox_ip}:8006 > ${proxmox_node} > local > ISO Images > Upload${CL}"
     echo ""
-    echo -e "${BL}Option B - copy from your laptop:${CL}"
-    echo -e "  ${GN}scp /path/to/ubuntu-live-server.iso root@${proxmox_ip}:/var/lib/vz/template/iso/${CL}"
+    echo -e "  ${BL}Or copy from your laptop:${CL}"
+    echo -e "    ${GN}scp /path/to/ubuntu-live-server.iso root@${proxmox_ip}:/var/lib/vz/template/iso/${CL}"
     echo ""
-    echo -e "${BL}Expected Proxmox ISO directory:${CL}"
-    echo -e "  ${GN}/var/lib/vz/template/iso/${CL}"
+    echo -e "  ${YW}Then run Script 3.${CL}"
     echo ""
 }
-
 # --- 57. FINAL SUMMARY ---
 # Shows final storage details.
 function show_final_summary() {
     section_flash_success "FINISHED"
 
     echo ""
-    echo -e "${YW}SECONDARY STORAGE:${CL}"
-    echo -e "  ${BL}Disk:${CL} ${GN}${SELECTED_DISK}${CL}"
+    echo -e "${YW}Disk:${CL}"
+    echo -e "  ${BL}Selected:${CL} ${GN}${SELECTED_DISK}${CL}"
     echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e "  ${BL}Type/bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
+    echo -e "  ${BL}Type/Bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
     echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
+    echo -e "  ${BL}Action:${CL} ${ANS}$(selected_disk_action_label)${CL}"
     echo ""
 
-    echo -e "${YW}PROXMOX STORAGE:${CL}"
-    echo -e "  ${BL}Storage ID:${CL} ${GN}${STORAGE_ID}${CL}"
+    echo -e "${YW}Storage:${CL}"
     echo -e "  ${BL}VG:${CL} ${GN}${VG_NAME}${CL}"
     echo -e "  ${BL}Thinpool:${CL} ${GN}${THINPOOL_NAME}${CL}"
+    echo -e "  ${BL}Storage ID:${CL} ${GN}${STORAGE_ID}${CL}"
     echo -e "  ${BL}Content:${CL} ${GN}${CONTENT_TYPES}${CL}"
     echo ""
 
-    echo -e "${YW}SIZING:${CL}"
+    echo -e "${YW}Sizing:${CL}"
     echo -e "  ${BL}Thinpool data:${CL} ${GN}${THINPOOL_DATA_GB} GB${CL}"
     echo -e "  ${BL}Thinpool metadata:${CL} ${GN}${THINPOOL_METADATA_GB} GB${CL}"
     echo -e "  ${BL}Reserve free VG:${CL} ${GN}${VG_RESERVE_GB} GB${CL}"
-    echo -e "  ${BL}Safety overhead:${CL} ${GN}${VG_SAFETY_OVERHEAD_GB} GB${CL}"
     echo ""
 
-    echo -e "${YW}TUNING:${CL}"
-    echo -e "  ${BL}SSD TRIM:${CL} ${GN}$([ "$IS_SSD" == "yes" ] && echo enabled || echo skipped)${CL}"
-    echo -e "  ${BL}IO scheduler:${CL} ${GN}${IO_SCHEDULER}${CL}"
-    echo -e "  ${BL}Memory tuning:${CL} ${GN}applied${CL}"
-    echo ""
-
-    echo -e "${YW}VERIFY:${CL}"
+    echo -e "${YW}Verification:${CL}"
     echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}"
-    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
-    echo -e "  ${BL}Warnings:${CL} ${GN}${VERIFY_WARN_COUNT}${CL}"
-    echo -e "  ${BL}Failed checks:${CL} ${GN}${VERIFY_FAIL_COUNT}${CL}"
     echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_FILE}${CL}"
-    echo ""
-    echo -e "${YW}New Proxmox LVM-thin storage is ready for VM disks, containers and backups according to selected content types.${CL}"
     echo ""
 
     show_iso_next_step_reminder
 }
-
 
 # --- 58. MAIN FUNCTION ---
 # Runs validation -> safe disk selection -> configuration -> destructive apply -> verification.
@@ -3086,7 +3106,6 @@ function main() {
     audit_disks
     select_disk
     inspect_selected_disk
-    show_selected_disk_summary
     choose_selected_disk_action
 
     if [ "$SELECTED_DISK_ACTION" == "validate-register" ]; then
@@ -3099,6 +3118,7 @@ function main() {
     collect_thinpool_sizing
     final_destructive_confirmation
 
+    remove_matching_proxmox_storage_for_recreate
     destroy_existing_lvm_on_selected_disk
     wipe_selected_disk
     create_lvm_physical_volume
