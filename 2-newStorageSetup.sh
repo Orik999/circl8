@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.2"
+SCRIPT_VERSION="v1.4.3"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="ui-consolidation-reserve-overhead"
+SCRIPT_BUILD="selected-disk-action-flow"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -94,6 +94,14 @@ VG_CREATED="no"
 THINPOOL_CREATED="no"
 STORAGE_REGISTERED="no"
 
+SELECTED_DISK_ACTION=""
+SELECTED_DISK_STATUS="unknown"
+SELECTED_EXISTING_STORAGE_ID=""
+SELECTED_EXISTING_VG=""
+SELECTED_EXISTING_THINPOOL=""
+SELECTED_EXISTING_CONTENT=""
+SELECTED_STORAGE_CONFLICT_REASON=""
+
 TEMP_FILES=()
 
 # =========================================================
@@ -104,7 +112,13 @@ TEMP_FILES=()
 # Displays the New Storage Setup ASCII banner.
 function header_info {
     echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-    echo -e "${GN}${CLF}                    Storage Setup                    ${CL}"
+    echo -e "${GN}${CLF}   ███████╗████████╗ ██████╗ ██████╗  █████╗  ██████╗ ███████╗${CL}"
+    echo -e "${GN}${CLF}   ██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗██╔══██╗██╔════╝ ██╔════╝${CL}"
+    echo -e "${GN}${CLF}   ███████╗   ██║   ██║   ██║██████╔╝███████║██║  ███╗█████╗  ${CL}"
+    echo -e "${GN}${CLF}   ╚════██║   ██║   ██║   ██║██╔══██╗██╔══██║██║   ██║██╔══╝  ${CL}"
+    echo -e "${GN}${CLF}   ███████║   ██║   ╚██████╔╝██║  ██║██║  ██║╚██████╔╝███████╗${CL}"
+    echo -e "${GN}${CLF}   ╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝${CL}"
+    echo -e "${GN}${CLF}                         Storage Setup                         ${CL}"
     echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 }
 
@@ -1157,6 +1171,361 @@ function check_previous_marker() {
     fi
 }
 
+# --- SELECTED-DISK MARKER / ACTION HELPERS ---
+# Previous run state is evaluated only after the user selects a target disk.
+function marker_exists() {
+    [ -f "$COMPLETED_MARKER" ]
+}
+
+function marker_value() {
+    local field="$1"
+    [ -r "$COMPLETED_MARKER" ] || return 0
+
+    awk -F': ' -v field="$field" '$1 == field {print $2; exit}' "$COMPLETED_MARKER" 2>/dev/null | xargs || true
+}
+
+function marker_key_value() {
+    local key="$1"
+    [ -r "$COMPLETED_MARKER" ] || return 0
+
+    awk -F'=' -v key="$key" '$1 == key {print $2; exit}' "$COMPLETED_MARKER" 2>/dev/null | xargs || true
+}
+
+function marker_disk_from_file() {
+    local value=""
+    value="$(marker_value "Disk")"
+    [ -n "$value" ] || value="$(marker_key_value "SELECTED_DISK")"
+    echo "$value"
+}
+
+function marker_storage_id_from_file() {
+    local value=""
+    value="$(marker_value "Storage ID")"
+    [ -n "$value" ] || value="$(marker_key_value "STORAGE_ID")"
+    echo "$value"
+}
+
+function marker_vg_from_file() {
+    local value=""
+    value="$(marker_value "VG")"
+    [ -n "$value" ] || value="$(marker_key_value "VG_NAME")"
+    echo "$value"
+}
+
+function marker_thinpool_from_file() {
+    local value=""
+    value="$(marker_value "Thinpool")"
+    [ -n "$value" ] || value="$(marker_key_value "THINPOOL_NAME")"
+    echo "$value"
+}
+
+function marker_content_from_file() {
+    local value=""
+    value="$(marker_value "Content Types")"
+    echo "$value"
+}
+
+function marker_matches_selected_disk() {
+    local marker_disk=""
+    marker_disk="$(marker_disk_from_file)"
+    [ -n "$marker_disk" ] || return 1
+    [ "$marker_disk" == "$SELECTED_DISK" ]
+}
+
+function storage_id_for_vg_from_cfg() {
+    local target_vg="$1"
+    local sid=""
+    local cfg_vg=""
+
+    while read -r sid; do
+        [ -z "$sid" ] && continue
+        cfg_vg="$(get_storage_cfg_field "$sid" vgname | xargs || true)"
+        if [ "$cfg_vg" == "$target_vg" ]; then
+            echo "$sid"
+            return 0
+        fi
+    done < <(get_storage_ids_from_cfg || true)
+}
+
+function thinpool_for_storage_from_cfg() {
+    local sid="$1"
+    get_storage_cfg_field "$sid" thinpool | xargs || true
+}
+
+function content_for_storage_from_cfg() {
+    local sid="$1"
+    get_storage_cfg_field "$sid" content | xargs || true
+}
+
+function selected_disk_expected_vg() {
+    local marker_vg=""
+    marker_vg="$(marker_vg_from_file)"
+    if marker_matches_selected_disk && [ -n "$marker_vg" ]; then
+        echo "$marker_vg"
+        return 0
+    fi
+
+    if [[ " ${EXISTING_VGS_ON_SELECTED_DISK} " == *" ${VG_NAME_DEFAULT} "* ]]; then
+        echo "$VG_NAME_DEFAULT"
+        return 0
+    fi
+
+    echo ""
+}
+
+function selected_disk_has_existing_script2_storage() {
+    local candidate_vg=""
+    local candidate_thinpool=""
+
+    candidate_vg="$(selected_disk_expected_vg)"
+    [ -n "$candidate_vg" ] || return 1
+
+    candidate_thinpool="$THINPOOL_NAME_DEFAULT"
+    if marker_matches_selected_disk && [ -n "$(marker_thinpool_from_file)" ]; then
+        candidate_thinpool="$(marker_thinpool_from_file)"
+    fi
+
+    [[ " ${EXISTING_VGS_ON_SELECTED_DISK} " == *" ${candidate_vg} "* ]] || return 1
+    lvs "${candidate_vg}/${candidate_thinpool}" >/dev/null 2>&1
+}
+
+function selected_disk_storage_registered() {
+    local candidate_vg="${1:-}"
+    local sid=""
+
+    [ -n "$candidate_vg" ] || candidate_vg="$(selected_disk_expected_vg)"
+    [ -n "$candidate_vg" ] || return 1
+
+    sid="$(storage_id_for_vg_from_cfg "$candidate_vg")"
+    [ -n "$sid" ] || return 1
+    storage_id_in_pvesm_status "$sid" || storage_id_in_cfg "$sid"
+}
+
+function detect_selected_disk_storage_context() {
+    local marker_sid=""
+    local marker_vg=""
+    local marker_thinpool=""
+    local marker_content=""
+    local candidate_vg=""
+    local cfg_sid=""
+    local cfg_thinpool=""
+    local cfg_content=""
+    local proxmox_refs=""
+
+    SELECTED_DISK_STATUS="unknown"
+    SELECTED_EXISTING_STORAGE_ID=""
+    SELECTED_EXISTING_VG=""
+    SELECTED_EXISTING_THINPOOL=""
+    SELECTED_EXISTING_CONTENT=""
+    SELECTED_STORAGE_CONFLICT_REASON=""
+
+    marker_sid="$(marker_storage_id_from_file)"
+    marker_vg="$(marker_vg_from_file)"
+    marker_thinpool="$(marker_thinpool_from_file)"
+    marker_content="$(marker_content_from_file)"
+
+    if marker_exists && marker_matches_selected_disk; then
+        SELECTED_DISK_STATUS="previous-script2"
+        SELECTED_EXISTING_STORAGE_ID="${marker_sid:-$STORAGE_ID_DEFAULT}"
+        SELECTED_EXISTING_VG="${marker_vg:-$VG_NAME_DEFAULT}"
+        SELECTED_EXISTING_THINPOOL="${marker_thinpool:-$THINPOOL_NAME_DEFAULT}"
+        SELECTED_EXISTING_CONTENT="${marker_content:-$CONTENT_TYPES}"
+        return 0
+    fi
+
+    candidate_vg="$(selected_disk_expected_vg)"
+    if [ -n "$candidate_vg" ] && selected_disk_has_existing_script2_storage; then
+        cfg_sid="$(storage_id_for_vg_from_cfg "$candidate_vg")"
+        cfg_thinpool=""
+        cfg_content=""
+        if [ -n "$cfg_sid" ]; then
+            cfg_thinpool="$(thinpool_for_storage_from_cfg "$cfg_sid")"
+            cfg_content="$(content_for_storage_from_cfg "$cfg_sid")"
+        fi
+
+        SELECTED_DISK_STATUS="previous-script2"
+        SELECTED_EXISTING_STORAGE_ID="${cfg_sid:-$STORAGE_ID_DEFAULT}"
+        SELECTED_EXISTING_VG="$candidate_vg"
+        SELECTED_EXISTING_THINPOOL="${cfg_thinpool:-$THINPOOL_NAME_DEFAULT}"
+        SELECTED_EXISTING_CONTENT="${cfg_content:-$CONTENT_TYPES}"
+        return 0
+    fi
+
+    if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
+        proxmox_refs="$(get_proxmox_storage_refs_for_vgs "$EXISTING_VGS_ON_SELECTED_DISK" | xargs || true)"
+        if [ -n "$proxmox_refs" ]; then
+            SELECTED_DISK_STATUS="storage-conflict"
+            SELECTED_STORAGE_CONFLICT_REASON="selected disk backs existing Proxmox storage: ${proxmox_refs}"
+            return 0
+        fi
+    fi
+
+    if [ "$HAS_DATA" == "yes" ]; then
+        SELECTED_DISK_STATUS="data-detected"
+    else
+        SELECTED_DISK_STATUS="fresh"
+    fi
+}
+
+function show_existing_storage_context() {
+    echo -e "${YW}Existing storage:${CL}"
+    echo -e "  ${BL}Disk:${CL} ${ANS}${SELECTED_DISK}${CL}"
+    echo -e "  ${BL}Storage ID:${CL} ${ANS}${SELECTED_EXISTING_STORAGE_ID:-$STORAGE_ID_DEFAULT}${CL}"
+    echo -e "  ${BL}VG:${CL} ${ANS}${SELECTED_EXISTING_VG:-$VG_NAME_DEFAULT}${CL}"
+    echo -e "  ${BL}Thinpool:${CL} ${ANS}${SELECTED_EXISTING_THINPOOL:-$THINPOOL_NAME_DEFAULT}${CL}"
+    echo -e "  ${BL}Content:${CL} ${ANS}${SELECTED_EXISTING_CONTENT:-$CONTENT_TYPES}${CL}"
+    if [ -n "${THINPOOL_DATA_GB:-}" ] && [ "$THINPOOL_DATA_GB" != "0" ]; then
+        echo -e "  ${BL}Thinpool data:${CL} ${GN}${THINPOOL_DATA_GB} GB${CL}"
+    fi
+    if [ -n "${THINPOOL_METADATA_GB:-}" ] && [ "$THINPOOL_METADATA_GB" != "0" ]; then
+        echo -e "  ${BL}Thinpool metadata:${CL} ${GN}${THINPOOL_METADATA_GB} GB${CL}"
+    fi
+}
+
+function choose_selected_disk_action() {
+    local action=""
+
+    detect_selected_disk_storage_context
+
+    section "SELECTED DISK STATUS"
+
+    case "$SELECTED_DISK_STATUS" in
+        fresh)
+            echo -e "${YW}Status:${CL} ${GN}fresh disk${CL}"
+            echo -e "${BL}Data risk:${CL} ${GN}none detected${CL}"
+            echo ""
+            echo -e "${YW}Storage type:${CL}"
+            echo -e "  ${BL}1)${CL} ${GN}LVM-thin VM storage, snapshot-ready recommended${CL}"
+            echo -e "  ${BL}2)${CL} Cancel"
+            echo ""
+            action="$(timed_number_input "Select action" "1" "1" "2" "quiet")"
+            case "$action" in
+                1)
+                    SELECTED_DISK_ACTION="create"
+                    msg_ok "LVM-thin storage creation selected."
+                    ;;
+                2)
+                    echo -e "${YW}No changes made.${CL}"
+                    exit 0
+                    ;;
+            esac
+            ;;
+        data-detected)
+            echo -e "${YW}Status:${CL} ${YW}data detected${CL}"
+            echo ""
+            echo -e "${YW}Data risk:${CL}"
+            print_selected_data_risk_report "$DATA_RISK_REPORT"
+            if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
+                echo -e "  ${BL}Existing VG(s):${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK}${CL}"
+            fi
+            if [ -n "$EXISTING_PVS_ON_SELECTED_DISK" ]; then
+                echo -e "  ${BL}Existing PV(s):${CL} ${YW}${EXISTING_PVS_ON_SELECTED_DISK}${CL}"
+            fi
+            echo ""
+            echo -e "${YW}Choose action:${CL}"
+            echo -e "  ${BL}1)${CL} ${RD}Wipe/recreate this disk as new Proxmox LVM-thin storage${CL}"
+            echo -e "  ${BL}2)${CL} Cancel"
+            echo ""
+            action="$(timed_number_input "Select action" "2" "1" "2" "quiet")"
+            case "$action" in
+                1)
+                    SELECTED_DISK_ACTION="recreate"
+                    msg_ok "Wipe/recreate selected."
+                    ;;
+                2)
+                    echo -e "${YW}No changes made.${CL}"
+                    exit 0
+                    ;;
+            esac
+            ;;
+        previous-script2)
+            echo -e "${YW}Status:${CL} ${GN}previous Script 2 storage detected${CL}"
+            echo ""
+            show_existing_storage_context
+            echo ""
+            echo -e "${YW}Choose action:${CL}"
+            echo -e "  ${BL}1)${CL} ${GN}Validate/register existing storage without wiping${CL}"
+            echo -e "  ${BL}2)${CL} ${RD}Wipe/recreate this disk as new storage${CL}"
+            echo -e "  ${BL}3)${CL} Cancel"
+            echo ""
+            action="$(timed_number_input "Select action" "1" "1" "3" "quiet")"
+            case "$action" in
+                1)
+                    SELECTED_DISK_ACTION="validate-register"
+                    msg_ok "Validate/register existing storage selected."
+                    ;;
+                2)
+                    SELECTED_DISK_ACTION="recreate"
+                    msg_ok "Wipe/recreate selected."
+                    ;;
+                3)
+                    echo -e "${YW}No changes made.${CL}"
+                    exit 0
+                    ;;
+            esac
+            ;;
+        storage-conflict)
+            echo -e "${YW}Status:${CL} ${RD}storage conflict detected${CL}"
+            echo -e "${BL}Reason:${CL} ${RD}${SELECTED_STORAGE_CONFLICT_REASON:-unknown}${CL}"
+            echo ""
+            echo -e "${YW}Recommended action:${CL} cancel and inspect manually."
+            echo ""
+            echo -e "${YW}Choose action:${CL}"
+            echo -e "  ${BL}1)${CL} Cancel"
+            echo ""
+            timed_number_input "Select action" "1" "1" "1" "quiet" >/dev/null
+            echo -e "${YW}No changes made.${CL}"
+            exit 0
+            ;;
+        *)
+            msg_error "Unable to determine selected disk action state."
+            ;;
+    esac
+}
+
+function prepare_names_from_existing_context() {
+    VG_NAME="${SELECTED_EXISTING_VG:-$VG_NAME_DEFAULT}"
+    THINPOOL_NAME="${SELECTED_EXISTING_THINPOOL:-$THINPOOL_NAME_DEFAULT}"
+    STORAGE_ID="${SELECTED_EXISTING_STORAGE_ID:-$STORAGE_ID_DEFAULT}"
+    CONTENT_TYPES="${SELECTED_EXISTING_CONTENT:-$CONTENT_TYPES}"
+}
+
+function run_existing_storage_validate_register_path() {
+    local vg_parent_disks=""
+
+    prepare_names_from_existing_context
+
+    section "VALIDATE / REGISTER EXISTING STORAGE"
+
+    if ! expected_vg_exists; then
+        msg_error "Expected VG ${VG_NAME} is missing. Cancelled without wiping."
+    fi
+
+    if ! expected_thinpool_exists; then
+        msg_error "Expected thinpool ${VG_NAME}/${THINPOOL_NAME} is missing. Cancelled without wiping."
+    fi
+
+    vg_parent_disks="$(get_parent_disks_for_vg "$VG_NAME" | xargs || true)"
+    if [ "$vg_parent_disks" != "$SELECTED_DISK_NAME" ]; then
+        msg_error "VG ${VG_NAME} is not backed only by selected disk ${SELECTED_DISK}. Actual parent disk(s): ${vg_parent_disks:-unknown}"
+    fi
+
+    if storage_id_exists "$STORAGE_ID"; then
+        validate_registered_storage "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"
+    else
+        register_proxmox_storage
+    fi
+
+    populate_selected_disk_from_expected_vg
+    apply_trim_logic
+    apply_io_scheduler_tuning
+    apply_memory_tuning
+    write_completion_marker
+    create_verification_report
+    show_final_summary
+    exit 0
+}
+
 # =========================================================
 #  DISK AUDIT / SELECTION
 # =========================================================
@@ -1526,14 +1895,18 @@ function check_storage_conflicts() {
 
     if storage_id_exists "$STORAGE_ID"; then
         if storage_cfg_matches_expected "$STORAGE_ID" "$VG_NAME" "$THINPOOL_NAME" "$CONTENT_TYPES"; then
-            msg_error "Proxmox storage ID ${STORAGE_ID} is already registered correctly. Refusing destructive path; rerun should use resume/success path instead."
+            if [ "$SELECTED_DISK_ACTION" == "recreate" ] && [[ " ${EXISTING_VGS_ON_SELECTED_DISK} " == *" ${VG_NAME} "* ]]; then
+                msg_warn "Existing storage ${STORAGE_ID} matches selected disk and will be recreated after final confirmation."
+            else
+                msg_error "Proxmox storage ID ${STORAGE_ID} is already registered correctly. Choose validate/register existing storage instead of a destructive path."
+            fi
+        else
+            echo ""
+            echo -e "${RD}Proxmox storage ID ${STORAGE_ID} already exists but does not match the requested target.${CL}"
+            echo -e "${YW}Existing storage.cfg block:${CL}"
+            print_storage_cfg_block "$STORAGE_ID" | sed 's/^/  /'
+            msg_error "Remove or rename the existing Proxmox storage before reusing this ID."
         fi
-
-        echo ""
-        echo -e "${RD}Proxmox storage ID ${STORAGE_ID} already exists but does not match the requested target.${CL}"
-        echo -e "${YW}Existing storage.cfg block:${CL}"
-        print_storage_cfg_block "$STORAGE_ID" | sed 's/^/  /'
-        msg_error "Remove or rename the existing Proxmox storage before reusing this ID."
     fi
 
     if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
@@ -2710,16 +3083,18 @@ function show_final_summary() {
 # Runs validation -> safe disk selection -> configuration -> destructive apply -> verification.
 function main() {
     init_script
-    check_previous_marker
 
     set_default_storage_values_for_resume
-    handle_existing_storage_resume
 
     audit_disks
     select_disk
     inspect_selected_disk
     show_selected_disk_summary
-    first_destructive_confirmation
+    choose_selected_disk_action
+
+    if [ "$SELECTED_DISK_ACTION" == "validate-register" ]; then
+        run_existing_storage_validate_register_path
+    fi
 
     collect_storage_names
     check_storage_conflicts
