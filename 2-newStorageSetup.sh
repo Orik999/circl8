@@ -15,6 +15,7 @@ RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
 GN="$(printf '\033[1;92m')"
 DGN="$(printf '\033[32m')"
+ANS="$(printf '\033[1;95m')"
 CL="$(printf '\033[m')"
 CLF="$(printf '\033[5m')"
 BFR="\\r\\033[K"
@@ -25,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.3.6"
-SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="pve923-final-iso-next-step-reminder"
+SCRIPT_VERSION="v1.4.0"
+SCRIPT_UPDATED="2026-06-03"
+SCRIPT_BUILD="ui-explicit-storage-sizing"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -54,7 +55,17 @@ VG_NAME=""
 THINPOOL_NAME=""
 STORAGE_ID=""
 CONTENT_TYPES="images,rootdir"
-THIN_PERCENT="95"
+THIN_PERCENT="legacy-unused"
+THINPOOL_DATA_GB="0"
+THINPOOL_METADATA_GB="1"
+VG_RESERVE_GB="0"
+THINPOOL_DATA_MIB="0"
+THINPOOL_METADATA_MIB="1024"
+VG_RESERVE_MIB="0"
+THINPOOL_MAX_DATA_GB="0"
+THINPOOL_MAX_DATA_MIB="0"
+ACTUAL_VG_FREE_GB="0"
+ACTUAL_VG_FREE_MIB="0"
 
 IS_SSD="no"
 IS_NVME="no"
@@ -86,14 +97,9 @@ TEMP_FILES=()
 # --- 3. HEADER FUNCTION ---
 # Displays the New Storage Setup ASCII banner.
 function header_info {
-echo -e "${BL}
-███╗   ██╗███████╗██╗    ██╗    ███████╗████████╗ ██████╗ ██████╗  █████╗  ██████╗ ███████╗
-████╗  ██║██╔════╝██║    ██║    ██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗██╔══██╗██╔════╝ ██╔════╝
-██╔██╗ ██║█████╗  ██║ █╗ ██║    ███████╗   ██║   ██║   ██║██████╔╝███████║██║  ███╗█████╗  
-██║╚██╗██║██╔══╝  ██║███╗██║    ╚════██║   ██║   ██║   ██║██╔══██╗██╔══██║██║   ██║██╔══╝  
-██║ ╚████║███████╗╚███╔███╔╝    ███████║   ██║   ╚██████╔╝██║  ██║██║  ██║╚██████╔╝███████╗
-╚═╝  ╚═══╝╚══════╝ ╚══╝╚══╝     ╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
-${CL}"
+    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+    echo -e "${GN}${CLF}Storage Setup${CL}"
+    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 }
 
 
@@ -1397,14 +1403,23 @@ function inspect_selected_disk() {
 # Shows selected disk details and one detailed risk report.
 function show_selected_disk_summary() {
     echo ""
-    echo -e "${BL}SELECTED DISK:${CL}"
-    echo -e " ${BL}━━━━━▶${CL} DISK: ${GN}${SELECTED_DISK}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} TYPE/BUS: ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} SIZE: ${GN}${DISK_SIZE_GB}GB${CL}"
-    echo -e " ${BL}━━━━━▶${CL} SELECTION MODE: ${GN}${SELECTED_DISK_ENTRY_TYPE}${CL}"
+    echo -e "${YW}SELECTED DISK:${CL}"
+    echo -e "  ${BL}Disk:${CL} ${GN}${SELECTED_DISK}${CL}"
+    echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
+    echo -e "  ${BL}Type/bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
+    echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
+    echo -e "  ${BL}Selection mode:${CL} ${GN}${SELECTED_DISK_ENTRY_TYPE}${CL}"
     echo ""
+    echo -e "${YW}DATA RISK:${CL}"
     print_selected_data_risk_report "$DATA_RISK_REPORT"
+
+    if [ -n "${EXISTING_VGS_ON_SELECTED_DISK:-}" ]; then
+        echo -e "  ${BL}Existing VG(s):${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK}${CL}"
+    fi
+
+    if [ -n "${EXISTING_PVS_ON_SELECTED_DISK:-}" ]; then
+        echo -e "  ${BL}Existing PV(s):${CL} ${YW}${EXISTING_PVS_ON_SELECTED_DISK}${CL}"
+    fi
 
     if [ "$HAS_DATA" == "yes" ]; then
         echo ""
@@ -1572,19 +1587,161 @@ function check_storage_conflicts() {
 }
 
 
-# --- 42. THINPOOL ALLOCATION LOGIC ---
-# Uses adaptive allocation to leave free VG space for metadata growth and repair.
-# Validates the final value to avoid failure after disk wipe.
-function collect_thinpool_allocation() {
-    if [ "$DISK_SIZE_GB" -lt 256 ]; then
-        THIN_PERCENT="97"
-    elif [ "$DISK_SIZE_GB" -lt 1024 ]; then
-        THIN_PERCENT="96"
+# --- 42. EXPLICIT THINPOOL SIZING LOGIC ---
+# Uses Script 1-style UI units: visible GB maps directly to LVM GiB-style units.
+function ui_gb_to_lvm_mib() {
+    local gb="$1"
+    echo $(( gb * 1024 ))
+}
+
+function lvm_mib_to_ui_gb() {
+    local mib="$1"
+    echo $(( mib / 1024 ))
+}
+
+function get_actual_vg_free_mib() {
+    local vg="${1:-$VG_NAME}"
+    local raw=""
+
+    raw="$(vgs --noheadings --units m --nosuffix -o vg_free "$vg" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); printf "%d", $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        echo "$raw"
     else
-        THIN_PERCENT="95"
+        echo "0"
+    fi
+}
+
+function get_actual_vg_free_gb() {
+    lvm_mib_to_ui_gb "$(get_actual_vg_free_mib "${1:-$VG_NAME}")"
+}
+
+function get_thinpool_data_gb() {
+    local vg="${1:-$VG_NAME}"
+    local thinpool="${2:-$THINPOOL_NAME}"
+    local raw=""
+
+    raw="$(lvs --noheadings --units m --nosuffix -o lv_size "${vg}/${thinpool}" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); printf "%d", $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        lvm_mib_to_ui_gb "$raw"
+    else
+        echo "0"
+    fi
+}
+
+function get_thinpool_metadata_gb() {
+    local vg="${1:-$VG_NAME}"
+    local thinpool="${2:-$THINPOOL_NAME}"
+    local raw=""
+
+    raw="$(lvs -a --noheadings --units m --nosuffix -o lv_metadata_size "${vg}/${thinpool}" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); printf "%d", $1; exit}' || true)"
+    if ! [[ "$raw" =~ ^[0-9]+$ ]] || [ "$raw" -le 0 ]; then
+        raw="$(lvs -a --noheadings --units m --nosuffix -o lv_size "${vg}/${thinpool}_tmeta" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); printf "%d", $1; exit}' || true)"
     fi
 
-    THIN_PERCENT="$(timed_percent_input "Enter thinpool allocation percent" "$THIN_PERCENT" "50" "98")"
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        lvm_mib_to_ui_gb "$raw"
+    else
+        echo "0"
+    fi
+}
+
+function default_vg_reserve_gb() {
+    if [ "$DISK_SIZE_GB" -lt 256 ]; then
+        echo "1"
+    elif [ "$DISK_SIZE_GB" -lt 1024 ]; then
+        echo "2"
+    else
+        echo "5"
+    fi
+}
+
+function calculate_secondary_storage_plan() {
+    local available_gb="${1:-$DISK_SIZE_GB}"
+
+    THINPOOL_METADATA_MIB="$(ui_gb_to_lvm_mib "$THINPOOL_METADATA_GB")"
+    VG_RESERVE_MIB="$(ui_gb_to_lvm_mib "$VG_RESERVE_GB")"
+    THINPOOL_MAX_DATA_GB="$(( available_gb - THINPOOL_METADATA_GB - VG_RESERVE_GB ))"
+    if [ "$THINPOOL_MAX_DATA_GB" -lt 0 ]; then
+        THINPOOL_MAX_DATA_GB="0"
+    fi
+    THINPOOL_MAX_DATA_MIB="$(ui_gb_to_lvm_mib "$THINPOOL_MAX_DATA_GB")"
+
+    if [ -z "${THINPOOL_DATA_GB:-}" ] || [ "$THINPOOL_DATA_GB" -le 0 ] || [ "$THINPOOL_DATA_GB" -gt "$THINPOOL_MAX_DATA_GB" ]; then
+        THINPOOL_DATA_GB="$THINPOOL_MAX_DATA_GB"
+    fi
+    THINPOOL_DATA_MIB="$(ui_gb_to_lvm_mib "$THINPOOL_DATA_GB")"
+}
+
+function validate_secondary_storage_plan() {
+    local available_gb="${1:-$DISK_SIZE_GB}"
+    local total_gb="0"
+
+    if [ "$THINPOOL_METADATA_GB" -le 0 ]; then
+        msg_error "Thinpool metadata size must be greater than zero."
+    fi
+
+    if [ "$THINPOOL_DATA_GB" -le 0 ]; then
+        msg_error "Thinpool data size must be greater than zero."
+    fi
+
+    total_gb="$(( THINPOOL_DATA_GB + THINPOOL_METADATA_GB + VG_RESERVE_GB ))"
+    if [ "$total_gb" -gt "$available_gb" ]; then
+        msg_error "Storage plan needs ${total_gb}GB but only about ${available_gb}GB is available."
+    fi
+}
+
+function display_storage_plan() {
+    echo ""
+    section "STORAGE PLAN"
+
+    echo -e "${YW}Disk:${CL}"
+    echo -e "  ${BL}Selected:${CL} ${GN}${SELECTED_DISK}${CL}"
+    echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
+    echo -e "  ${BL}Type/bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
+    echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
+    if [ "$HAS_DATA" == "yes" ]; then
+        echo -e "  ${BL}Data risk:${CL} ${RD}destructive reuse${CL}"
+        echo -e "  ${BL}Existing VG(s):${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK:-none}${CL}"
+        echo -e "  ${BL}Existing PV(s):${CL} ${YW}${EXISTING_PVS_ON_SELECTED_DISK:-none}${CL}"
+    else
+        echo -e "  ${BL}Data risk:${CL} ${GN}none detected${CL}"
+    fi
+    echo ""
+
+    echo -e "${YW}Storage:${CL}"
+    echo -e "  ${BL}VG:${CL} ${ANS}${VG_NAME}${CL}"
+    echo -e "  ${BL}Thinpool:${CL} ${ANS}${THINPOOL_NAME}${CL}"
+    echo -e "  ${BL}Storage ID:${CL} ${ANS}${STORAGE_ID}${CL}"
+    echo -e "  ${BL}Content:${CL} ${ANS}${CONTENT_TYPES}${CL}"
+    echo ""
+
+    echo -e "${YW}Sizing:${CL}"
+    echo -e "  ${BL}Thinpool data:${CL} ${ANS}${THINPOOL_DATA_GB} GB${CL}"
+    echo -e "  ${BL}Thinpool metadata:${CL} ${ANS}${THINPOOL_METADATA_GB} GB${CL}"
+    echo -e "  ${BL}Reserve free VG:${CL} ${ANS}${VG_RESERVE_GB} GB${CL}"
+    echo -e "  ${BL}Max thinpool data:${CL} ${GN}${THINPOOL_MAX_DATA_GB} GB${CL}"
+}
+
+function collect_thinpool_sizing() {
+    local reserve_default=""
+
+    reserve_default="$(default_vg_reserve_gb)"
+    THINPOOL_METADATA_GB="$(timed_number_input "Set thinpool metadata size in GB" "1" "1")"
+    VG_RESERVE_GB="$(timed_number_input "Reserve free VG space in GB" "$reserve_default" "0")"
+    calculate_secondary_storage_plan "$DISK_SIZE_GB"
+
+    if [ "$THINPOOL_MAX_DATA_GB" -le 0 ]; then
+        msg_error "No space remains for thinpool data after ${THINPOOL_METADATA_GB}GB metadata and ${VG_RESERVE_GB}GB reserve."
+    fi
+
+    THINPOOL_DATA_GB="$(timed_number_input "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB")"
+    calculate_secondary_storage_plan "$DISK_SIZE_GB"
+    validate_secondary_storage_plan "$DISK_SIZE_GB"
+    display_storage_plan
+}
+
+function collect_thinpool_allocation() {
+    collect_thinpool_sizing
 }
 
 # --- 43. CONTENT TYPE SELECTION ---
@@ -1603,30 +1760,33 @@ function final_destructive_confirmation() {
 
     section "READY TO CREATE STORAGE"
 
-    echo -e "${RD}FINAL WARNING: ALL DATA ON ${SELECTED_DISK} WILL BE DESTROYED.${CL}"
+    echo -e "${YW}Final warning:${CL}"
+    echo -e "  ${RD}All data on ${SELECTED_DISK} will be destroyed.${CL}"
     echo ""
-    echo -e "${BL}DISK SAFETY CONTEXT:${CL}"
-    echo -e " ${BL}━━━━━▶${CL} ROOT / BOOT / PVE DISKS: ${GN}${ROOT_PARENT_DISKS:-none}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} MOUNTED DISKS: ${GN}${MOUNTED_PARENT_DISKS:-none}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} EXISTING LVM PV DISKS: ${GN}${PV_PARENT_DISKS:-none}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} SELECTED DISK EXISTING VG(S): ${GN}${EXISTING_VGS_ON_SELECTED_DISK:-none}${CL}"
+
+    echo -e "${YW}Disk safety:${CL}"
+    echo -e "  ${BL}Root/boot/PVE disks:${CL} ${GN}${ROOT_PARENT_DISKS:-none}${CL}"
+    echo -e "  ${BL}Mounted disks:${CL} ${GN}${MOUNTED_PARENT_DISKS:-none}${CL}"
+    echo -e "  ${BL}Existing LVM PV disks:${CL} ${GN}${PV_PARENT_DISKS:-none}${CL}"
+    echo -e "  ${BL}Selected disk existing VG(s):${CL} ${GN}${EXISTING_VGS_ON_SELECTED_DISK:-none}${CL}"
     echo ""
-    echo -e "${BL}SELECTED STORAGE TARGET:${CL}"
-    echo -e " ${BL}━━━━━▶${CL} DISK: ${GN}${SELECTED_DISK}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} SIZE: ${GN}${DISK_SIZE_GB}GB${CL}"
-    echo -e " ${BL}━━━━━▶${CL} STORAGE ID: ${GN}${STORAGE_ID}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} VG / THINPOOL: ${GN}${VG_NAME} / ${THINPOOL_NAME}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} THIN ALLOCATION: ${GN}${THIN_PERCENT}%FREE${CL}"
-    echo -e " ${BL}━━━━━▶${CL} CONTENT: ${GN}${CONTENT_TYPES}${CL}"
+
+    echo -e "${YW}Plan:${CL}"
+    echo -e "  ${BL}Disk:${CL} ${GN}${SELECTED_DISK}${CL}"
+    echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
+    echo -e "  ${BL}VG:${CL} ${ANS}${VG_NAME}${CL}"
+    echo -e "  ${BL}Thinpool:${CL} ${ANS}${THINPOOL_NAME}${CL}"
+    echo -e "  ${BL}Storage ID:${CL} ${ANS}${STORAGE_ID}${CL}"
+    echo -e "  ${BL}Thinpool data:${CL} ${ANS}${THINPOOL_DATA_GB} GB${CL}"
+    echo -e "  ${BL}Thinpool metadata:${CL} ${ANS}${THINPOOL_METADATA_GB} GB${CL}"
+    echo -e "  ${BL}Reserve free VG:${CL} ${ANS}${VG_RESERVE_GB} GB${CL}"
+    echo -e "  ${BL}Content:${CL} ${ANS}${CONTENT_TYPES}${CL}"
     echo ""
 
     final_yn="$(timed_yes_no "Proceed with disk wipe and storage creation?" "n")"
     if [[ "$final_yn" =~ ^[Nn] ]]; then
         msg_error "Aborted by user."
     fi
-
-    return 0
 
     return 0
 }
@@ -1722,8 +1882,12 @@ function create_lvm_volume_group() {
 function create_lvm_thinpool() {
     section "LVM THINPOOL"
 
-    msg_info "Creating LVM thinpool"
-    run_cmd "creating LVM thinpool ${VG_NAME}/${THINPOOL_NAME}" lvcreate -y -l "${THIN_PERCENT}%FREE" --thinpool "$THINPOOL_NAME" "$VG_NAME"
+    ACTUAL_VG_FREE_MIB="$(get_actual_vg_free_mib "$VG_NAME")"
+    ACTUAL_VG_FREE_GB="$(lvm_mib_to_ui_gb "$ACTUAL_VG_FREE_MIB")"
+    validate_secondary_storage_plan "$ACTUAL_VG_FREE_GB"
+
+    msg_info "Creating LVM thinpool (${THINPOOL_DATA_GB}GB data, ${THINPOOL_METADATA_GB}GB metadata)"
+    run_cmd "creating LVM thinpool ${VG_NAME}/${THINPOOL_NAME}" lvcreate -y -L "${THINPOOL_DATA_MIB}M" --poolmetadatasize "${THINPOOL_METADATA_GB}G" --thinpool "$THINPOOL_NAME" "$VG_NAME"
     THINPOOL_CREATED="yes"
     msg_ok "LVM THINPOOL CREATED"
 
@@ -1754,6 +1918,16 @@ function populate_selected_disk_from_expected_vg() {
 
     if [ -b "$SELECTED_DISK" ]; then
         inspect_selected_disk
+    fi
+
+    if expected_thinpool_exists; then
+        THINPOOL_DATA_GB="$(get_thinpool_data_gb "$VG_NAME" "$THINPOOL_NAME")"
+        THINPOOL_METADATA_GB="$(get_thinpool_metadata_gb "$VG_NAME" "$THINPOOL_NAME")"
+        THINPOOL_DATA_MIB="$(ui_gb_to_lvm_mib "${THINPOOL_DATA_GB:-0}")"
+        THINPOOL_METADATA_MIB="$(ui_gb_to_lvm_mib "${THINPOOL_METADATA_GB:-0}")"
+        ACTUAL_VG_FREE_GB="$(get_actual_vg_free_gb "$VG_NAME")"
+        VG_RESERVE_GB="$ACTUAL_VG_FREE_GB"
+        VG_RESERVE_MIB="$(ui_gb_to_lvm_mib "${VG_RESERVE_GB:-0}")"
     fi
 }
 
@@ -2018,6 +2192,9 @@ echo "Disk Bus: ${DISK_BUS}"
 echo "Storage ID: ${STORAGE_ID}"
 echo "VG: ${VG_NAME}"
 echo "Thinpool: ${THINPOOL_NAME}"
+echo "Thinpool Data GB: ${THINPOOL_DATA_GB}"
+echo "Thinpool Metadata GB: ${THINPOOL_METADATA_GB}"
+echo "Reserve Free VG GB: ${VG_RESERVE_GB}"
 echo ""
 
 PASS() { echo "✓ PASS - \$1"; }
@@ -2089,6 +2266,8 @@ function write_completion_marker() {
 
     cat <<EOF > "$COMPLETED_MARKER"
 New Storage Setup completed on: $(date)
+Script 2 Marker Source of Truth: yes
+Script Version: $SCRIPT_VERSION
 Disk: $SELECTED_DISK
 Disk Type: $DISK_TYPE
 Disk Bus: $DISK_BUS
@@ -2097,10 +2276,19 @@ Disk Size GB: $DISK_SIZE_GB
 Storage ID: $STORAGE_ID
 VG: $VG_NAME
 Thinpool: $THINPOOL_NAME
-Thin Allocation: ${THIN_PERCENT}%FREE
+Thinpool Data GB: $THINPOOL_DATA_GB
+Thinpool Metadata GB: $THINPOOL_METADATA_GB
+Reserve Free VG GB: $VG_RESERVE_GB
 Content Types: $CONTENT_TYPES
 IO Scheduler: $IO_SCHEDULER
 Verify Log: $VERIFY_FILE
+SCRIPT2_STATUS=completed
+STORAGE_ID=$STORAGE_ID
+VG_NAME=$VG_NAME
+THINPOOL_NAME=$THINPOOL_NAME
+THINPOOL_DATA_GB=$THINPOOL_DATA_GB
+THINPOOL_METADATA_GB=$THINPOOL_METADATA_GB
+VG_RESERVE_GB=$VG_RESERVE_GB
 EOF
 
     msg_ok "COMPLETION MARKER WRITTEN"
@@ -2143,18 +2331,37 @@ function show_iso_next_step_reminder() {
 # --- 57. FINAL SUMMARY ---
 # Shows final storage details.
 function show_final_summary() {
-    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+    section_flash_success "FINISHED"
 
-    echo -e "${BL}NEW PROXMOX STORAGE CREATED:${CL}"
-    echo -e " ${BL}━━━━━▶${CL} DISK: ${GN}${SELECTED_DISK}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} TYPE/BUS/SIZE: ${GN}${DISK_TYPE} / ${DISK_BUS} / ${DISK_SIZE_GB}GB${CL}"
-    echo -e " ${BL}━━━━━▶${CL} STORAGE ID: ${GN}${STORAGE_ID}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} VG / THINPOOL: ${GN}${VG_NAME} / ${THINPOOL_NAME}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} THIN ALLOCATION: ${GN}${THIN_PERCENT}%FREE${CL}"
-    echo -e " ${BL}━━━━━▶${CL} CONTENT: ${GN}${CONTENT_TYPES}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} IO SCHEDULER: ${GN}${IO_SCHEDULER}${CL}"
-    echo -e " ${BL}━━━━━▶${CL} VERIFY LOG: ${GN}${VERIFY_FILE}${CL}"
+    echo ""
+    echo -e "${YW}SECONDARY STORAGE:${CL}"
+    echo -e "  ${BL}Disk:${CL} ${GN}${SELECTED_DISK}${CL}"
+    echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
+    echo -e "  ${BL}Type/bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
+    echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
+    echo ""
+
+    echo -e "${YW}PROXMOX STORAGE:${CL}"
+    echo -e "  ${BL}Storage ID:${CL} ${GN}${STORAGE_ID}${CL}"
+    echo -e "  ${BL}VG:${CL} ${GN}${VG_NAME}${CL}"
+    echo -e "  ${BL}Thinpool:${CL} ${GN}${THINPOOL_NAME}${CL}"
+    echo -e "  ${BL}Content:${CL} ${GN}${CONTENT_TYPES}${CL}"
+    echo ""
+
+    echo -e "${YW}SIZING:${CL}"
+    echo -e "  ${BL}Thinpool data:${CL} ${GN}${THINPOOL_DATA_GB} GB${CL}"
+    echo -e "  ${BL}Thinpool metadata:${CL} ${GN}${THINPOOL_METADATA_GB} GB${CL}"
+    echo -e "  ${BL}Reserve free VG:${CL} ${GN}${VG_RESERVE_GB} GB${CL}"
+    echo ""
+
+    echo -e "${YW}TUNING:${CL}"
+    echo -e "  ${BL}SSD TRIM:${CL} ${GN}$([ "$IS_SSD" == "yes" ] && echo enabled || echo skipped)${CL}"
+    echo -e "  ${BL}IO scheduler:${CL} ${GN}${IO_SCHEDULER}${CL}"
+    echo -e "  ${BL}Memory tuning:${CL} ${GN}applied${CL}"
+    echo ""
+
+    echo -e "${YW}VERIFY:${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_FILE}${CL}"
     echo ""
     echo -e "${YW}New Proxmox LVM-thin storage is ready for VM disks, containers and backups according to selected content types.${CL}"
     echo ""
@@ -2180,8 +2387,8 @@ function main() {
 
     collect_storage_names
     check_storage_conflicts
-    collect_thinpool_allocation
     collect_content_types
+    collect_thinpool_sizing
     final_destructive_confirmation
 
     destroy_existing_lvm_on_selected_disk
