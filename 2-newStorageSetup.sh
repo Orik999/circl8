@@ -1483,7 +1483,7 @@ function choose_selected_disk_action() {
         previous-script2)
             echo -e "${YW}Status:${CL}"
             echo -e "  ${BL}State:${CL} ${GN}Previous Script 2 storage detected${CL}"
-            echo -e "  ${BL}Risk:${CL} ${RD}Destructive reuse ${BL}/ ${YW}existing storage${CL}"
+            echo -e "  ${BL}Risk:${CL} ${RD}Destructive reuse ${BL}/${CL} ${YW}Existing storage${CL}"
             echo ""
             show_existing_storage_context
             echo ""
