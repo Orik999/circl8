@@ -1459,7 +1459,7 @@ function choose_selected_disk_action() {
         data-detected)
             echo -e "${YW}Status:${CL}"
             echo -e "  ${BL}State:${CL} ${YW}data detected${CL}"
-            echo -e "  ${BL}Risk:${CL} ${RD}destructive reuse / existing data${CL}"
+            echo -e "  ${BL}Risk:${CL} ${RD}Destructive Reuse / existing data${CL}"
             echo ""
             print_selected_data_risk_report "$DATA_RISK_REPORT"
             if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
@@ -1483,7 +1483,7 @@ function choose_selected_disk_action() {
         previous-script2)
             echo -e "${YW}Status:${CL}"
             echo -e "  ${BL}State:${CL} ${GN}Previous Script 2 storage detected${CL}"
-            echo -e "  ${BL}Risk:${CL} ${RD}Destructive reuse ${BL}/${CL} ${YW}Existing storage${CL}"
+            echo -e "  ${BL}Risk:${CL} ${RD}Destructive Reuse ${BL}/${CL} ${YW}Existing storage${CL}"
             echo ""
             show_existing_storage_context
             echo ""
@@ -2080,7 +2080,7 @@ function display_storage_plan() {
     echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
     echo -e "  ${BL}Action:${CL} ${ANS}$(selected_disk_action_label)${CL}"
     if [ "$HAS_DATA" == "yes" ]; then
-        echo -e "  ${BL}Data risk:${CL} ${RD}destructive reuse${CL}"
+        echo -e "  ${BL}Data risk:${CL} ${RD}Destructive Reuse${CL}"
     else
         echo -e "  ${BL}Data risk:${CL} ${GN}none detected${CL}"
     fi
@@ -2926,11 +2926,11 @@ function create_verification_report() {
     fi
 
     if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then
-        VERIFY_STATUS="FAIL"
+        VERIFY_STATUS="${RD}FAIL${CL}"
     elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then
-        VERIFY_STATUS="PASS_WITH_WARNINGS"
+        VERIFY_STATUS="${YW}PASS_WITH_WARNINGS${CL}"
     else
-        VERIFY_STATUS="PASS"
+        VERIFY_STATUS="${GN}PASS${CL}"
     fi
 
     {
@@ -3047,10 +3047,10 @@ function show_iso_next_step_reminder() {
     echo -e "${YW}Upload Ubuntu Server ISO:${CL}"
     echo ""
     echo -e "  ${BL}Proxmox Web UI:${CL}"
-    echo -e "    ${GN}https://${proxmox_ip}:8006 > ${proxmox_node} > local > ISO Images > Upload${CL}"
+    echo -e "    ${GN}https://${proxmox_ip}:8006{CL}${DGN} > ${proxmox_node} > local > ISO Images > Upload${CL}"
     echo ""
     echo -e "  ${BL}Or copy from your laptop:${CL}"
-    echo -e "    ${GN}scp /path/to/ubuntu-live-server.iso root@${proxmox_ip}:/var/lib/vz/template/iso/${CL}"
+    echo -e "    ${GN}scp /path/to/ubuntu-live-server.iso${CL} ${DGN}root@${proxmox_ip}:/var/lib/vz/template/iso/${CL}"
     echo ""
     echo -e "  ${YW}Then run Script 3.${CL}"
     echo ""
@@ -3089,7 +3089,6 @@ function show_final_summary() {
     echo -e "${YW}Verification:${CL}"
     echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}"
     echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_FILE}${CL}"
-    echo ""
 
     show_iso_next_step_reminder
 }
