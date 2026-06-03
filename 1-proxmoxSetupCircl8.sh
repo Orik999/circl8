@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.5.0"
+SCRIPT_VERSION="v1.5.1"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="storage-metadata-postreboot-verify"
+SCRIPT_BUILD="verification-change-result-display"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -3329,9 +3329,11 @@ set +e
 MACHINE_LOG="/var/log/pve9-postinstall-verify.log"
 DISPLAY_LOG="/var/log/pve9-postinstall-verify-display.log"
 COMPLETE_SENTINEL="/root/.pve9-postinstall-verify-complete"
-VERIFY_VERSION="v1.5.0"
+VERIFY_VERSION="v1.5.1"
 FAIL_COUNT=0
 WARN_COUNT=0
+PASS_COUNT=0
+DETAIL_LOG="/tmp/circl8-pve9-verify-details.$$"
 
 INSTALL_SYSTEM_VENDOR="__SYSTEM_VENDOR__"
 INSTALL_SYSTEM_PRODUCT="__SYSTEM_PRODUCT__"
@@ -3349,17 +3351,37 @@ INSTALL_VFIO_DISABLE_IDLE_D3="__VFIO_DISABLE_IDLE_D3__"
 INSTALL_ENABLE_PASSTHROUGH="__ENABLE_PASSTHROUGH__"
 INSTALL_ENABLE_CROWDSEC="__ENABLE_CROWDSEC__"
 INSTALL_CROWDSEC_CONSOLE_ENROLLMENT="__CROWDSEC_CONSOLE_ENROLLMENT__"
+INSTALL_CROWDSEC_CONSOLE_ENGINE_NAME="__CROWDSEC_CONSOLE_ENGINE_NAME__"
 INSTALL_STORAGE_LAYOUT_MODE="__STORAGE_LAYOUT_MODE__"
+INSTALL_TARGET_ROOT_SIZE_GB="__TARGET_ROOT_SIZE_GB__"
+INSTALL_LOCAL_LVM_SIZE_GB="__LOCAL_LVM_SIZE_GB__"
+INSTALL_LOCAL_LVM_METADATA_GB="__LOCAL_LVM_METADATA_GB__"
 INSTALL_PVE_FREE_RESERVE_GB="__PVE_FREE_RESERVE_GB__"
 INSTALL_IOMMU_FLAG="__IOMMU_FLAG__"
+INSTALL_LAN_CIDR="__LAN_CIDR__"
+INSTALL_ALLOW_PUBLIC_WEB="__ALLOW_PUBLIC_WEB__"
+INSTALL_REALTEK_OPTIMIZED="__REALTEK_OPTIMIZED__"
+INSTALL_REALTEK_IFACE="__REALTEK_IFACE__"
+INSTALL_IS_SSD="__IS_SSD__"
+INSTALL_NUMLOCK_CONFIGURED="__NUMLOCK_CONFIGURED__"
+INSTALL_SSH_ROOT_KEY_FILE="__SSH_ROOT_KEY_FILE__"
 
 rm -f "$COMPLETE_SENTINEL"
 : > "$MACHINE_LOG"
 : > "$DISPLAY_LOG"
+: > "$DETAIL_LOG"
+
+YW=$'\033[33m'
+BL=$'\033[36m'
+RD=$'\033[01;31m'
+GN=$'\033[1;92m'
+ANS=$'\033[1;95m'
+CL=$'\033[m'
+PASS_ICON="${GN}✓ PASS${CL}"
+WARN_ICON="${YW}! WARN${CL}"
+FAIL_ICON="${RD}✗ FAIL${CL}"
+
 kv() { printf '%s=%s\n' "$1" "$2" >> "$MACHINE_LOG"; }
-pass() { printf 'PASS %s\n' "$1" >> "$MACHINE_LOG"; }
-warn() { WARN_COUNT=$((WARN_COUNT + 1)); printf 'WARN %s\n' "$1" >> "$MACHINE_LOG"; }
-fail() { FAIL_COUNT=$((FAIL_COUNT + 1)); printf 'FAIL %s\n' "$1" >> "$MACHINE_LOG"; }
 yn() { case "${1:-}" in y|Y|yes|YES|true|TRUE|1) echo yes ;; *) echo no ;; esac; }
 read_os_pretty() { awk -F= '$1=="PRETTY_NAME" {gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null || echo unknown; }
 ui_gb_from_bytes_floor() { local b="${1:-0}"; echo $(( b / 1073741824 )); }
@@ -3369,7 +3391,17 @@ lv_meta_bytes() { local raw=""; raw="$(lvs -a --noheadings --units b --nosuffix 
 lv_meta_percent() { lvs -a --noheadings --nosuffix -o metadata_percent pve/data 2>/dev/null | awk 'NF {print $1; exit}' || echo unavailable; }
 vg_free_gb() { local raw=""; raw="$(vgs --noheadings --units b --nosuffix -o vg_free pve 2>/dev/null | awk 'NF {gsub(/[^0-9]/,"",$1); print $1; exit}' || echo 0)"; ui_gb_from_bytes_floor "${raw:-0}"; }
 service_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
+service_enabled() { systemctl is-enabled "$1" 2>/dev/null || echo disabled; }
 boot_has_warning() { journalctl -b --no-pager 2>/dev/null | grep -qiE "$1"; }
+module_loaded() { grep -q "^$1[[:space:]]" /proc/modules 2>/dev/null; }
+first_resolvers() { awk '/^nameserver[[:space:]]+/ {print $2}' /etc/resolv.conf 2>/dev/null | paste -sd ',' - || true; }
+file_has() { grep -qE "$2" "$1" 2>/dev/null; }
+
+machine_result() { kv "CHECK_${1}" "$2"; }
+begin_group() { printf '  %s%s:%s\n' "$YW" "$1" "$CL" >> "$DETAIL_LOG"; }
+pass_check() { PASS_COUNT=$((PASS_COUNT + 1)); machine_result "$1" PASS; printf '    %s - %s: %s\n' "$PASS_ICON" "$2" "${3:-applied}" >> "$DETAIL_LOG"; }
+warn_check() { WARN_COUNT=$((WARN_COUNT + 1)); machine_result "$1" WARN; kv "WARN_${1}" "expected ${3}; actual ${4}; note ${5}"; printf '    %s - %s\n      %sexpected:%s %s\n      %sactual:%s %s\n      %snote:%s %s\n' "$WARN_ICON" "$2" "$BL" "$CL" "$3" "$BL" "$CL" "$4" "$BL" "$CL" "$5" >> "$DETAIL_LOG"; }
+fail_check() { FAIL_COUNT=$((FAIL_COUNT + 1)); machine_result "$1" FAIL; kv "FAIL_${1}" "expected ${3}; actual ${4}; fix ${5}"; printf '    %s - %s\n      %sexpected:%s %s\n      %sactual:%s %s\n      %sfix:%s %s\n' "$FAIL_ICON" "$2" "$BL" "$CL" "$3" "$BL" "$CL" "$4" "$BL" "$CL" "$5" >> "$DETAIL_LOG"; }
 
 sleep 45
 PROXMOX_VERSION="$(pveversion 2>/dev/null | sed -nE 's|^pve-manager/([^/]+)/.*|\1|p' | head -n1)"
@@ -3384,88 +3416,140 @@ LOCAL_LVM_METADATA_USED_PERCENT="$(lv_meta_percent)"
 LOCAL_LVM_PM_SPARE_GB="$(ui_gb_from_bytes_floor "$(lv_bytes pve/lvol0_pmspare)")"
 PVE_FREE_GB="$(vg_free_gb)"
 DGPU_DRIVER="not-detected"
-if [ -n "$INSTALL_DGPU_BDF" ] && [ -L "/sys/bus/pci/devices/${INSTALL_DGPU_BDF}/driver" ]; then DGPU_DRIVER="$(basename "$(readlink -f "/sys/bus/pci/devices/${INSTALL_DGPU_BDF}/driver" 2>/dev/null)")"; fi
+if [ -n "$INSTALL_DGPU_BDF" ] && [ "$INSTALL_DGPU_BDF" != "not-detected" ] && [ -L "/sys/bus/pci/devices/${INSTALL_DGPU_BDF}/driver" ]; then DGPU_DRIVER="$(basename "$(readlink -f "/sys/bus/pci/devices/${INSTALL_DGPU_BDF}/driver" 2>/dev/null)")"; fi
 FIREWALL_STATUS="$(pve-firewall status 2>&1 | awk -F': ' '/Status:/ {print $2; exit}' || echo unknown)"
 FAILED_SERVICES="$(systemctl --failed --no-legend 2>/dev/null | awk 'NF {c++} END {print c+0}')"
 SYSTEM_STATE="$(systemctl is-system-running 2>/dev/null || true)"
-SSH_HARDENING="unknown"; CROWDSEC_STATUS="not-selected"; CROWDSEC_BOUNCER_STATUS="not-selected"; NF_CONNTRACK_WARNING="none"; PKGUPDATES_WARNING="none"; VFIO_NOT_READY_WARNING="none"
+SSH_HARDENING="unknown"; CROWDSEC_STATUS="not-selected"; CROWDSEC_BOUNCER_STATUS="not-selected"; NF_CONNTRACK_WARNING="none"; PKGUPDATES_WARNING="none"; VFIO_NOT_READY_WARNING="none"; NF_CONNTRACK_MAX_VALUE="unavailable"; PKGUPDATES_FILE="absent"
+RESOLVERS="$(first_resolvers)"
+HOST_FW="/etc/pve/nodes/$(hostname -s)/host.fw"
+ROOT_SSHD_EFFECTIVE="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
 
 kv CIRCL8_VERIFY_VERSION "$VERIFY_VERSION"; kv VERIFY_COMPLETE no
 kv PROXMOX_VERSION "${PROXMOX_VERSION:-unknown}"; kv KERNEL_VERSION "$KERNEL_VERSION"; kv OS "$OS_PRETTY"; kv ARCHITECTURE "$ARCH"
 kv HOST_VENDOR "$INSTALL_SYSTEM_VENDOR"; kv HOST_MODEL "$INSTALL_SYSTEM_PRODUCT"; kv HOST_TYPE "$INSTALL_SYSTEM_TYPE"; kv CPU "$INSTALL_CPU_MODEL_CLOCK"; kv CPU_CORES "$INSTALL_CPU_PHYSICAL_CORES"; kv CPU_THREADS "$INSTALL_CPU_THREADS"; kv RAM_GB "$INSTALL_SYSTEM_RAM_GB"
-[ -n "$PROXMOX_VERSION" ] && pass "Proxmox version detected" || fail "Proxmox version not detected"
-[ "$FAILED_SERVICES" = "0" ] && pass "0 failed services" || fail "failed services: $FAILED_SERVICES"
-case "$SYSTEM_STATE" in running) pass "system state running" ;; degraded) warn "system state degraded" ;; *) warn "system state $SYSTEM_STATE" ;; esac
+kv ROOT_LOCAL_GB "$ROOT_LV_GB"; kv ROOT_FILESYSTEM_GB "$ROOT_FS_GB"; kv LOCAL_LVM_DATA_GB "$LOCAL_LVM_DATA_GB"; kv LOCAL_LVM_METADATA_GB "$LOCAL_LVM_METADATA_GB"; kv LOCAL_LVM_METADATA_USED_PERCENT "$LOCAL_LVM_METADATA_USED_PERCENT"; kv LOCAL_LVM_METADATA_SPARE_GB "$LOCAL_LVM_PM_SPARE_GB"; kv PVE_FREE_GB "$PVE_FREE_GB"
+kv REQUESTED_ROOT_LOCAL_GB "$INSTALL_TARGET_ROOT_SIZE_GB"; kv REQUESTED_LOCAL_LVM_DATA_GB "$INSTALL_LOCAL_LVM_SIZE_GB"; kv REQUESTED_LOCAL_LVM_METADATA_GB "$INSTALL_LOCAL_LVM_METADATA_GB"; kv REQUESTED_RESERVE_FREE_GB "$INSTALL_PVE_FREE_RESERVE_GB"
+kv DGPU_NAME "$INSTALL_DGPU_NAME"; kv DGPU_VRAM "$INSTALL_DGPU_VRAM"; kv DGPU_DRIVER "$DGPU_DRIVER"; kv VFIO_DISABLE_IDLE_D3 "$(yn "$INSTALL_VFIO_DISABLE_IDLE_D3")"; kv CROWDSEC_ENGINE_NAME "${INSTALL_CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}"
 
-kv ROOT_LOCAL_GB "$ROOT_LV_GB"; kv ROOT_FILESYSTEM_GB "$ROOT_FS_GB"; kv LOCAL_LVM_DATA_GB "$LOCAL_LVM_DATA_GB"; kv LOCAL_LVM_METADATA_GB "$LOCAL_LVM_METADATA_GB"; kv LOCAL_LVM_METADATA_USED_PERCENT "$LOCAL_LVM_METADATA_USED_PERCENT"; kv LOCAL_LVM_METADATA_SPARE_GB "$LOCAL_LVM_PM_SPARE_GB"; kv PVE_FREE_GB "$PVE_FREE_GB"; kv REQUESTED_RESERVE_FREE_GB "$INSTALL_PVE_FREE_RESERVE_GB"
-pvesm status 2>/dev/null | awk 'NR>1 && $1=="local-lvm" {found=1} END {exit found ? 0 : 1}' && pass "local-lvm listed by pvesm" || { [ "$INSTALL_STORAGE_LAYOUT_MODE" = "skip_root_expansion" ] && warn "local-lvm not selected" || fail "local-lvm not listed by pvesm"; }
-lvdisplay /dev/pve/data >/dev/null 2>&1 && pass "pve/data exists" || { [ "$INSTALL_STORAGE_LAYOUT_MODE" = "skip_root_expansion" ] && warn "pve/data not created by choice" || fail "pve/data missing"; }
-[[ "$(lv_attr pve/data)" == t* ]] && pass "pve/data is a thin pool" || { [ "$INSTALL_STORAGE_LAYOUT_MODE" = "skip_root_expansion" ] && warn "thin pool not created by choice" || fail "pve/data thin pool not confirmed"; }
+begin_group "Storage changes"
+if [ "$INSTALL_STORAGE_LAYOUT_MODE" = "preserve_local_lvm" ]; then pass_check ROOT_LOCAL_RESIZE "Root/local resize" "preserved at ${ROOT_LV_GB} GB"; elif [ "${ROOT_LV_GB:-0}" -ge "${INSTALL_TARGET_ROOT_SIZE_GB:-0}" ]; then pass_check ROOT_LOCAL_RESIZE "Root/local resize" "target ${INSTALL_TARGET_ROOT_SIZE_GB} GB, LV ${ROOT_LV_GB} GB, filesystem ${ROOT_FS_GB} GB"; else fail_check ROOT_LOCAL_RESIZE "Root/local resize" "LV >= ${INSTALL_TARGET_ROOT_SIZE_GB} GB" "LV ${ROOT_LV_GB} GB, filesystem ${ROOT_FS_GB} GB" "review lvextend/resize2fs output and extend /dev/pve/root manually if needed"; fi
+if [ "$INSTALL_STORAGE_LAYOUT_MODE" = "build_local_lvm" ] || [ "$INSTALL_STORAGE_LAYOUT_MODE" = "preserve_local_lvm" ]; then
+    [ "${LOCAL_LVM_DATA_GB:-0}" -gt 0 ] && pass_check LOCAL_LVM_THINPOOL "local-lvm thin pool data" "target ${INSTALL_LOCAL_LVM_SIZE_GB} GB, actual ${LOCAL_LVM_DATA_GB} GB" || fail_check LOCAL_LVM_THINPOOL "local-lvm thin pool data" "data LV present" "${LOCAL_LVM_DATA_GB} GB" "review /dev/pve/data and pvesm local-lvm registration"
+    [ "${LOCAL_LVM_METADATA_GB:-0}" -gt 0 ] && pass_check LOCAL_LVM_METADATA "local-lvm metadata" "target ${INSTALL_LOCAL_LVM_METADATA_GB} GB, actual ${LOCAL_LVM_METADATA_GB} GB, usage ${LOCAL_LVM_METADATA_USED_PERCENT}" || fail_check LOCAL_LVM_METADATA "local-lvm metadata" "metadata LV present" "${LOCAL_LVM_METADATA_GB} GB" "review thinpool metadata allocation"
+    pvesm status 2>/dev/null | awk 'NR>1 && $1=="local-lvm" {found=1} END {exit found ? 0 : 1}' && pass_check PVESM_LOCAL_LVM "Proxmox storage registration" "local-lvm visible in pvesm" || fail_check PVESM_LOCAL_LVM "Proxmox storage registration" "local-lvm visible in pvesm" "missing" "run pvesm add lvmthin local-lvm --vgname pve --thinpool data --content images,rootdir after verifying /dev/pve/data"
+    lvdisplay /dev/pve/data >/dev/null 2>&1 && pass_check PVE_DATA_EXISTS "/dev/pve/data exists" "present" || fail_check PVE_DATA_EXISTS "/dev/pve/data exists" "present" "missing" "review thinpool creation"
+    [[ "$(lv_attr pve/data)" == t* ]] && pass_check PVE_DATA_THINPOOL "pve/data is thin pool" "thinpool attribute confirmed" || fail_check PVE_DATA_THINPOOL "pve/data is thin pool" "lv_attr starts with t" "$(lv_attr pve/data)" "review pve/data LV type"
+else warn_check LOCAL_LVM_THINPOOL "local-lvm thin pool" "local-lvm selected" "${INSTALL_STORAGE_LAYOUT_MODE}" "local-lvm creation was not selected or no free VG space was available"; fi
 
+begin_group "Repository / update changes"
+[ ! -f /etc/apt/sources.list.d/pve-enterprise.sources ] && pass_check ENTERPRISE_REPO_DISABLED "Enterprise repositories disabled" "pve-enterprise.sources absent" || fail_check ENTERPRISE_REPO_DISABLED "Enterprise repositories disabled" "enterprise repo files absent" "pve-enterprise.sources present" "remove enterprise repo file or disable it"
+[ ! -f /etc/apt/sources.list.d/ceph.sources ] && pass_check CEPH_ENTERPRISE_REPO_DISABLED "Ceph enterprise repository disabled" "ceph.sources absent" || fail_check CEPH_ENTERPRISE_REPO_DISABLED "Ceph enterprise repository disabled" "ceph.sources absent" "ceph.sources present" "remove Ceph enterprise repo file if not licensed"
+file_has /etc/apt/sources.list.d/proxmox.sources 'pve-no-subscription' && pass_check NO_SUBSCRIPTION_REPO "No-subscription repository active" "pve-no-subscription configured" || fail_check NO_SUBSCRIPTION_REPO "No-subscription repository active" "pve-no-subscription configured" "missing" "restore /etc/apt/sources.list.d/proxmox.sources"
+dpkg --audit >/tmp/circl8-dpkg-audit.$$ 2>&1; dpkg_audit_rc=$?; if [ "$dpkg_audit_rc" -eq 0 ] && [ ! -s /tmp/circl8-dpkg-audit.$$ ]; then pass_check APT_DATABASE_HEALTHY "APT package database healthy" "dpkg audit clean"; else warn_check APT_DATABASE_HEALTHY "APT package database healthy" "dpkg audit clean" "issues reported" "run dpkg --audit and apt-get -f install"; fi; rm -f /tmp/circl8-dpkg-audit.$$
+[ -d /var/lib/pve-manager ] && pass_check PVE_PACKAGE_CACHE_HEALTHY "Proxmox package cache directory" "present" || warn_check PVE_PACKAGE_CACHE_HEALTHY "Proxmox package cache directory" "directory present" "missing" "pveupdate should recreate it"
+boot_has_warning 'pkgupdates|error reading cached package status' && { PKGUPDATES_WARNING=present; warn_check PKGUPDATES_WARNING "pkgupdates warning none" "no pkgupdates boot warning" "warning present" "review pve package cache state"; } || pass_check PKGUPDATES_WARNING "pkgupdates warning none" "none this boot"
+[ -s /var/lib/pve-manager/pkgupdates ] && PKGUPDATES_FILE=present || PKGUPDATES_FILE=absent
+
+begin_group "DNS / network changes"
+if grep -q '^nameserver 1\.1\.1\.1' /etc/resolv.conf 2>/dev/null && grep -q '^nameserver 1\.0\.0\.1' /etc/resolv.conf 2>/dev/null; then pass_check DNS_REDUNDANCY "DNS redundancy configured" "${RESOLVERS:-not reported}"; else warn_check DNS_REDUNDANCY "DNS redundancy configured" "1.1.1.1 and 1.0.0.1" "${RESOLVERS:-none}" "resolver config may have been managed by another service"; fi
+[ -n "$INSTALL_LAN_CIDR" ] && [ "$INSTALL_LAN_CIDR" != "not-detected" ] && pass_check LAN_FIREWALL_CIDR "LAN firewall CIDR applied" "$INSTALL_LAN_CIDR" || warn_check LAN_FIREWALL_CIDR "LAN firewall CIDR applied" "detected LAN CIDR" "${INSTALL_LAN_CIDR:-not-detected}" "firewall may be audit-only if LAN CIDR was unavailable"
+
+begin_group "WebUI changes"
+if [ -x /usr/local/sbin/pve-no-nag-patch.sh ]; then /usr/local/sbin/pve-no-nag-patch.sh >/dev/null 2>&1; fi
+file_has /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js 'if \(false\)|NoMoreNagging' && pass_check NO_SUBSCRIPTION_NAG "No-subscription nag patch applied" "toolkit patch confirmed" || warn_check NO_SUBSCRIPTION_NAG "No-subscription nag patch applied" "toolkit patched" "not confirmed" "run /usr/local/sbin/pve-no-nag-patch.sh and restart pveproxy if nag returns"
+[ -x /usr/local/sbin/pve-no-nag-patch.sh ] && [ -f /etc/apt/apt.conf.d/no-nag-script ] && pass_check PVE_WIDGET_TOOLKIT_HOOK "Proxmox widget toolkit hook installed" "helper and dpkg hook present" || fail_check PVE_WIDGET_TOOLKIT_HOOK "Proxmox widget toolkit hook installed" "helper and dpkg hook present" "missing" "restore no-nag helper and dpkg post-invoke hook"
+
+begin_group "Power / laptop changes"
+all_masked=yes; for target in sleep.target suspend.target hibernate.target hybrid-sleep.target; do [ "$(systemctl is-enabled "$target" 2>/dev/null)" = masked ] || all_masked=no; done
+[ "$all_masked" = yes ] && pass_check POWER_SLEEP_MASKED "sleep/suspend/hibernate targets masked" "all masked" || fail_check POWER_SLEEP_MASKED "sleep/suspend/hibernate targets masked" "all masked" "one or more unmasked" "mask sleep.target suspend.target hibernate.target hybrid-sleep.target"
+if [ "$INSTALL_SYSTEM_TYPE" = "Laptop" ]; then if grep -Eq '^HandleLidSwitch=ignore' /etc/systemd/logind.conf 2>/dev/null && grep -Eq '^HandleLidSwitchDocked=ignore' /etc/systemd/logind.conf 2>/dev/null; then pass_check LAPTOP_LID_SETTINGS "laptop lid settings configured" "ignore"; else fail_check LAPTOP_LID_SETTINGS "laptop lid settings configured" "HandleLidSwitch=ignore" "not confirmed" "review /etc/systemd/logind.conf and restart systemd-logind"; fi; else pass_check LAPTOP_LID_SETTINGS "laptop lid settings configured" "not required on ${INSTALL_SYSTEM_TYPE}"; fi
+pass_check POWER_SETTINGS "power settings applied" "sleep mask and chassis policy checked"
+
+begin_group "Boot / kernel changes"
+[ -f /boot/grub/grub.cfg ] && pass_check GRUB_CONFIG "GRUB updated / config present" "/boot/grub/grub.cfg present" || fail_check GRUB_CONFIG "GRUB updated / config present" "/boot/grub/grub.cfg present" "missing" "run update-grub"
 CMDLINE="$(cat /proc/cmdline 2>/dev/null || true)"
-case "$CMDLINE" in *"$INSTALL_IOMMU_FLAG"*) pass "running kernel contains $INSTALL_IOMMU_FLAG" ;; *) fail "running kernel missing $INSTALL_IOMMU_FLAG" ;; esac
-case "$CMDLINE" in *"iommu=pt"*) pass "running kernel contains iommu=pt" ;; *) fail "running kernel missing iommu=pt" ;; esac
-case "$CMDLINE" in *"consoleblank=60"*) pass "running kernel contains consoleblank=60" ;; *) warn "running kernel missing consoleblank=60" ;; esac
-journalctl -k -b --no-pager 2>/dev/null | grep -Ei 'IOMMU|DMAR|AMD-Vi' | grep -qi enabled && pass "IOMMU appears enabled" || warn "IOMMU not clearly confirmed in boot log"
+case "$CMDLINE" in *"$INSTALL_IOMMU_FLAG"*) pass_check GRUB_IOMMU "IOMMU kernel argument active" "$INSTALL_IOMMU_FLAG" ;; *) fail_check GRUB_IOMMU "IOMMU kernel argument active" "$INSTALL_IOMMU_FLAG" "$CMDLINE" "verify /etc/default/grub and run update-grub, then reboot" ;; esac
+case "$CMDLINE" in *"iommu=pt"*) pass_check GRUB_IOMMU_PT "iommu=pt active" "active" ;; *) fail_check GRUB_IOMMU_PT "iommu=pt active" "iommu=pt" "$CMDLINE" "append iommu=pt to GRUB and reboot" ;; esac
+case "$CMDLINE" in *"consoleblank=60"*) pass_check GRUB_CONSOLEBLANK "consoleblank=60 active" "active" ;; *) warn_check GRUB_CONSOLEBLANK "consoleblank=60 active" "consoleblank=60" "$CMDLINE" "display blanking arg did not appear in current cmdline" ;; esac
+if find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then pass_check IOMMU_GROUPS "IOMMU groups detected" "groups present"; else warn_check IOMMU_GROUPS "IOMMU groups detected" "groups present" "none detected" "confirm BIOS virtualization/IOMMU settings"; fi
 
-kv DGPU_NAME "$INSTALL_DGPU_NAME"; kv DGPU_VRAM "$INSTALL_DGPU_VRAM"; kv DGPU_DRIVER "$DGPU_DRIVER"; kv VFIO_DISABLE_IDLE_D3 "$(yn "$INSTALL_VFIO_DISABLE_IDLE_D3")"
+begin_group "GPU passthrough changes"
 if [ "$(yn "$INSTALL_ENABLE_PASSTHROUGH")" = yes ]; then
-    [ "$DGPU_DRIVER" = vfio-pci ] && pass "selected dGPU bound to vfio-pci" || fail "selected dGPU driver is $DGPU_DRIVER"
-    grep -q "$INSTALL_DGPU_IDS" /etc/modprobe.d/vfio.conf 2>/dev/null && pass "vfio.conf contains selected IDs" || fail "vfio.conf missing selected IDs"
-    grep -q 'disable_vga=1' /etc/modprobe.d/vfio.conf 2>/dev/null && pass "vfio.conf contains disable_vga=1" || fail "vfio.conf missing disable_vga=1"
-    grep -q 'disable_idle_d3=1' /etc/modprobe.d/vfio.conf 2>/dev/null && pass "vfio.conf contains disable_idle_d3=1" || fail "vfio.conf missing disable_idle_d3=1"
-    boot_has_warning 'vfio-pci.*(not.ready|giving up)' && { VFIO_NOT_READY_WARNING=present; warn "vfio-pci not-ready/giving-up warning present"; } || pass "no vfio-pci not-ready/giving-up warning this boot"
-    grep -q '^vfio_virqfd' /proc/modules 2>/dev/null || grep -q 'vfio_virqfd' /etc/modules 2>/dev/null && warn "vfio_virqfd present though not required" || pass "vfio_virqfd not used"
-else warn "GPU passthrough not selected"; fi
-kv VFIO_NOT_READY_WARNING "$VFIO_NOT_READY_WARNING"
+    for module in vfio vfio_iommu_type1 vfio_pci; do key="VFIO_MODULE_$(printf '%s' "$module" | tr '[:lower:]' '[:upper:]')"; module_loaded "$module" && pass_check "$key" "VFIO module ${module} loaded" "loaded" || fail_check "$key" "VFIO module ${module} loaded" "loaded" "not loaded" "review /etc/modules and initramfs, then reboot"; done
+    grep -q '^vfio_virqfd' /proc/modules 2>/dev/null || grep -q 'vfio_virqfd' /etc/modules 2>/dev/null && warn_check VFIO_VIRQFD_UNUSED "vfio_virqfd legacy module not used" "not present" "present" "remove legacy vfio_virqfd reference if manually added" || pass_check VFIO_VIRQFD_UNUSED "vfio_virqfd legacy module not used" "not present"
+    [ -s /etc/modprobe.d/pve-blacklist.conf ] && pass_check GPU_BLACKLIST "host GPU blacklist applied" "pve-blacklist.conf present" || fail_check GPU_BLACKLIST "host GPU blacklist applied" "blacklist file populated" "missing/empty" "review selected dGPU vendor blacklist"
+    [ "$DGPU_DRIVER" = vfio-pci ] && pass_check VFIO_BINDING "dGPU bound to vfio-pci" "$DGPU_DRIVER" || fail_check VFIO_BINDING "dGPU bound to vfio-pci" "vfio-pci" "$DGPU_DRIVER" "review vfio IDs, initramfs, IOMMU, and reboot state"
+    grep -q "$INSTALL_DGPU_IDS" /etc/modprobe.d/vfio.conf 2>/dev/null && pass_check VFIO_SELECTED_IDS "VFIO selected IDs correct" "$INSTALL_DGPU_IDS" || fail_check VFIO_SELECTED_IDS "VFIO selected IDs correct" "$INSTALL_DGPU_IDS" "not found" "restore options vfio-pci ids=$INSTALL_DGPU_IDS"
+    grep -q 'disable_vga=1' /etc/modprobe.d/vfio.conf 2>/dev/null && pass_check VFIO_DISABLE_VGA "disable_vga=1 active" "enabled" || fail_check VFIO_DISABLE_VGA "disable_vga=1 active" "disable_vga=1" "missing" "restore vfio-pci options"
+    grep -q 'disable_idle_d3=1' /etc/modprobe.d/vfio.conf 2>/dev/null && pass_check VFIO_DISABLE_IDLE_D3 "disable_idle_d3=1 active" "enabled" || fail_check VFIO_DISABLE_IDLE_D3 "disable_idle_d3=1 active" "disable_idle_d3=1" "missing" "restore vfio-pci options"
+    boot_has_warning 'vfio-pci.*(not.ready|giving up)' && { VFIO_NOT_READY_WARNING=present; warn_check VFIO_NOT_READY_WARNING "reboot/shutdown dGPU not-ready warning none" "none" "present" "review dGPU power-state stability"; } || pass_check VFIO_NOT_READY_WARNING "reboot/shutdown dGPU not-ready warning none" "none this boot"
+else warn_check VFIO_BINDING "GPU passthrough changes" "passthrough selected" "not selected" "VFIO binding checks skipped by user choice"; fi
 
-sshd -t >/dev/null 2>&1 && pass "sshd syntax OK" || fail "sshd syntax invalid"
-ROOT_SSHD_EFFECTIVE="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
-echo "$ROOT_SSHD_EFFECTIVE" | grep -q '^passwordauthentication no' && pass "PasswordAuthentication no" || fail "PasswordAuthentication not disabled"
-echo "$ROOT_SSHD_EFFECTIVE" | grep -q '^kbdinteractiveauthentication no' && pass "KbdInteractiveAuthentication no" || fail "KbdInteractiveAuthentication not disabled"
-echo "$ROOT_SSHD_EFFECTIVE" | grep -q '^pubkeyauthentication yes' && pass "PubkeyAuthentication yes" || fail "PubkeyAuthentication not enabled"
-echo "$ROOT_SSHD_EFFECTIVE" | grep -Eq '^permitrootlogin (prohibit-password|without-password)' && { pass "PermitRootLogin key-only"; SSH_HARDENING=pass; } || { fail "PermitRootLogin not key-only"; SSH_HARDENING=fail; }
-kv SSH_HARDENING "$SSH_HARDENING"
+begin_group "SSH security changes"
+sshd -t >/dev/null 2>&1 && pass_check SSHD_SYNTAX "sshd syntax valid" "valid" || fail_check SSHD_SYNTAX "sshd syntax valid" "valid" "invalid" "run sshd -t and repair sshd config before closing active session"
+if [ -n "$INSTALL_SSH_ROOT_KEY_FILE" ] && [ "$INSTALL_SSH_ROOT_KEY_FILE" != "not-detected" ] && [ -s "$INSTALL_SSH_ROOT_KEY_FILE" ]; then pass_check SSH_ROOT_KEY_PATH "root SSH key path present" "$INSTALL_SSH_ROOT_KEY_FILE"; else warn_check SSH_ROOT_KEY_PATH "root SSH key path present" "authorized key file present" "${INSTALL_SSH_ROOT_KEY_FILE:-not-detected}" "key-only hardening may have been skipped to avoid lockout"; fi
+echo "$ROOT_SSHD_EFFECTIVE" | grep -q '^pubkeyauthentication yes' && pass_check SSH_PUBKEY_AUTH "root key login enabled" "PubkeyAuthentication yes" || fail_check SSH_PUBKEY_AUTH "root key login enabled" "PubkeyAuthentication yes" "not enabled" "restore PubkeyAuthentication yes"
+echo "$ROOT_SSHD_EFFECTIVE" | grep -q '^passwordauthentication no' && pass_check SSH_PASSWORD_DISABLED "root password login disabled" "PasswordAuthentication no" || fail_check SSH_PASSWORD_DISABLED "root password login disabled" "PasswordAuthentication no" "not disabled" "restore SSH hardening drop-in"
+echo "$ROOT_SSHD_EFFECTIVE" | grep -q '^kbdinteractiveauthentication no' && pass_check SSH_KBD_DISABLED "keyboard-interactive login disabled" "KbdInteractiveAuthentication no" || fail_check SSH_KBD_DISABLED "keyboard-interactive login disabled" "KbdInteractiveAuthentication no" "not disabled" "restore SSH hardening drop-in"
+echo "$ROOT_SSHD_EFFECTIVE" | grep -Eq '^permitrootlogin (prohibit-password|without-password)' && { pass_check SSH_HARDENING "effective root login mode key-only-root" "PermitRootLogin key-only"; SSH_HARDENING=pass; } || { fail_check SSH_HARDENING "effective root login mode key-only-root" "prohibit-password or without-password" "not confirmed" "restore PermitRootLogin prohibit-password"; SSH_HARDENING=fail; }
 
+begin_group "Firewall changes"
 kv FIREWALL_STATUS "$FIREWALL_STATUS"
-echo "$FIREWALL_STATUS" | grep -q 'enabled/running' && pass "pve-firewall enabled/running" || fail "pve-firewall status $FIREWALL_STATUS"
-systemctl is-active --quiet pve-firewall && pass "pve-firewall service active" || fail "pve-firewall service inactive"
-systemctl is-enabled --quiet pve-firewall && pass "pve-firewall service enabled" || warn "pve-firewall service not enabled"
-grep -q 'enable: 1' /etc/pve/firewall/cluster.fw 2>/dev/null && pass "cluster.fw contains enable: 1" || fail "cluster.fw missing enable: 1"
-grep -Eq '^firewall:[[:space:]]*1' /etc/pve/datacenter.cfg 2>/dev/null && fail "datacenter.cfg contains firewall: 1" || pass "datacenter.cfg has no firewall: 1"
-[ -f "/etc/pve/nodes/$(hostname -s)/host.fw" ] && pass "node firewall file exists" || warn "node firewall file missing"
+echo "$FIREWALL_STATUS" | grep -q 'enabled/running' && pass_check FIREWALL_SERVICE "Proxmox firewall service enabled/running" "$FIREWALL_STATUS" || fail_check FIREWALL_SERVICE "Proxmox firewall service enabled/running" "enabled/running" "$FIREWALL_STATUS" "systemctl enable --now pve-firewall and validate pve-firewall status"
+grep -q 'enable: 1' /etc/pve/firewall/cluster.fw 2>/dev/null && pass_check FIREWALL_CLUSTER "cluster firewall config enabled" "cluster.fw enable: 1" || fail_check FIREWALL_CLUSTER "cluster firewall config enabled" "enable: 1 in cluster.fw" "missing" "restore /etc/pve/firewall/cluster.fw [OPTIONS] enable: 1"
+grep -Eq '^firewall:[[:space:]]*1' /etc/pve/datacenter.cfg 2>/dev/null && fail_check DATACENTER_FIREWALL_SCHEMA "Datacenter firewall schema" "no firewall line in /etc/pve/datacenter.cfg" "firewall: 1 found" "remove firewall: 1 from datacenter.cfg; use cluster.fw [OPTIONS] enable: 1" || pass_check DATACENTER_FIREWALL_SCHEMA "Datacenter firewall schema" "datacenter.cfg contains firewall: no"
+[ -f "$HOST_FW" ] && pass_check FIREWALL_NODE_FILE "node firewall file present" "$HOST_FW" || warn_check FIREWALL_NODE_FILE "node firewall file present" "$HOST_FW" "missing" "host rules may need review"
+if [ "$(yn "$INSTALL_ALLOW_PUBLIC_WEB")" = yes ]; then file_has "$HOST_FW" 'dport 80' && file_has "$HOST_FW" 'dport 443' && pass_check FIREWALL_PUBLIC_WEB "public host 80/443 enabled according to selection" "enabled" || fail_check FIREWALL_PUBLIC_WEB "public host 80/443 enabled according to selection" "80/443 rules present" "missing" "add requested host.fw 80/443 rules"; else ! file_has "$HOST_FW" 'dport 80|dport 443' && pass_check FIREWALL_PUBLIC_WEB "public host 80/443 disabled according to selection" "disabled" || warn_check FIREWALL_PUBLIC_WEB "public host 80/443 disabled according to selection" "no 80/443 rules" "rule present" "remove public web rules if Proxmox should remain LAN-only"; fi
 
+begin_group "CrowdSec changes"
 if [ "$(yn "$INSTALL_ENABLE_CROWDSEC")" = yes ]; then
-    CROWDSEC_STATUS="$(service_state crowdsec)"; systemctl is-active --quiet crowdsec && pass "CrowdSec active" || fail "CrowdSec inactive"; systemctl is-enabled --quiet crowdsec && pass "CrowdSec enabled" || warn "CrowdSec not enabled"
-    if systemctl list-unit-files 'crowdsec-firewall-bouncer*' --no-pager --no-legend 2>/dev/null | grep -q crowdsec-firewall-bouncer; then CROWDSEC_BOUNCER_STATUS="$(service_state crowdsec-firewall-bouncer)"; systemctl is-active --quiet crowdsec-firewall-bouncer && pass "CrowdSec bouncer active" || warn "CrowdSec bouncer inactive"; systemctl is-enabled --quiet crowdsec-firewall-bouncer && pass "CrowdSec bouncer enabled" || warn "CrowdSec bouncer not enabled"; else CROWDSEC_BOUNCER_STATUS=missing; warn "CrowdSec bouncer service missing"; fi
-    if command -v cscli >/dev/null 2>&1; then cscli collections list 2>/dev/null | grep -qi 'crowdsecurity/linux' && pass "CrowdSec linux collection present" || warn "CrowdSec linux collection not confirmed"; [ "$INSTALL_CROWDSEC_CONSOLE_ENROLLMENT" = pending ] && cscli console status >/dev/null 2>&1 && pass "CrowdSec console status readable" || true; fi
-else warn "CrowdSec not selected"; fi
+    CROWDSEC_STATUS="$(service_state crowdsec)"; systemctl is-active --quiet crowdsec && systemctl is-enabled --quiet crowdsec && pass_check CROWDSEC "CrowdSec service active/enabled" "${CROWDSEC_STATUS}/$(service_enabled crowdsec)" || fail_check CROWDSEC "CrowdSec service active/enabled" "active/enabled" "${CROWDSEC_STATUS}/$(service_enabled crowdsec)" "review crowdsec install and service status"
+    if systemctl list-unit-files 'crowdsec-firewall-bouncer*' --no-pager --no-legend 2>/dev/null | grep -q crowdsec-firewall-bouncer; then CROWDSEC_BOUNCER_STATUS="$(service_state crowdsec-firewall-bouncer)"; systemctl is-active --quiet crowdsec-firewall-bouncer && systemctl is-enabled --quiet crowdsec-firewall-bouncer && pass_check CROWDSEC_BOUNCER "CrowdSec firewall bouncer active/enabled" "${CROWDSEC_BOUNCER_STATUS}/$(service_enabled crowdsec-firewall-bouncer)" || warn_check CROWDSEC_BOUNCER "CrowdSec firewall bouncer active/enabled" "active/enabled" "${CROWDSEC_BOUNCER_STATUS}/$(service_enabled crowdsec-firewall-bouncer)" "review bouncer package/service"; else CROWDSEC_BOUNCER_STATUS=missing; warn_check CROWDSEC_BOUNCER "CrowdSec firewall bouncer active/enabled" "service present" "missing" "bouncer package may be unavailable for this repo state"; fi
+    if command -v cscli >/dev/null 2>&1; then cscli collections list 2>/dev/null | grep -qi 'crowdsecurity/linux' && pass_check CROWDSEC_COLLECTIONS "CrowdSec collections installed" "linux/sshd/proxmox collection set readable" || warn_check CROWDSEC_COLLECTIONS "CrowdSec collections installed" "collections installed" "not confirmed" "run cscli collections list"; else warn_check CROWDSEC_COLLECTIONS "CrowdSec collections installed" "cscli available" "missing" "CrowdSec CLI not found"; fi
+    if [ "$INSTALL_CROWDSEC_CONSOLE_ENROLLMENT" = pending ]; then command -v cscli >/dev/null 2>&1 && cscli console status >/dev/null 2>&1 && pass_check CROWDSEC_CONSOLE "CrowdSec Console enrollment active or pending" "status readable, engine ${INSTALL_CROWDSEC_CONSOLE_ENGINE_NAME}" || warn_check CROWDSEC_CONSOLE "CrowdSec Console enrollment active or pending" "console status readable" "pending/manual acceptance may be needed" "accept engine ${INSTALL_CROWDSEC_CONSOLE_ENGINE_NAME} in CrowdSec Console"; else pass_check CROWDSEC_CONSOLE "CrowdSec Console enrollment active or pending" "${INSTALL_CROWDSEC_CONSOLE_ENROLLMENT}"; fi
+else warn_check CROWDSEC "CrowdSec changes" "CrowdSec selected" "not selected" "CrowdSec checks skipped by user choice"; fi
 kv CROWDSEC_STATUS "$CROWDSEC_STATUS"; kv CROWDSEC_BOUNCER_STATUS "$CROWDSEC_BOUNCER_STATUS"
 
-grep -q '^nf_conntrack[[:space:]]' /proc/modules 2>/dev/null && pass "nf_conntrack module loaded" || warn "nf_conntrack module not loaded"
-[ -r /proc/sys/net/netfilter/nf_conntrack_max ] && kv NF_CONNTRACK_MAX "$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)" || kv NF_CONNTRACK_MAX unavailable
-boot_has_warning 'nf_conntrack_max|Couldn.t write.*/net/netfilter/nf_conntrack_max' && { NF_CONNTRACK_WARNING=present; warn "nf_conntrack boot warning present"; } || pass "no nf_conntrack_max boot warning"
-boot_has_warning 'pkgupdates|error reading cached package status' && { PKGUPDATES_WARNING=present; warn "package cache boot warning present"; } || pass "no pkgupdates boot warning"
-kv NF_CONNTRACK_WARNING "$NF_CONNTRACK_WARNING"; kv PKGUPDATES_WARNING "$PKGUPDATES_WARNING"; [ -s /var/lib/pve-manager/pkgupdates ] && kv PKGUPDATES_FILE present || kv PKGUPDATES_FILE absent
-grep -q 'pve-no-subscription' /etc/apt/sources.list.d/proxmox.sources 2>/dev/null && pass "no-subscription repo active" || fail "no-subscription repo missing"
-[ ! -f /etc/apt/sources.list.d/pve-enterprise.sources ] && pass "enterprise repo disabled" || fail "enterprise repo still present"
+begin_group "Sysctl / tuning changes"
+[ -f /etc/sysctl.d/99-pve9-hardening-network.conf ] && pass_check SYSCTL_FILE "Sysctl hardening file present" "present" || fail_check SYSCTL_FILE "Sysctl hardening file present" "present" "missing" "restore /etc/sysctl.d/99-pve9-hardening-network.conf"
+sysctl net.ipv4.tcp_syncookies 2>/dev/null | grep -q '= 1' && pass_check TCP_SYNCOOKIES "TCP SYN cookies enabled" "1" || fail_check TCP_SYNCOOKIES "TCP SYN cookies enabled" "1" "not enabled" "run sysctl --system and review hardening file"
+sysctl net.core.somaxconn 2>/dev/null | awk '{print $3}' | grep -Eq '^[0-9]+$' && pass_check NETWORK_TUNING_READABLE "network tuning readable" "somaxconn readable" || warn_check NETWORK_TUNING_READABLE "network tuning readable" "readable sysctl" "not readable" "kernel may not expose this sysctl in the expected path"
+module_loaded nf_conntrack && pass_check NF_CONNTRACK_MODULE "nf_conntrack module loaded" "loaded" || warn_check NF_CONNTRACK_MODULE "nf_conntrack module loaded" "loaded" "not loaded" "module should load when needed; early-load file is present"
+if [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then NF_CONNTRACK_MAX_VALUE="$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"; pass_check NF_CONNTRACK_MAX "nf_conntrack_max live value reported" "${NF_CONNTRACK_MAX_VALUE} accepted"; else warn_check NF_CONNTRACK_MAX "nf_conntrack_max live value reported" "live value reported" "unavailable" "Script 1 does not force 1048576; kernel may expose this after module use"; fi
+boot_has_warning 'nf_conntrack_max|Couldn.t write.*/net/netfilter/nf_conntrack_max' && { NF_CONNTRACK_WARNING=present; warn_check NF_CONNTRACK_WARNING "nf_conntrack boot warning none" "none" "present" "review boot journal for stale sysctl writes"; } || pass_check NF_CONNTRACK_WARNING "nf_conntrack boot warning none" "none this boot"
+kv NF_CONNTRACK_MAX "$NF_CONNTRACK_MAX_VALUE"; kv NF_CONNTRACK_WARNING "$NF_CONNTRACK_WARNING"; kv PKGUPDATES_WARNING "$PKGUPDATES_WARNING"; kv PKGUPDATES_FILE "$PKGUPDATES_FILE"
 
-[ "$FAIL_COUNT" -eq 0 ] && STATUS=PASS || STATUS=FAIL
-kv FAILED_SERVICES "$FAILED_SERVICES"; kv SYSTEM_STATE "$SYSTEM_STATE"; kv CIRCL8_VERIFY_STATUS "$STATUS"; kv VERIFY_WARNINGS "$WARN_COUNT"; kv VERIFY_FAILURES "$FAIL_COUNT"; kv VERIFY_COMPLETE yes
+begin_group "Hardware optimization changes"
+if [ "$(yn "$INSTALL_IS_SSD")" = yes ]; then systemctl is-enabled --quiet fstrim.timer && systemctl is-active --quiet fstrim.timer && pass_check SSD_TRIM "SSD TRIM timer enabled/active" "enabled/active" || warn_check SSD_TRIM "SSD TRIM timer enabled/active" "enabled/active" "$(service_enabled fstrim.timer)/$(service_state fstrim.timer)" "enable fstrim.timer if SSD trim is required"; else pass_check SSD_TRIM "SSD TRIM timer enabled/active" "not required for detected storage"; fi
+if [ "$(yn "$INSTALL_REALTEK_OPTIMIZED")" = yes ]; then [ -n "$INSTALL_REALTEK_IFACE" ] && ip link show "$INSTALL_REALTEK_IFACE" >/dev/null 2>&1 && pass_check REALTEK_INTERFACE "Realtek interface present" "$INSTALL_REALTEK_IFACE" || warn_check REALTEK_INTERFACE "Realtek interface present" "$INSTALL_REALTEK_IFACE" "not found" "interface name may have changed after reboot"; systemctl is-enabled --quiet realtek-optimize.service && pass_check REALTEK_SERVICE "Realtek optimization service enabled" "enabled" || warn_check REALTEK_SERVICE "Realtek optimization service enabled" "enabled" "$(service_enabled realtek-optimize.service)" "enable service if Realtek offload tuning is needed"; else pass_check REALTEK_SERVICE "Realtek optimization service enabled" "not required"; fi
+if [ "$(yn "$INSTALL_NUMLOCK_CONFIGURED")" = yes ]; then systemctl is-enabled --quiet pve-numlock.service && pass_check NUMLOCK_SERVICE "NumLock boot service enabled" "enabled" || warn_check NUMLOCK_SERVICE "NumLock boot service enabled" "enabled" "$(service_enabled pve-numlock.service)" "enable pve-numlock.service if console NumLock is desired"; else warn_check NUMLOCK_SERVICE "NumLock boot service enabled" "configured" "not configured" "NumLock service was not configured during install"; fi
 
-YW=$'\033[33m'; BL=$'\033[36m'; GN=$'\033[1;92m'; ANS=$'\033[1;95m'; CM="${GN}✓\033[m"; CL=$'\033[m'
+if [ "$FAIL_COUNT" -gt 0 ]; then STATUS="FAIL"; RESULT_ACTION="review failed checks below"; elif [ "$WARN_COUNT" -gt 0 ]; then STATUS="PASS_WITH_WARNINGS"; RESULT_ACTION="review warnings below"; else STATUS="PASS"; RESULT_ACTION="clean"; fi
+case "$SYSTEM_STATE" in running) REBOOT_CHECK="clean" ;; degraded) REBOOT_CHECK="degraded" ;; *) REBOOT_CHECK="${SYSTEM_STATE:-unknown}" ;; esac
+kv CIRCL8_VERIFY_FAILED_COUNT "$FAIL_COUNT"; kv CIRCL8_VERIFY_WARN_COUNT "$WARN_COUNT"; kv CIRCL8_VERIFY_PASS_COUNT "$PASS_COUNT"; kv CIRCL8_VERIFY_STATUS "$STATUS"; kv VERIFY_FAILURES "$FAIL_COUNT"; kv VERIFY_WARNINGS "$WARN_COUNT"; kv FAILED_SERVICES "$FAILED_SERVICES"; kv SYSTEM_STATE "$SYSTEM_STATE"; kv VERIFY_COMPLETE yes
+
 {
- echo "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"; echo "${CM} ${YW}CIRCL8 FINAL VERIFICATION${CL}"; echo "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"; echo ""
- echo "${YW}RESULT:${CL}"; echo "  ${BL}Status:${CL} ${GN}${STATUS}${CL}"; echo "  ${BL}Failed services:${CL} ${GN}${FAILED_SERVICES}${CL}"; echo "  ${BL}Reboot check:${CL} ${GN}${SYSTEM_STATE}${CL}"; echo ""
+ echo "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+ echo "${GN}✓${CL} ${YW}CIRCL8 FINAL VERIFICATION${CL}"
+ echo "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+ echo ""
+ echo "${YW}RESULT:${CL}"
+ case "$STATUS" in PASS) echo "  ${BL}Status:${CL} ${GN}PASS${CL}"; echo "  ${BL}Failed checks:${CL} ${GN}${FAIL_COUNT}${CL}"; echo "  ${BL}Warnings:${CL} ${GN}${WARN_COUNT}${CL}"; echo "  ${BL}Reboot check:${CL} ${GN}${REBOOT_CHECK}${CL}" ;; PASS_WITH_WARNINGS) echo "  ${BL}Status:${CL} ${YW}PASS WITH WARNINGS${CL}"; echo "  ${BL}Failed checks:${CL} ${GN}${FAIL_COUNT}${CL}"; echo "  ${BL}Warnings:${CL} ${YW}${WARN_COUNT}${CL}"; echo "  ${BL}Action:${CL} ${YW}${RESULT_ACTION}${CL}" ;; *) echo "  ${BL}Status:${CL} ${RD}FAIL${CL}"; echo "  ${BL}Failed checks:${CL} ${RD}${FAIL_COUNT}${CL}"; echo "  ${BL}Warnings:${CL} ${YW}${WARN_COUNT}${CL}"; echo "  ${BL}Action:${CL} ${RD}${RESULT_ACTION}${CL}" ;; esac
+ echo ""
  echo "${YW}PROXMOX PLATFORM:${CL}"; echo "  ${BL}Proxmox:${CL} ${GN}${PROXMOX_VERSION:-unknown}${CL}"; echo "  ${BL}Kernel:${CL} ${GN}${KERNEL_VERSION}${CL}"; echo "  ${BL}OS:${CL} ${GN}${OS_PRETTY}${CL}"; echo ""
  echo "${YW}HOST MACHINE:${CL}"; echo "  ${BL}Vendor:${CL} ${GN}${INSTALL_SYSTEM_VENDOR}${CL}"; echo "  ${BL}Model:${CL} ${GN}${INSTALL_SYSTEM_PRODUCT}${CL}"; echo "  ${BL}Type:${CL} ${GN}${INSTALL_SYSTEM_TYPE}${CL}"; echo "  ${BL}CPU:${CL} ${GN}${INSTALL_CPU_MODEL_CLOCK}${CL}"; echo "  ${BL}RAM:${CL} ${GN}${INSTALL_SYSTEM_RAM_GB}GB${CL}"; echo ""
- echo "${YW}STORAGE:${CL}"; echo "  ${BL}Root/local:${CL} ${GN}${ROOT_LV_GB} GB${CL}"; echo "  ${BL}Root filesystem:${CL} ${GN}${ROOT_FS_GB} GB${CL}"; echo "  ${BL}local-lvm data:${CL} ${GN}${LOCAL_LVM_DATA_GB} GB${CL}"; echo "  ${BL}local-lvm metadata:${CL} ${GN}${LOCAL_LVM_METADATA_GB} GB${CL}"; echo "  ${BL}local-lvm metadata usage:${CL} ${GN}${LOCAL_LVM_METADATA_USED_PERCENT}%${CL}"; echo "  ${BL}Reserve free VG:${CL} ${GN}${PVE_FREE_GB} GB${CL}"; echo ""
+ echo "${YW}STORAGE:${CL}"; echo "  ${BL}Root/local:${CL} ${GN}${ROOT_LV_GB} GB${CL}"; echo "  ${BL}Root filesystem:${CL} ${GN}${ROOT_FS_GB} GB${CL}"; echo "  ${BL}local-lvm data:${CL} ${GN}${LOCAL_LVM_DATA_GB} GB${CL}"; echo "  ${BL}local-lvm metadata:${CL} ${GN}${LOCAL_LVM_METADATA_GB} GB${CL}"; echo "  ${BL}local-lvm metadata usage:${CL} ${GN}${LOCAL_LVM_METADATA_USED_PERCENT}${CL}"; echo "  ${BL}Reserve free VG:${CL} ${GN}${PVE_FREE_GB} GB${CL}"; echo ""
  echo "${YW}GPU / VFIO:${CL}"; echo "  ${BL}Integrated GPU:${CL} ${GN}${INSTALL_IGPU_NAME}${CL}"; echo "  ${BL}Discrete GPU:${CL} ${GN}${INSTALL_DGPU_NAME}${CL}"; echo "  ${BL}Discrete GPU VRAM:${CL} ${GN}${INSTALL_DGPU_VRAM}${CL}"; echo "  ${BL}dGPU driver:${CL} ${GN}${DGPU_DRIVER}${CL}"; echo "  ${BL}VFIO idle D3 disabled:${CL} ${ANS}$(yn "$INSTALL_VFIO_DISABLE_IDLE_D3")${CL}"; echo "  ${BL}VFIO not-ready warning:${CL} ${GN}${VFIO_NOT_READY_WARNING}${CL}"; echo ""
  echo "${YW}SECURITY:${CL}"; echo "  ${BL}SSH hardening:${CL} ${GN}${SSH_HARDENING}${CL}"; echo "  ${BL}Proxmox firewall:${CL} ${GN}${FIREWALL_STATUS}${CL}"; echo "  ${BL}CrowdSec:${CL} ${GN}${CROWDSEC_STATUS}${CL}"; echo "  ${BL}CrowdSec bouncer:${CL} ${GN}${CROWDSEC_BOUNCER_STATUS}${CL}"; echo ""
  echo "${YW}SYSTEM HEALTH:${CL}"; echo "  ${BL}nf_conntrack warning:${CL} ${GN}${NF_CONNTRACK_WARNING}${CL}"; echo "  ${BL}pkgupdates warning:${CL} ${GN}${PKGUPDATES_WARNING}${CL}"; echo ""
+ echo "${YW}SCRIPT 1 CHANGES VERIFIED:${CL}"
+ cat "$DETAIL_LOG"
+ echo ""
  echo "${YW}LOGS:${CL}"; echo "  ${BL}Machine log:${CL} ${GN}${MACHINE_LOG}${CL}"; echo "  ${BL}Display log:${CL} ${GN}${DISPLAY_LOG}${CL}"
 } > "$DISPLAY_LOG"
 
+rm -f "$DETAIL_LOG"
 touch "$COMPLETE_SENTINEL"
 systemctl disable pve-postinstall-verify.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/pve-postinstall-verify.service /root/pve_verify.sh
@@ -3497,9 +3581,20 @@ VERIFY_EOF
     replace_verify_token "__ENABLE_PASSTHROUGH__" "$ENABLE_PASSTHROUGH"
     replace_verify_token "__ENABLE_CROWDSEC__" "$ENABLE_CROWDSEC"
     replace_verify_token "__CROWDSEC_CONSOLE_ENROLLMENT__" "$CROWDSEC_CONSOLE_ENROLLMENT"
+    replace_verify_token "__CROWDSEC_CONSOLE_ENGINE_NAME__" "${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}"
     replace_verify_token "__STORAGE_LAYOUT_MODE__" "$STORAGE_LAYOUT_MODE"
+    replace_verify_token "__TARGET_ROOT_SIZE_GB__" "$TARGET_ROOT_SIZE_GB"
+    replace_verify_token "__LOCAL_LVM_SIZE_GB__" "$LOCAL_LVM_SIZE_GB"
+    replace_verify_token "__LOCAL_LVM_METADATA_GB__" "$LOCAL_LVM_METADATA_GB"
     replace_verify_token "__PVE_FREE_RESERVE_GB__" "$PVE_FREE_RESERVE_GB"
     replace_verify_token "__IOMMU_FLAG__" "$IOMMU_FLAG"
+    replace_verify_token "__LAN_CIDR__" "${LAN_CIDR:-not-detected}"
+    replace_verify_token "__ALLOW_PUBLIC_WEB__" "$ALLOW_PUBLIC_WEB"
+    replace_verify_token "__REALTEK_OPTIMIZED__" "$REALTEK_OPTIMIZED"
+    replace_verify_token "__REALTEK_IFACE__" "${REALTEK_IFACE:-}"
+    replace_verify_token "__IS_SSD__" "$IS_SSD"
+    replace_verify_token "__NUMLOCK_CONFIGURED__" "$NUMLOCK_CONFIGURED"
+    replace_verify_token "__SSH_ROOT_KEY_FILE__" "${SSH_ROOT_KEY_FILE:-not-detected}"
 
     chmod +x /root/pve_verify.sh
     msg_ok "POST-REBOOT VERIFIER WRITTEN"
