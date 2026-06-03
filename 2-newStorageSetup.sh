@@ -118,7 +118,7 @@ function header_info {
     echo -e "${GN}   ╚════██║    ██║    ██║   ██║ ██╔══██╗ ██╔══██║ ██║   ██║ ██╔══╝  ${CL}"
     echo -e "${GN}   ███████║    ██║    ╚██████╔╝ ██║  ██║ ██║  ██║ ╚██████╔╝ ███████╗${CL}"
     echo -e "${GN}   ╚══════╝    ╚═╝     ╚═════╝  ╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝  ╚══════╝${CL}"
-    echo -e "${YW}${CLF}                       Storage Setup                          ${CL}"
+    echo -e "${YW}${CLF}                             Storage Setup                    ${CL}"
 }
 
 # --- 4. MESSAGE HELPER FUNCTIONS ---
