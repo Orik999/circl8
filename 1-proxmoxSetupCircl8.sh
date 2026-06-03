@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCircl8.sh"
-SCRIPT_VERSION="v1.4.9"
-SCRIPT_UPDATED="2026-06-02"
-SCRIPT_BUILD="nf-conntrack-warning-cleanup"
+SCRIPT_VERSION="v1.5.0"
+SCRIPT_UPDATED="2026-06-03"
+SCRIPT_BUILD="storage-metadata-postreboot-verify"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -38,6 +38,10 @@ T=15
 REBOOT_T=60
 LOG_FILE="/var/log/pve9-postinstall.log"
 VERIFY_LOG="/var/log/pve9-postinstall-verify.log"
+VERIFY_DISPLAY_LOG="/var/log/pve9-postinstall-verify-display.log"
+VERIFY_COMPLETE_SENTINEL="/root/.pve9-postinstall-verify-complete"
+VERIFY_DISPLAYED_MARKER="/root/.pve9-postinstall-verify-displayed"
+VERIFY_LOGIN_HOOK="/etc/profile.d/circl8-pve9-postinstall-verify.sh"
 COMPLETED_MARKER="/root/.pve9-postinstall-completed"
 
 HOSTNAME_SHORT="$(hostname -s)"
@@ -148,6 +152,15 @@ LOCAL_LVM_SIZE_GB="0"
 LOCAL_LVM_SIZE_MIB="0"
 LOCAL_LVM_DEFAULT_SIZE_GB="0"
 LOCAL_LVM_DEFAULT_SIZE_MIB="0"
+LOCAL_LVM_METADATA_GB="1"
+LOCAL_LVM_METADATA_MIB="0"
+LOCAL_LVM_METADATA_DEFAULT_GB="1"
+LOCAL_LVM_MAX_DATA_GB="0"
+LOCAL_LVM_MAX_DATA_MIB="0"
+EXISTING_LOCAL_LVM_DATA_GB="none"
+EXISTING_LOCAL_LVM_METADATA_GB="none"
+EXISTING_LOCAL_LVM_METADATA_USED_PERCENT="none"
+EXISTING_LOCAL_LVM_PM_SPARE_GB="none"
 
 TEMP_FILES=()
 
@@ -1045,7 +1058,12 @@ function display_storage_detected_block() {
     fi
 
     echo -e "  ${BL}Root filesystem:${CL} ${GN}${ROOT_FS_TYPE:-unknown} (${ROOT_SOURCE:-unknown})${CL}"
+    echo -e "  ${BL}Current root/local:${CL} ${GN}${CURRENT_ROOT_SIZE_GB} GB${CL}"
     echo -e "  ${BL}Existing local-lvm:${CL} ${GN}${LOCAL_LVM_EXISTS}${CL}"
+    echo -e "  ${BL}Existing local-lvm data:${CL} ${GN}${EXISTING_LOCAL_LVM_DATA_GB}${CL}"
+    echo -e "  ${BL}Existing local-lvm metadata:${CL} ${GN}${EXISTING_LOCAL_LVM_METADATA_GB}${CL}"
+    echo -e "  ${BL}Existing local-lvm metadata usage:${CL} ${GN}${EXISTING_LOCAL_LVM_METADATA_USED_PERCENT}${CL}"
+    echo -e "  ${BL}Free pve VG space:${CL} ${GN}${CURRENT_PVE_FREE_GB} GB${CL}"
 }
 
 function display_vram_value() {
@@ -1572,7 +1590,7 @@ function check_fresh_install_state() {
         "/etc/sysctl.d/99-pve9-hardening-network.conf" \
         "/etc/systemd/system/pve-numlock.service" \
         "/etc/systemd/system/realtek-optimize.service" \
-        "/etc/profile.d/pve-postinstall-verify-display.sh"
+        "$VERIFY_LOGIN_HOOK"
     do
         if [ -e "$marker" ]; then
             IS_FRESH="no"
@@ -1725,6 +1743,45 @@ function get_lvm_size_bytes() {
     fi
 }
 
+function get_lvm_metadata_bytes() {
+    local raw=""
+
+    raw="$(lvs -a --noheadings --units b --nosuffix -o lv_metadata_size pve/data 2>/dev/null | awk 'NF {gsub(/[^0-9]/, "", $1); print $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+$ ]] && [ "$raw" -gt 0 ]; then
+        echo "$raw"
+        return 0
+    fi
+
+    raw="$(lvs -a --noheadings --units b --nosuffix -o lv_size pve/data_tmeta 2>/dev/null | awk 'NF {gsub(/[^0-9]/, "", $1); print $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+$ ]] && [ "$raw" -gt 0 ]; then
+        echo "$raw"
+    else
+        echo "0"
+    fi
+}
+
+function get_lvm_metadata_percent() {
+    local raw=""
+
+    raw="$(lvs -a --noheadings --nosuffix -o metadata_percent pve/data 2>/dev/null | awk 'NF {print $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "$raw%"
+    else
+        echo "none"
+    fi
+}
+
+function get_lvm_pmspare_bytes() {
+    local raw=""
+
+    raw="$(lvs -a --noheadings --units b --nosuffix -o lv_size pve/lvol0_pmspare 2>/dev/null | awk 'NF {gsub(/[^0-9]/, "", $1); print $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+$ ]] && [ "$raw" -gt 0 ]; then
+        echo "$raw"
+    else
+        echo "0"
+    fi
+}
+
 function get_pve_free_bytes() {
     local raw=""
 
@@ -1819,6 +1876,10 @@ function detect_storage_layout_options() {
     CURRENT_ROOT_SIZE_MIB="0"
     CURRENT_PVE_FREE_GB="0"
     CURRENT_PVE_FREE_MIB="0"
+    EXISTING_LOCAL_LVM_DATA_GB="none"
+    EXISTING_LOCAL_LVM_METADATA_GB="none"
+    EXISTING_LOCAL_LVM_METADATA_USED_PERCENT="none"
+    EXISTING_LOCAL_LVM_PM_SPARE_GB="none"
 
     if storage_id_in_pvesm_status "local-lvm"; then
         LOCAL_LVM_STORAGE_EXISTS="yes"
@@ -1842,6 +1903,9 @@ function detect_storage_layout_options() {
 
     local root_size_bytes=""
     local pve_free_bytes=""
+    local data_size_bytes=""
+    local metadata_size_bytes=""
+    local pmspare_size_bytes=""
 
     root_size_bytes="$(get_lvm_size_bytes /dev/pve/root)"
     pve_free_bytes="$(get_pve_free_bytes)"
@@ -1851,6 +1915,22 @@ function detect_storage_layout_options() {
     CURRENT_PVE_FREE_MIB="$(bytes_to_mib_floor "$pve_free_bytes")"
     CURRENT_PVE_FREE_GB="$(internal_mib_to_ui_gb "$CURRENT_PVE_FREE_MIB")"
     ROOT_DISK_SIZE_GB="$CURRENT_ROOT_SIZE_GB"
+
+    if pve_data_lv_exists; then
+        data_size_bytes="$(get_lvm_size_bytes /dev/pve/data)"
+        metadata_size_bytes="$(get_lvm_metadata_bytes)"
+        pmspare_size_bytes="$(get_lvm_pmspare_bytes)"
+        if [ "${data_size_bytes:-0}" -gt 0 ]; then
+            EXISTING_LOCAL_LVM_DATA_GB="$(bytes_to_ui_gb_floor "$data_size_bytes") GB"
+        fi
+        if [ "${metadata_size_bytes:-0}" -gt 0 ]; then
+            EXISTING_LOCAL_LVM_METADATA_GB="$(bytes_to_ui_gb_floor "$metadata_size_bytes") GB"
+        fi
+        if [ "${pmspare_size_bytes:-0}" -gt 0 ]; then
+            EXISTING_LOCAL_LVM_PM_SPARE_GB="$(bytes_to_ui_gb_floor "$pmspare_size_bytes") GB"
+        fi
+        EXISTING_LOCAL_LVM_METADATA_USED_PERCENT="$(get_lvm_metadata_percent)"
+    fi
 
     return 0
 }
@@ -1874,21 +1954,27 @@ function calculate_storage_plan() {
     ROOT_LV_ALLOCATION_GB="$(root_visible_gb_to_allocation_gb "$TARGET_ROOT_SIZE_GB")"
     ROOT_LV_ALLOCATION_MIB="$(ui_gb_to_internal_mib "$ROOT_LV_ALLOCATION_GB")"
     PVE_FREE_RESERVE_MIB="$(ui_gb_to_internal_mib "$PVE_FREE_RESERVE_GB")"
+    LOCAL_LVM_METADATA_MIB="$(ui_gb_to_internal_mib "$LOCAL_LVM_METADATA_GB")"
     ROOT_GROWTH_MIB="0"
     ROOT_GROWTH_GB="0"
     LOCAL_LVM_DEFAULT_SIZE_MIB="0"
     LOCAL_LVM_DEFAULT_SIZE_GB="0"
+    LOCAL_LVM_MAX_DATA_MIB="0"
+    LOCAL_LVM_MAX_DATA_GB="0"
 
     if [ "$ROOT_LV_ALLOCATION_MIB" -gt "$CURRENT_ROOT_SIZE_MIB" ]; then
         ROOT_GROWTH_MIB="$(( ROOT_LV_ALLOCATION_MIB - CURRENT_ROOT_SIZE_MIB ))"
         ROOT_GROWTH_GB="$(internal_mib_to_ui_gb "$ROOT_GROWTH_MIB")"
     fi
 
-    LOCAL_LVM_DEFAULT_SIZE_MIB="$(( CURRENT_PVE_FREE_MIB - ROOT_GROWTH_MIB - PVE_FREE_RESERVE_MIB ))"
-    if [ "$LOCAL_LVM_DEFAULT_SIZE_MIB" -lt 0 ]; then
-        LOCAL_LVM_DEFAULT_SIZE_MIB="0"
+    LOCAL_LVM_MAX_DATA_MIB="$(( CURRENT_PVE_FREE_MIB - ROOT_GROWTH_MIB - LOCAL_LVM_METADATA_MIB - PVE_FREE_RESERVE_MIB ))"
+    if [ "$LOCAL_LVM_MAX_DATA_MIB" -lt 0 ]; then
+        LOCAL_LVM_MAX_DATA_MIB="0"
     fi
-    LOCAL_LVM_DEFAULT_SIZE_GB="$(internal_mib_to_ui_gb "$LOCAL_LVM_DEFAULT_SIZE_MIB")"
+
+    LOCAL_LVM_MAX_DATA_GB="$(internal_mib_to_ui_gb "$LOCAL_LVM_MAX_DATA_MIB")"
+    LOCAL_LVM_DEFAULT_SIZE_MIB="$LOCAL_LVM_MAX_DATA_MIB"
+    LOCAL_LVM_DEFAULT_SIZE_GB="$LOCAL_LVM_MAX_DATA_GB"
 }
 
 function validate_storage_builder_plan() {
@@ -1899,15 +1985,24 @@ function validate_storage_builder_plan() {
         msg_error "Requested pve VG reserve cannot be negative."
     fi
 
+    if [ "$CREATE_LOCAL_LVM" == "y" ] && [ "$LOCAL_LVM_METADATA_GB" -le 0 ]; then
+        msg_error "local-lvm metadata size must be greater than zero when local-lvm creation is selected."
+    fi
+
     LOCAL_LVM_SIZE_MIB="0"
     if [ "$CREATE_LOCAL_LVM" == "y" ]; then
         if [ "$LOCAL_LVM_SIZE_GB" -le 0 ]; then
-            msg_error "local-lvm size must be greater than zero when local-lvm creation is selected."
+            msg_error "local-lvm data size must be greater than zero when local-lvm creation is selected."
         fi
         LOCAL_LVM_SIZE_MIB="$(ui_gb_to_internal_mib "$LOCAL_LVM_SIZE_GB")"
+        if [ "$LOCAL_LVM_SIZE_MIB" -gt "$LOCAL_LVM_MAX_DATA_MIB" ]; then
+            msg_error "local-lvm data size cannot exceed ${LOCAL_LVM_MAX_DATA_GB}GB after root growth, ${LOCAL_LVM_METADATA_GB}GB metadata and ${PVE_FREE_RESERVE_GB}GB reserve."
+        fi
+    else
+        LOCAL_LVM_METADATA_MIB="0"
     fi
 
-    total_required_mib="$(( ROOT_GROWTH_MIB + PVE_FREE_RESERVE_MIB + LOCAL_LVM_SIZE_MIB ))"
+    total_required_mib="$(( ROOT_GROWTH_MIB + PVE_FREE_RESERVE_MIB + LOCAL_LVM_METADATA_MIB + LOCAL_LVM_SIZE_MIB ))"
     total_required_gb="$(internal_mib_to_ui_gb "$total_required_mib")"
 
     if [ "$total_required_mib" -gt "$CURRENT_PVE_FREE_MIB" ]; then
@@ -1923,14 +2018,17 @@ function show_storage_plan() {
         preserve_local_lvm)
             echo -e "  ${BL}Mode:${CL} ${GN}preserve local-lvm${CL}"
             echo -e "  ${BL}Root/local expansion:${CL} ${GN}skipped${CL}"
-            echo -e "  ${BL}local-lvm creation:${CL} ${GN}skipped${CL}"
+            echo -e "  ${BL}local-lvm data:${CL} ${GN}${EXISTING_LOCAL_LVM_DATA_GB}${CL}"
+            echo -e "  ${BL}local-lvm metadata:${CL} ${GN}${EXISTING_LOCAL_LVM_METADATA_GB}${CL}"
+            echo -e "  ${BL}local-lvm metadata usage:${CL} ${GN}${EXISTING_LOCAL_LVM_METADATA_USED_PERCENT}${CL}"
             ;;
         build_local_lvm)
             echo -e "  ${BL}Mode:${CL} ${GN}build local-lvm${CL}"
             echo -e "  ${BL}Target root/local:${CL} ${ANS}${TARGET_ROOT_SIZE_GB} GB${CL}"
-            echo -e "  ${BL}Create local-lvm:${CL} ${ANS}yes${CL}"
-            echo -e "  ${BL}local-lvm size:${CL} ${ANS}${LOCAL_LVM_SIZE_GB} GB${CL}"
+            echo -e "  ${BL}local-lvm metadata:${CL} ${ANS}${LOCAL_LVM_METADATA_GB} GB${CL}"
             echo -e "  ${BL}Reserve free VG space:${CL} ${ANS}${PVE_FREE_RESERVE_GB} GB${CL}"
+            echo -e "  ${BL}Max local-lvm data:${CL} ${GN}${LOCAL_LVM_MAX_DATA_GB} GB${CL}"
+            echo -e "  ${BL}local-lvm data size:${CL} ${ANS}${LOCAL_LVM_SIZE_GB} GB${CL}"
             ;;
         extend_root_only)
             echo -e "  ${BL}Mode:${CL} ${GN}extend root only${CL}"
@@ -1955,7 +2053,10 @@ function collect_storage_layout_option() {
 
     echo ""
     echo -e "${YW}Current layout:${CL}"
-    echo -e "  ${BL}Root/local:${CL} ${GN}${CURRENT_ROOT_SIZE_GB} GB${CL}"
+    echo -e "  ${BL}Current root/local:${CL} ${GN}${CURRENT_ROOT_SIZE_GB} GB${CL}"
+    echo -e "  ${BL}Existing local-lvm data:${CL} ${GN}${EXISTING_LOCAL_LVM_DATA_GB}${CL}"
+    echo -e "  ${BL}Existing local-lvm metadata:${CL} ${GN}${EXISTING_LOCAL_LVM_METADATA_GB}${CL}"
+    echo -e "  ${BL}Existing local-lvm metadata usage:${CL} ${GN}${EXISTING_LOCAL_LVM_METADATA_USED_PERCENT}${CL}"
     echo -e "  ${BL}Free pve VG space:${CL} ${GN}${CURRENT_PVE_FREE_GB} GB${CL}"
 
     if [ "$LOCAL_LVM_EXISTS" == "yes" ]; then
@@ -1985,6 +2086,7 @@ function collect_storage_layout_option() {
     fi
 
     TARGET_ROOT_SIZE_GB="$(read_storage_gb_input "Set Proxmox root/local target size in GB" "$default_target" "no")"
+    LOCAL_LVM_METADATA_GB="$(read_storage_gb_input "Set local-lvm metadata size in GB" "$LOCAL_LVM_METADATA_DEFAULT_GB" "no")"
     PVE_FREE_RESERVE_GB="$(read_storage_gb_input "Reserve free pve VG space in GB" "1" "yes")"
 
     calculate_storage_plan
@@ -1995,10 +2097,10 @@ function collect_storage_layout_option() {
         LOCAL_LVM_SIZE_GB="0"
     else
         CREATE_LOCAL_LVM="y"
-        if [ "$LOCAL_LVM_DEFAULT_SIZE_GB" -le 0 ]; then
-            msg_error "No pve VG space remains for local-lvm after root target growth and reserve. Reduce target root size or reserve, or choose not to create local-lvm."
+        if [ "$LOCAL_LVM_MAX_DATA_GB" -le 0 ]; then
+            msg_error "No pve VG space remains for local-lvm data after root target growth, ${LOCAL_LVM_METADATA_GB}GB metadata and ${PVE_FREE_RESERVE_GB}GB reserve."
         fi
-        LOCAL_LVM_SIZE_GB="$(read_storage_gb_input "Set local-lvm size in GB [max available: ${LOCAL_LVM_DEFAULT_SIZE_GB}]" "$LOCAL_LVM_DEFAULT_SIZE_GB" "no")"
+        LOCAL_LVM_SIZE_GB="$(read_storage_gb_input "Set local-lvm data size in GB [max available: ${LOCAL_LVM_MAX_DATA_GB}]" "$LOCAL_LVM_MAX_DATA_GB" "no")"
     fi
 
     validate_storage_builder_plan
@@ -2131,7 +2233,7 @@ function final_start_prompt() {
             ;;
         build_local_lvm)
             storage_mode_label="build local-lvm"
-            local_lvm_summary="create, ${LOCAL_LVM_SIZE_GB} GB"
+            local_lvm_summary="create, ${LOCAL_LVM_SIZE_GB} GB data / ${LOCAL_LVM_METADATA_GB} GB metadata"
             ;;
         extend_root_only)
             storage_mode_label="extend root only"
@@ -2151,6 +2253,7 @@ function final_start_prompt() {
     echo -e "  ${BL}Mode:${CL} ${ANS}${storage_mode_label}${CL}"
     echo -e "  ${BL}Root/local:${CL} ${GN}${CURRENT_ROOT_SIZE_GB} GB${CL} → ${ANS}${TARGET_ROOT_SIZE_GB} GB${CL}"
     echo -e "  ${BL}local-lvm:${CL} ${ANS}${local_lvm_summary}${CL}"
+    echo -e "  ${BL}Max local-lvm data:${CL} ${GN}${LOCAL_LVM_MAX_DATA_GB} GB${CL}"
     echo -e "  ${BL}Reserve free VG space:${CL} ${ANS}${PVE_FREE_RESERVE_GB} GB${CL}"
     echo ""
 
@@ -2228,8 +2331,8 @@ function create_local_lvm_thinpool() {
         msg_error "local-lvm or /dev/pve/data already exists. Refusing to create or reuse storage automatically."
     fi
 
-    msg_info "Creating local-lvm thinpool (${LOCAL_LVM_SIZE_GB}GB)"
-    run_cmd "creating local-lvm thinpool" lvcreate --type thin-pool -L "${LOCAL_LVM_SIZE_MIB}M" -n data pve
+    msg_info "Creating local-lvm thinpool (${LOCAL_LVM_SIZE_GB}GB data, ${LOCAL_LVM_METADATA_GB}GB metadata)"
+    run_cmd "creating local-lvm thinpool" lvcreate --type thin-pool -L "${LOCAL_LVM_SIZE_MIB}M" --poolmetadatasize "${LOCAL_LVM_METADATA_GB}G" -n data pve
     msg_ok "local-lvm thinpool created"
 
     msg_info "Registering local-lvm in Proxmox"
@@ -3213,330 +3316,203 @@ EOF
 function create_auto_verifier() {
     section "AUTO-VERIFY GHOST SCRIPT"
 
-    msg_info "Writing auto-verify script"
-    cat <<EOF > /root/pve_verify.sh
+    msg_info "Cleaning old verification login hooks"
+    rm -f /etc/profile.d/pve-postinstall-verify-display.sh /etc/profile.d/circl8-pve9-postinstall-verify.sh
+    rm -f "$VERIFY_COMPLETE_SENTINEL" "$VERIFY_DISPLAYED_MARKER"
+    msg_ok "OLD VERIFICATION HOOKS CLEANED"
+
+    msg_info "Writing post-reboot verifier"
+    cat <<'VERIFY_EOF' > /root/pve_verify.sh
 #!/usr/bin/env bash
 set +e
 
-VERIFY_LOG="$VERIFY_LOG"
-: > "\$VERIFY_LOG"
-exec > >(tee -a "\$VERIFY_LOG") 2>&1
+MACHINE_LOG="/var/log/pve9-postinstall-verify.log"
+DISPLAY_LOG="/var/log/pve9-postinstall-verify-display.log"
+COMPLETE_SENTINEL="/root/.pve9-postinstall-verify-complete"
+VERIFY_VERSION="v1.5.0"
+FAIL_COUNT=0
+WARN_COUNT=0
 
-GN="\033[32m"
-RD="\033[31m"
-YW="\033[33m"
-BL="\033[36m"
-CL="\033[0m"
+INSTALL_SYSTEM_VENDOR="__SYSTEM_VENDOR__"
+INSTALL_SYSTEM_PRODUCT="__SYSTEM_PRODUCT__"
+INSTALL_SYSTEM_TYPE="__SYSTEM_TYPE__"
+INSTALL_CPU_MODEL_CLOCK="__CPU_MODEL_CLOCK__"
+INSTALL_CPU_PHYSICAL_CORES="__CPU_PHYSICAL_CORES__"
+INSTALL_CPU_THREADS="__CPU_THREADS__"
+INSTALL_SYSTEM_RAM_GB="__SYSTEM_RAM_GB__"
+INSTALL_IGPU_NAME="__IGPU_NAME__"
+INSTALL_DGPU_NAME="__DGPU_NAME__"
+INSTALL_DGPU_BDF="__DGPU_BDF__"
+INSTALL_DGPU_IDS="__DGPU_IDS__"
+INSTALL_DGPU_VRAM="__DGPU_VRAM__"
+INSTALL_VFIO_DISABLE_IDLE_D3="__VFIO_DISABLE_IDLE_D3__"
+INSTALL_ENABLE_PASSTHROUGH="__ENABLE_PASSTHROUGH__"
+INSTALL_ENABLE_CROWDSEC="__ENABLE_CROWDSEC__"
+INSTALL_CROWDSEC_CONSOLE_ENROLLMENT="__CROWDSEC_CONSOLE_ENROLLMENT__"
+INSTALL_STORAGE_LAYOUT_MODE="__STORAGE_LAYOUT_MODE__"
+INSTALL_PVE_FREE_RESERVE_GB="__PVE_FREE_RESERVE_GB__"
+INSTALL_IOMMU_FLAG="__IOMMU_FLAG__"
 
-INSTALL_PROXMOX_VERSION="$PROXMOX_VERSION"
-INSTALL_PROXMOX_KERNEL="$PROXMOX_KERNEL"
-INSTALL_BIOS_VERSION="$BIOS_VERSION"
-INSTALL_SYSTEM_PRODUCT="$SYSTEM_PRODUCT"
-INSTALL_SYSTEM_CHASSIS="$SYSTEM_CHASSIS"
-INSTALL_SYSTEM_TYPE="$SYSTEM_TYPE"
-INSTALL_OS_PRETTY="$OS_PRETTY"
-INSTALL_SYSTEM_ARCH="$SYSTEM_ARCH"
-INSTALL_CPU_MODEL_CLOCK="$CPU_MODEL_CLOCK"
-INSTALL_CPU_PHYSICAL_CORES="$CPU_PHYSICAL_CORES"
-INSTALL_CPU_THREADS="$CPU_THREADS"
-INSTALL_SYSTEM_RAM_GB="$SYSTEM_RAM_GB"
-INSTALL_IS_SSD="$IS_SSD"
-INSTALL_IGPU_FOUND="$IGPU_FOUND"
-INSTALL_DGPU_FOUND="$DGPU_FOUND"
-INSTALL_DGPU_BDFS="$DGPU_BDFS"
-INSTALL_DGPU_IDS="$DGPU_IDS"
-INSTALL_IGPU_NAME="$IGPU_NAME"
-INSTALL_IGPU_BDF="$IGPU_BDF"
-INSTALL_IGPU_VENDOR_DEVICE="$IGPU_VENDOR_DEVICE"
-INSTALL_IGPU_DRIVER="$IGPU_DRIVER"
-INSTALL_IGPU_BOOT_VGA="$IGPU_BOOT_VGA"
-INSTALL_DGPU_NAME="$DGPU_NAME"
-INSTALL_DGPU_BDF="$DGPU_BDF"
-INSTALL_DGPU_VENDOR_DEVICE="$DGPU_VENDOR_DEVICE"
-INSTALL_DGPU_DRIVER="$DGPU_DRIVER"
-INSTALL_DGPU_VRAM="$DGPU_VRAM"
-INSTALL_DGPU_BOOT_VGA="$DGPU_BOOT_VGA"
-INSTALL_GPU_SAME_SLOT_FUNCTIONS="$GPU_SAME_SLOT_FUNCTIONS"
-INSTALL_VFIO_DISABLE_IDLE_D3="$VFIO_DISABLE_IDLE_D3"
-INSTALL_ENABLE_PASSTHROUGH="$ENABLE_PASSTHROUGH"
-INSTALL_ENABLE_PERFORMANCE="$ENABLE_PERFORMANCE"
-INSTALL_ENABLE_CROWDSEC="$ENABLE_CROWDSEC"
-INSTALL_ALLOW_PUBLIC_WEB="$ALLOW_PUBLIC_WEB"
-INSTALL_SSH_HARDENING_APPLIED="$SSH_HARDENING_APPLIED"
-INSTALL_PVE_FIREWALL_APPLIED="$PVE_FIREWALL_APPLIED"
-INSTALL_IOMMU_FLAG="$IOMMU_FLAG"
-INSTALL_CROWDSEC_BOUNCER_PACKAGE="$CROWDSEC_BOUNCER_PACKAGE"
-INSTALL_CROWDSEC_CONSOLE_ENROLLMENT="$CROWDSEC_CONSOLE_ENROLLMENT"
-INSTALL_CROWDSEC_CONSOLE_ENGINE_NAME="$CROWDSEC_CONSOLE_ENGINE_NAME"
-INSTALL_REALTEK_IFACE="$REALTEK_IFACE"
-INSTALL_REALTEK_OPTIMIZED="$REALTEK_OPTIMIZED"
-INSTALL_NUMLOCK_CONFIGURED="$NUMLOCK_CONFIGURED"
-INSTALL_STORAGE_LAYOUT_MODE="$STORAGE_LAYOUT_MODE"
-INSTALL_CURRENT_ROOT_SIZE_GB="$CURRENT_ROOT_SIZE_GB"
-INSTALL_TARGET_ROOT_SIZE_GB="$TARGET_ROOT_SIZE_GB"
-INSTALL_ROOT_LV_ALLOCATION_GB="$ROOT_LV_ALLOCATION_GB"
-INSTALL_ROOT_GROWTH_GB="$ROOT_GROWTH_GB"
-INSTALL_CREATE_LOCAL_LVM="$CREATE_LOCAL_LVM"
-INSTALL_LOCAL_LVM_SIZE_GB="$LOCAL_LVM_SIZE_GB"
-INSTALL_DEFAULT_IFACE="$DEFAULT_IFACE"
-INSTALL_LAN_CIDR="$LAN_CIDR"
-INSTALL_SSH_ROOT_KEY_FILE="$SSH_ROOT_KEY_FILE"
-INSTALL_SSH_ROOT_KEY_COUNT="$SSH_ROOT_KEY_COUNT"
-INSTALL_SSH_ROOT_KEY_TARGET="$SSH_ROOT_KEY_TARGET"
-INSTALL_SSH_ROOT_KEY_OWNER="$SSH_ROOT_KEY_OWNER"
-INSTALL_SSH_ROOT_KEY_MODE="$SSH_ROOT_KEY_MODE"
-INSTALL_SSH_EFFECTIVE_AUTHORIZED_KEYS="$SSH_EFFECTIVE_AUTHORIZED_KEYS"
-INSTALL_SSH_EFFECTIVE_PERMIT_ROOT="$SSH_EFFECTIVE_PERMIT_ROOT"
-INSTALL_SSH_EFFECTIVE_PASSWORD_AUTH="$SSH_EFFECTIVE_PASSWORD_AUTH"
-INSTALL_SSH_EFFECTIVE_PUBKEY_AUTH="$SSH_EFFECTIVE_PUBKEY_AUTH"
-INSTALL_SSH_EFFECTIVE_KBD_AUTH="$SSH_EFFECTIVE_KBD_AUTH"
+rm -f "$COMPLETE_SENTINEL"
+: > "$MACHINE_LOG"
+: > "$DISPLAY_LOG"
+kv() { printf '%s=%s\n' "$1" "$2" >> "$MACHINE_LOG"; }
+pass() { printf 'PASS %s\n' "$1" >> "$MACHINE_LOG"; }
+warn() { WARN_COUNT=$((WARN_COUNT + 1)); printf 'WARN %s\n' "$1" >> "$MACHINE_LOG"; }
+fail() { FAIL_COUNT=$((FAIL_COUNT + 1)); printf 'FAIL %s\n' "$1" >> "$MACHINE_LOG"; }
+yn() { case "${1:-}" in y|Y|yes|YES|true|TRUE|1) echo yes ;; *) echo no ;; esac; }
+read_os_pretty() { awk -F= '$1=="PRETTY_NAME" {gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null || echo unknown; }
+ui_gb_from_bytes_floor() { local b="${1:-0}"; echo $(( b / 1073741824 )); }
+lv_bytes() { lvs -a --noheadings --units b --nosuffix -o lv_size "$1" 2>/dev/null | awk 'NF {gsub(/[^0-9]/,"",$1); print $1; exit}' || echo 0; }
+lv_attr() { lvs -a --noheadings -o lv_attr "$1" 2>/dev/null | awk 'NF {print $1; exit}' || true; }
+lv_meta_bytes() { local raw=""; raw="$(lvs -a --noheadings --units b --nosuffix -o lv_metadata_size pve/data 2>/dev/null | awk 'NF {gsub(/[^0-9]/,"",$1); print $1; exit}' || true)"; if [[ "$raw" =~ ^[0-9]+$ ]] && [ "$raw" -gt 0 ]; then echo "$raw"; else lv_bytes pve/data_tmeta; fi; }
+lv_meta_percent() { lvs -a --noheadings --nosuffix -o metadata_percent pve/data 2>/dev/null | awk 'NF {print $1; exit}' || echo unavailable; }
+vg_free_gb() { local raw=""; raw="$(vgs --noheadings --units b --nosuffix -o vg_free pve 2>/dev/null | awk 'NF {gsub(/[^0-9]/,"",$1); print $1; exit}' || echo 0)"; ui_gb_from_bytes_floor "${raw:-0}"; }
+service_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
+boot_has_warning() { journalctl -b --no-pager 2>/dev/null | grep -qiE "$1"; }
 
-PASS() { echo -e "\${GN}✓ PASS\${CL} - \$1"; }
-FAIL() { echo -e "\${RD}✗ FAIL\${CL} - \$1"; }
-WARN() { echo -e "\${YW}! WARN\${CL} - \$1"; }
-INFO() { echo -e "\${BL}- INFO\${CL} - \$1"; }
-YESNO() {
-    case "\${1:-}" in
-        y|Y|yes|YES|true|TRUE|1) echo "yes" ;;
-        n|N|no|NO|false|FALSE|0|"") echo "no" ;;
-        *) echo "\$1" ;;
-    esac
-}
+sleep 45
+PROXMOX_VERSION="$(pveversion 2>/dev/null | sed -nE 's|^pve-manager/([^/]+)/.*|\1|p' | head -n1)"
+KERNEL_VERSION="$(uname -r 2>/dev/null || echo unknown)"
+OS_PRETTY="$(read_os_pretty)"
+ARCH="$(uname -m 2>/dev/null || echo unknown)"
+ROOT_LV_GB="$(ui_gb_from_bytes_floor "$(lv_bytes /dev/pve/root)")"
+ROOT_FS_GB="$(df -BG / 2>/dev/null | awk 'NR==2 {gsub(/G/,"",$2); print $2; exit}' || echo 0)"
+LOCAL_LVM_DATA_GB="$(ui_gb_from_bytes_floor "$(lv_bytes /dev/pve/data)")"
+LOCAL_LVM_METADATA_GB="$(ui_gb_from_bytes_floor "$(lv_meta_bytes)")"
+LOCAL_LVM_METADATA_USED_PERCENT="$(lv_meta_percent)"
+LOCAL_LVM_PM_SPARE_GB="$(ui_gb_from_bytes_floor "$(lv_bytes pve/lvol0_pmspare)")"
+PVE_FREE_GB="$(vg_free_gb)"
+DGPU_DRIVER="not-detected"
+if [ -n "$INSTALL_DGPU_BDF" ] && [ -L "/sys/bus/pci/devices/${INSTALL_DGPU_BDF}/driver" ]; then DGPU_DRIVER="$(basename "$(readlink -f "/sys/bus/pci/devices/${INSTALL_DGPU_BDF}/driver" 2>/dev/null)")"; fi
+FIREWALL_STATUS="$(pve-firewall status 2>&1 | awk -F': ' '/Status:/ {print $2; exit}' || echo unknown)"
+FAILED_SERVICES="$(systemctl --failed --no-legend 2>/dev/null | awk 'NF {c++} END {print c+0}')"
+SYSTEM_STATE="$(systemctl is-system-running 2>/dev/null || true)"
+SSH_HARDENING="unknown"; CROWDSEC_STATUS="not-selected"; CROWDSEC_BOUNCER_STATUS="not-selected"; NF_CONNTRACK_WARNING="none"; PKGUPDATES_WARNING="none"; VFIO_NOT_READY_WARNING="none"
 
-echo ""
-echo -e "\${BL}--- PVE9 POST-INSTALL VERIFICATION REPORT ---\${CL}"
-echo "Date: \$(date)"
-echo "Host: \$(hostname)"
-echo ""
+kv CIRCL8_VERIFY_VERSION "$VERIFY_VERSION"; kv VERIFY_COMPLETE no
+kv PROXMOX_VERSION "${PROXMOX_VERSION:-unknown}"; kv KERNEL_VERSION "$KERNEL_VERSION"; kv OS "$OS_PRETTY"; kv ARCHITECTURE "$ARCH"
+kv HOST_VENDOR "$INSTALL_SYSTEM_VENDOR"; kv HOST_MODEL "$INSTALL_SYSTEM_PRODUCT"; kv HOST_TYPE "$INSTALL_SYSTEM_TYPE"; kv CPU "$INSTALL_CPU_MODEL_CLOCK"; kv CPU_CORES "$INSTALL_CPU_PHYSICAL_CORES"; kv CPU_THREADS "$INSTALL_CPU_THREADS"; kv RAM_GB "$INSTALL_SYSTEM_RAM_GB"
+[ -n "$PROXMOX_VERSION" ] && pass "Proxmox version detected" || fail "Proxmox version not detected"
+[ "$FAILED_SERVICES" = "0" ] && pass "0 failed services" || fail "failed services: $FAILED_SERVICES"
+case "$SYSTEM_STATE" in running) pass "system state running" ;; degraded) warn "system state degraded" ;; *) warn "system state $SYSTEM_STATE" ;; esac
 
-INFO "Proxmox version during install: \${INSTALL_PROXMOX_VERSION:-unknown}"
-INFO "Kernel version during install: \${INSTALL_PROXMOX_KERNEL:-unknown}"
-INFO "BIOS version during install: \${INSTALL_BIOS_VERSION:-unknown}"
-INFO "System product during install: \${INSTALL_SYSTEM_PRODUCT:-unknown}"
-INFO "System chassis during install: \${INSTALL_SYSTEM_CHASSIS:-unknown}"
-INFO "System type detected during install: \$INSTALL_SYSTEM_TYPE"
-INFO "OS during install: \${INSTALL_OS_PRETTY:-unknown}"
-INFO "Architecture during install: \${INSTALL_SYSTEM_ARCH:-unknown}"
-INFO "CPU during install: \${INSTALL_CPU_MODEL_CLOCK:-unknown} / \${INSTALL_CPU_PHYSICAL_CORES:-0} cores / \${INSTALL_CPU_THREADS:-0} threads"
-INFO "System RAM during install: \${INSTALL_SYSTEM_RAM_GB:-0}GB"
-INFO "SSD detected during install: \$INSTALL_IS_SSD"
-INFO "Integrated GPU detected during install: \$INSTALL_IGPU_FOUND"
-INFO "Discrete GPU detected during install: \$INSTALL_DGPU_FOUND"
-INFO "Integrated GPU during install: \${INSTALL_IGPU_NAME:-not-detected} [\${INSTALL_IGPU_VENDOR_DEVICE:-not-detected}] [\${INSTALL_IGPU_BDF:-not-detected}] driver=\${INSTALL_IGPU_DRIVER:-not-detected} boot_vga=\${INSTALL_IGPU_BOOT_VGA:-not-detected}"
-INFO "Discrete GPU during install: \${INSTALL_DGPU_NAME:-not-detected} [\${INSTALL_DGPU_VENDOR_DEVICE:-not-detected}] [\${INSTALL_DGPU_BDF:-not-detected}] driver=\${INSTALL_DGPU_DRIVER:-not-detected} VRAM=\${INSTALL_DGPU_VRAM:-not detected} boot_vga=\${INSTALL_DGPU_BOOT_VGA:-not-detected}"
-INFO "GPU same-slot functions during install: \${INSTALL_GPU_SAME_SLOT_FUNCTIONS:-none}"
-INFO "VFIO disable_idle_d3 during install: \$(YESNO "\$INSTALL_VFIO_DISABLE_IDLE_D3")"
-INFO "Discrete GPU passthrough selected: \$(YESNO "\$INSTALL_ENABLE_PASSTHROUGH")"
-INFO "CPU performance selected: \$(YESNO "\$INSTALL_ENABLE_PERFORMANCE")"
-INFO "SSH hardening applied during install: \$INSTALL_SSH_HARDENING_APPLIED"
-INFO "CrowdSec selected during install: \$(YESNO "\$INSTALL_ENABLE_CROWDSEC")"
-INFO "CrowdSec bouncer package: \$INSTALL_CROWDSEC_BOUNCER_PACKAGE"
-INFO "CrowdSec Console enrollment: \${INSTALL_CROWDSEC_CONSOLE_ENROLLMENT:-no}"
-INFO "CrowdSec Console engine name: \${INSTALL_CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}"
-INFO "Proxmox firewall applied during install: \$INSTALL_PVE_FIREWALL_APPLIED"
-INFO "Public host 80/443 selected: \$(YESNO "\$INSTALL_ALLOW_PUBLIC_WEB")"
-INFO "Realtek NIC optimized during install: \$(YESNO "\$INSTALL_REALTEK_OPTIMIZED")"
-INFO "Realtek interface: \$INSTALL_REALTEK_IFACE"
-INFO "NumLock service configured: \$(YESNO "\$INSTALL_NUMLOCK_CONFIGURED")"
-INFO "Storage layout mode: \$INSTALL_STORAGE_LAYOUT_MODE"
-INFO "Default network interface during install: \${INSTALL_DEFAULT_IFACE:-unknown}"
-INFO "LAN CIDR allowed for SSH/WebUI during install: \${INSTALL_LAN_CIDR:-not-detected}"
-INFO "Root SSH key file detected during install: \${INSTALL_SSH_ROOT_KEY_FILE:-not-detected}"
-INFO "Root SSH key target during install: \${INSTALL_SSH_ROOT_KEY_TARGET:-not-detected}"
-INFO "Effective AuthorizedKeysFile during install: \${INSTALL_SSH_EFFECTIVE_AUTHORIZED_KEYS:-unknown}"
+kv ROOT_LOCAL_GB "$ROOT_LV_GB"; kv ROOT_FILESYSTEM_GB "$ROOT_FS_GB"; kv LOCAL_LVM_DATA_GB "$LOCAL_LVM_DATA_GB"; kv LOCAL_LVM_METADATA_GB "$LOCAL_LVM_METADATA_GB"; kv LOCAL_LVM_METADATA_USED_PERCENT "$LOCAL_LVM_METADATA_USED_PERCENT"; kv LOCAL_LVM_METADATA_SPARE_GB "$LOCAL_LVM_PM_SPARE_GB"; kv PVE_FREE_GB "$PVE_FREE_GB"; kv REQUESTED_RESERVE_FREE_GB "$INSTALL_PVE_FREE_RESERVE_GB"
+pvesm status 2>/dev/null | awk 'NR>1 && $1=="local-lvm" {found=1} END {exit found ? 0 : 1}' && pass "local-lvm listed by pvesm" || { [ "$INSTALL_STORAGE_LAYOUT_MODE" = "skip_root_expansion" ] && warn "local-lvm not selected" || fail "local-lvm not listed by pvesm"; }
+lvdisplay /dev/pve/data >/dev/null 2>&1 && pass "pve/data exists" || { [ "$INSTALL_STORAGE_LAYOUT_MODE" = "skip_root_expansion" ] && warn "pve/data not created by choice" || fail "pve/data missing"; }
+[[ "$(lv_attr pve/data)" == t* ]] && pass "pve/data is a thin pool" || { [ "$INSTALL_STORAGE_LAYOUT_MODE" = "skip_root_expansion" ] && warn "thin pool not created by choice" || fail "pve/data thin pool not confirmed"; }
 
-echo ""
+CMDLINE="$(cat /proc/cmdline 2>/dev/null || true)"
+case "$CMDLINE" in *"$INSTALL_IOMMU_FLAG"*) pass "running kernel contains $INSTALL_IOMMU_FLAG" ;; *) fail "running kernel missing $INSTALL_IOMMU_FLAG" ;; esac
+case "$CMDLINE" in *"iommu=pt"*) pass "running kernel contains iommu=pt" ;; *) fail "running kernel missing iommu=pt" ;; esac
+case "$CMDLINE" in *"consoleblank=60"*) pass "running kernel contains consoleblank=60" ;; *) warn "running kernel missing consoleblank=60" ;; esac
+journalctl -k -b --no-pager 2>/dev/null | grep -Ei 'IOMMU|DMAR|AMD-Vi' | grep -qi enabled && pass "IOMMU appears enabled" || warn "IOMMU not clearly confirmed in boot log"
 
-sleep 5
+kv DGPU_NAME "$INSTALL_DGPU_NAME"; kv DGPU_VRAM "$INSTALL_DGPU_VRAM"; kv DGPU_DRIVER "$DGPU_DRIVER"; kv VFIO_DISABLE_IDLE_D3 "$(yn "$INSTALL_VFIO_DISABLE_IDLE_D3")"
+if [ "$(yn "$INSTALL_ENABLE_PASSTHROUGH")" = yes ]; then
+    [ "$DGPU_DRIVER" = vfio-pci ] && pass "selected dGPU bound to vfio-pci" || fail "selected dGPU driver is $DGPU_DRIVER"
+    grep -q "$INSTALL_DGPU_IDS" /etc/modprobe.d/vfio.conf 2>/dev/null && pass "vfio.conf contains selected IDs" || fail "vfio.conf missing selected IDs"
+    grep -q 'disable_vga=1' /etc/modprobe.d/vfio.conf 2>/dev/null && pass "vfio.conf contains disable_vga=1" || fail "vfio.conf missing disable_vga=1"
+    grep -q 'disable_idle_d3=1' /etc/modprobe.d/vfio.conf 2>/dev/null && pass "vfio.conf contains disable_idle_d3=1" || fail "vfio.conf missing disable_idle_d3=1"
+    boot_has_warning 'vfio-pci.*(not.ready|giving up)' && { VFIO_NOT_READY_WARNING=present; warn "vfio-pci not-ready/giving-up warning present"; } || pass "no vfio-pci not-ready/giving-up warning this boot"
+    grep -q '^vfio_virqfd' /proc/modules 2>/dev/null || grep -q 'vfio_virqfd' /etc/modules 2>/dev/null && warn "vfio_virqfd present though not required" || pass "vfio_virqfd not used"
+else warn "GPU passthrough not selected"; fi
+kv VFIO_NOT_READY_WARNING "$VFIO_NOT_READY_WARNING"
 
-# Core Proxmox service checks.
-if pveversion >/dev/null 2>&1; then PASS "Proxmox command tools available"; else FAIL "Proxmox command tools missing"; fi
-if systemctl is-active --quiet pveproxy; then PASS "pveproxy active"; else FAIL "pveproxy inactive"; fi
-if systemctl is-active --quiet pvedaemon; then PASS "pvedaemon active"; else FAIL "pvedaemon inactive"; fi
-if systemctl is-active --quiet pvestatd; then PASS "pvestatd active"; else FAIL "pvestatd inactive"; fi
-if systemctl is-active --quiet pve-cluster; then PASS "pve-cluster active"; else FAIL "pve-cluster inactive"; fi
+sshd -t >/dev/null 2>&1 && pass "sshd syntax OK" || fail "sshd syntax invalid"
+ROOT_SSHD_EFFECTIVE="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
+echo "$ROOT_SSHD_EFFECTIVE" | grep -q '^passwordauthentication no' && pass "PasswordAuthentication no" || fail "PasswordAuthentication not disabled"
+echo "$ROOT_SSHD_EFFECTIVE" | grep -q '^kbdinteractiveauthentication no' && pass "KbdInteractiveAuthentication no" || fail "KbdInteractiveAuthentication not disabled"
+echo "$ROOT_SSHD_EFFECTIVE" | grep -q '^pubkeyauthentication yes' && pass "PubkeyAuthentication yes" || fail "PubkeyAuthentication not enabled"
+echo "$ROOT_SSHD_EFFECTIVE" | grep -Eq '^permitrootlogin (prohibit-password|without-password)' && { pass "PermitRootLogin key-only"; SSH_HARDENING=pass; } || { fail "PermitRootLogin not key-only"; SSH_HARDENING=fail; }
+kv SSH_HARDENING "$SSH_HARDENING"
 
-# DNS checks.
-if grep -q "nameserver 1.1.1.1" /etc/resolv.conf && grep -q "nameserver 1.0.0.1" /etc/resolv.conf; then
-    PASS "DNS redundancy configured"
-else
-    WARN "DNS redundancy not detected"
-fi
+kv FIREWALL_STATUS "$FIREWALL_STATUS"
+echo "$FIREWALL_STATUS" | grep -q 'enabled/running' && pass "pve-firewall enabled/running" || fail "pve-firewall status $FIREWALL_STATUS"
+systemctl is-active --quiet pve-firewall && pass "pve-firewall service active" || fail "pve-firewall service inactive"
+systemctl is-enabled --quiet pve-firewall && pass "pve-firewall service enabled" || warn "pve-firewall service not enabled"
+grep -q 'enable: 1' /etc/pve/firewall/cluster.fw 2>/dev/null && pass "cluster.fw contains enable: 1" || fail "cluster.fw missing enable: 1"
+grep -Eq '^firewall:[[:space:]]*1' /etc/pve/datacenter.cfg 2>/dev/null && fail "datacenter.cfg contains firewall: 1" || pass "datacenter.cfg has no firewall: 1"
+[ -f "/etc/pve/nodes/$(hostname -s)/host.fw" ] && pass "node firewall file exists" || warn "node firewall file missing"
 
-# Repository and package health checks.
-if grep -q "pve-no-subscription" /etc/apt/sources.list.d/proxmox.sources 2>/dev/null; then PASS "No-subscription repository configured"; else FAIL "No-subscription repository missing"; fi
-if [ ! -f /etc/apt/sources.list.d/pve-enterprise.sources ]; then PASS "Enterprise repository disabled"; else FAIL "Enterprise repository still present"; fi
-if apt-get check >/dev/null 2>&1; then PASS "APT package database healthy"; else FAIL "APT package database has problems"; fi
+if [ "$(yn "$INSTALL_ENABLE_CROWDSEC")" = yes ]; then
+    CROWDSEC_STATUS="$(service_state crowdsec)"; systemctl is-active --quiet crowdsec && pass "CrowdSec active" || fail "CrowdSec inactive"; systemctl is-enabled --quiet crowdsec && pass "CrowdSec enabled" || warn "CrowdSec not enabled"
+    if systemctl list-unit-files 'crowdsec-firewall-bouncer*' --no-pager --no-legend 2>/dev/null | grep -q crowdsec-firewall-bouncer; then CROWDSEC_BOUNCER_STATUS="$(service_state crowdsec-firewall-bouncer)"; systemctl is-active --quiet crowdsec-firewall-bouncer && pass "CrowdSec bouncer active" || warn "CrowdSec bouncer inactive"; systemctl is-enabled --quiet crowdsec-firewall-bouncer && pass "CrowdSec bouncer enabled" || warn "CrowdSec bouncer not enabled"; else CROWDSEC_BOUNCER_STATUS=missing; warn "CrowdSec bouncer service missing"; fi
+    if command -v cscli >/dev/null 2>&1; then cscli collections list 2>/dev/null | grep -qi 'crowdsecurity/linux' && pass "CrowdSec linux collection present" || warn "CrowdSec linux collection not confirmed"; [ "$INSTALL_CROWDSEC_CONSOLE_ENROLLMENT" = pending ] && cscli console status >/dev/null 2>&1 && pass "CrowdSec console status readable" || true; fi
+else warn "CrowdSec not selected"; fi
+kv CROWDSEC_STATUS "$CROWDSEC_STATUS"; kv CROWDSEC_BOUNCER_STATUS "$CROWDSEC_BOUNCER_STATUS"
 
-# Storage layout checks.
-case "\$INSTALL_STORAGE_LAYOUT_MODE" in
-    preserve_local_lvm)
-        if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then PASS "local-lvm preserved in Proxmox storage config"; else FAIL "local-lvm missing from Proxmox storage config"; fi
-        if lvdisplay /dev/pve/data >/dev/null 2>&1; then PASS "/dev/pve/data preserved for local-lvm"; else FAIL "/dev/pve/data missing after preserve mode"; fi
-        ;;
-    build_local_lvm)
-        if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then PASS "local-lvm present in Proxmox storage config"; else FAIL "local-lvm missing from Proxmox storage config"; fi
-        if pvesm status 2>/dev/null | awk 'NR>1 && \$1 == "local-lvm" {found=1} END {exit found ? 0 : 1}'; then PASS "pvesm lists local-lvm"; else FAIL "pvesm does not list local-lvm"; fi
-        if lvdisplay /dev/pve/data >/dev/null 2>&1; then PASS "/dev/pve/data exists for local-lvm"; else FAIL "/dev/pve/data missing after build mode"; fi
-        if lvs --noheadings -o lv_attr pve/data 2>/dev/null | awk 'NF {exit substr(\$1,1,1)=="t" ? 0 : 1}'; then PASS "pve/data is a thinpool"; else WARN "pve/data thinpool attribute not confirmed"; fi
-        INFO "Root visible target during install: \${INSTALL_TARGET_ROOT_SIZE_GB}GB; root LV allocation: \${INSTALL_ROOT_LV_ALLOCATION_GB}GB; local-lvm size: \${INSTALL_LOCAL_LVM_SIZE_GB}GB"
-        ;;
-    extend_root_only)
-        INFO "Root/local extension selected without local-lvm creation"
-        INFO "Root visible target during install: \${INSTALL_TARGET_ROOT_SIZE_GB}GB; root LV allocation: \${INSTALL_ROOT_LV_ALLOCATION_GB}GB; root growth requested: \${INSTALL_ROOT_GROWTH_GB}GB"
-        ;;
-    skip_root_expansion)
-        INFO "Root/local expansion skipped; local-lvm creation skipped; storage state intentionally unchanged by Script 1"
-        ;;
-    *)
-        WARN "Unknown storage layout mode: \$INSTALL_STORAGE_LAYOUT_MODE"
-        ;;
-esac
-if df -h /var/lib/vz >/dev/null 2>&1; then PASS "local storage path /var/lib/vz is accessible"; else FAIL "local storage path /var/lib/vz is not accessible"; fi
+grep -q '^nf_conntrack[[:space:]]' /proc/modules 2>/dev/null && pass "nf_conntrack module loaded" || warn "nf_conntrack module not loaded"
+[ -r /proc/sys/net/netfilter/nf_conntrack_max ] && kv NF_CONNTRACK_MAX "$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)" || kv NF_CONNTRACK_MAX unavailable
+boot_has_warning 'nf_conntrack_max|Couldn.t write.*/net/netfilter/nf_conntrack_max' && { NF_CONNTRACK_WARNING=present; warn "nf_conntrack boot warning present"; } || pass "no nf_conntrack_max boot warning"
+boot_has_warning 'pkgupdates|error reading cached package status' && { PKGUPDATES_WARNING=present; warn "package cache boot warning present"; } || pass "no pkgupdates boot warning"
+kv NF_CONNTRACK_WARNING "$NF_CONNTRACK_WARNING"; kv PKGUPDATES_WARNING "$PKGUPDATES_WARNING"; [ -s /var/lib/pve-manager/pkgupdates ] && kv PKGUPDATES_FILE present || kv PKGUPDATES_FILE absent
+grep -q 'pve-no-subscription' /etc/apt/sources.list.d/proxmox.sources 2>/dev/null && pass "no-subscription repo active" || fail "no-subscription repo missing"
+[ ! -f /etc/apt/sources.list.d/pve-enterprise.sources ] && pass "enterprise repo disabled" || fail "enterprise repo still present"
 
-# GRUB and IOMMU checks.
-if grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | grep -qw "\$INSTALL_IOMMU_FLAG"; then PASS "GRUB contains \$INSTALL_IOMMU_FLAG"; else FAIL "GRUB missing \$INSTALL_IOMMU_FLAG"; fi
-if grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | grep -qw "iommu=pt"; then PASS "GRUB contains iommu=pt"; else FAIL "GRUB missing iommu=pt"; fi
-if grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | grep -qw "consoleblank=60"; then PASS "GRUB contains consoleblank=60"; else WARN "GRUB missing consoleblank=60"; fi
-if grep -q "consoleblank=60" /proc/cmdline; then PASS "Screen blanking active in running kernel"; else WARN "Screen blanking not visible in running kernel"; fi
-if dmesg | grep -Ei "IOMMU|DMAR|AMD-Vi" | grep -qi "enabled"; then PASS "IOMMU appears enabled after reboot"; else WARN "IOMMU not clearly detected in dmesg"; fi
+[ "$FAIL_COUNT" -eq 0 ] && STATUS=PASS || STATUS=FAIL
+kv FAILED_SERVICES "$FAILED_SERVICES"; kv SYSTEM_STATE "$SYSTEM_STATE"; kv CIRCL8_VERIFY_STATUS "$STATUS"; kv VERIFY_WARNINGS "$WARN_COUNT"; kv VERIFY_FAILURES "$FAIL_COUNT"; kv VERIFY_COMPLETE yes
 
-# GPU passthrough checks.
-if [ "\$INSTALL_DGPU_FOUND" == "yes" ]; then
-    if [ "\$INSTALL_ENABLE_PASSTHROUGH" == "y" ]; then
-        if find /sys/bus/pci/drivers/vfio-pci -maxdepth 1 -type l 2>/dev/null | grep -q .; then
-            PASS "vfio-pci has bound PCI devices"
-        else
-            WARN "GPU passthrough was selected but vfio-pci binding was not clearly detected"
-        fi
+YW=$'\033[33m'; BL=$'\033[36m'; GN=$'\033[1;92m'; ANS=$'\033[1;95m'; CM="${GN}✓\033[m"; CL=$'\033[m'
+{
+ echo "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"; echo "${CM} ${YW}CIRCL8 FINAL VERIFICATION${CL}"; echo "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"; echo ""
+ echo "${YW}RESULT:${CL}"; echo "  ${BL}Status:${CL} ${GN}${STATUS}${CL}"; echo "  ${BL}Failed services:${CL} ${GN}${FAILED_SERVICES}${CL}"; echo "  ${BL}Reboot check:${CL} ${GN}${SYSTEM_STATE}${CL}"; echo ""
+ echo "${YW}PROXMOX PLATFORM:${CL}"; echo "  ${BL}Proxmox:${CL} ${GN}${PROXMOX_VERSION:-unknown}${CL}"; echo "  ${BL}Kernel:${CL} ${GN}${KERNEL_VERSION}${CL}"; echo "  ${BL}OS:${CL} ${GN}${OS_PRETTY}${CL}"; echo ""
+ echo "${YW}HOST MACHINE:${CL}"; echo "  ${BL}Vendor:${CL} ${GN}${INSTALL_SYSTEM_VENDOR}${CL}"; echo "  ${BL}Model:${CL} ${GN}${INSTALL_SYSTEM_PRODUCT}${CL}"; echo "  ${BL}Type:${CL} ${GN}${INSTALL_SYSTEM_TYPE}${CL}"; echo "  ${BL}CPU:${CL} ${GN}${INSTALL_CPU_MODEL_CLOCK}${CL}"; echo "  ${BL}RAM:${CL} ${GN}${INSTALL_SYSTEM_RAM_GB}GB${CL}"; echo ""
+ echo "${YW}STORAGE:${CL}"; echo "  ${BL}Root/local:${CL} ${GN}${ROOT_LV_GB} GB${CL}"; echo "  ${BL}Root filesystem:${CL} ${GN}${ROOT_FS_GB} GB${CL}"; echo "  ${BL}local-lvm data:${CL} ${GN}${LOCAL_LVM_DATA_GB} GB${CL}"; echo "  ${BL}local-lvm metadata:${CL} ${GN}${LOCAL_LVM_METADATA_GB} GB${CL}"; echo "  ${BL}local-lvm metadata usage:${CL} ${GN}${LOCAL_LVM_METADATA_USED_PERCENT}%${CL}"; echo "  ${BL}Reserve free VG:${CL} ${GN}${PVE_FREE_GB} GB${CL}"; echo ""
+ echo "${YW}GPU / VFIO:${CL}"; echo "  ${BL}Integrated GPU:${CL} ${GN}${INSTALL_IGPU_NAME}${CL}"; echo "  ${BL}Discrete GPU:${CL} ${GN}${INSTALL_DGPU_NAME}${CL}"; echo "  ${BL}Discrete GPU VRAM:${CL} ${GN}${INSTALL_DGPU_VRAM}${CL}"; echo "  ${BL}dGPU driver:${CL} ${GN}${DGPU_DRIVER}${CL}"; echo "  ${BL}VFIO idle D3 disabled:${CL} ${ANS}$(yn "$INSTALL_VFIO_DISABLE_IDLE_D3")${CL}"; echo "  ${BL}VFIO not-ready warning:${CL} ${GN}${VFIO_NOT_READY_WARNING}${CL}"; echo ""
+ echo "${YW}SECURITY:${CL}"; echo "  ${BL}SSH hardening:${CL} ${GN}${SSH_HARDENING}${CL}"; echo "  ${BL}Proxmox firewall:${CL} ${GN}${FIREWALL_STATUS}${CL}"; echo "  ${BL}CrowdSec:${CL} ${GN}${CROWDSEC_STATUS}${CL}"; echo "  ${BL}CrowdSec bouncer:${CL} ${GN}${CROWDSEC_BOUNCER_STATUS}${CL}"; echo ""
+ echo "${YW}SYSTEM HEALTH:${CL}"; echo "  ${BL}nf_conntrack warning:${CL} ${GN}${NF_CONNTRACK_WARNING}${CL}"; echo "  ${BL}pkgupdates warning:${CL} ${GN}${PKGUPDATES_WARNING}${CL}"; echo ""
+ echo "${YW}LOGS:${CL}"; echo "  ${BL}Machine log:${CL} ${GN}${MACHINE_LOG}${CL}"; echo "  ${BL}Display log:${CL} ${GN}${DISPLAY_LOG}${CL}"
+} > "$DISPLAY_LOG"
 
-        if [ -f /etc/modprobe.d/vfio.conf ] && grep -q "\$INSTALL_DGPU_IDS" /etc/modprobe.d/vfio.conf 2>/dev/null; then
-            PASS "vfio.conf contains selected discrete GPU IDs"
-        else
-            FAIL "vfio.conf missing selected discrete GPU IDs"
-        fi
-    else
-        WARN "Discrete GPU present but passthrough was not selected"
-    fi
-else
-    INFO "No discrete GPU detected during install, GPU passthrough check skipped"
-fi
-
-# SSD TRIM checks.
-if [ "\$INSTALL_IS_SSD" == "yes" ]; then
-    if systemctl is-enabled --quiet fstrim.timer && systemctl is-active --quiet fstrim.timer; then PASS "SSD TRIM timer enabled and active"; else FAIL "SSD TRIM timer not enabled/active"; fi
-else
-    INFO "No SSD detected during install, TRIM check skipped"
-fi
-
-# CPU governor checks.
-if [ "\$INSTALL_ENABLE_PERFORMANCE" == "y" ]; then
-    if grep -q "performance" /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null; then PASS "CPU governor is performance"; else FAIL "CPU governor is not performance"; fi
-else
-    INFO "CPU performance governor was not selected, check skipped"
-fi
-
-# SSH audit checks.
-if [ "\$INSTALL_SSH_HARDENING_APPLIED" == "key-only-root" ]; then
-    ROOT_SSHD_EFFECTIVE="\$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
-    ROOT_AUTH_KEYS="\$(echo "\$ROOT_SSHD_EFFECTIVE" | awk '\$1=="authorizedkeysfile" {for (i=2; i<=NF; i++) printf "%s ", \$i}')"
-
-    if echo "\$ROOT_SSHD_EFFECTIVE" | grep -q "^passwordauthentication no"; then PASS "SSH password authentication disabled for root context"; else FAIL "SSH password authentication still enabled for root context"; fi
-    if echo "\$ROOT_SSHD_EFFECTIVE" | grep -Eq "^permitrootlogin (without-password|prohibit-password)"; then PASS "Root SSH password login disabled while key login remains allowed"; else FAIL "Root SSH password login not hardened"; fi
-    if echo "\$ROOT_SSHD_EFFECTIVE" | grep -q "^pubkeyauthentication yes"; then PASS "Root public-key authentication enabled"; else FAIL "Root public-key authentication not enabled"; fi
-    if echo "\$ROOT_SSHD_EFFECTIVE" | grep -q "^kbdinteractiveauthentication no"; then PASS "Keyboard-interactive SSH authentication disabled"; else WARN "Keyboard-interactive SSH authentication not confirmed disabled"; fi
-    if [ -n "\$ROOT_AUTH_KEYS" ]; then PASS "AuthorizedKeysFile effective path present: \$ROOT_AUTH_KEYS"; else FAIL "AuthorizedKeysFile effective path missing"; fi
-elif [ "\$INSTALL_SSH_HARDENING_APPLIED" == "audit-only" ]; then
-    INFO "SSH policy was left audit-only during Script 1"
-    if [ "\${INSTALL_SSH_ROOT_KEY_COUNT:-0}" -gt 0 ] && [ -n "\$INSTALL_SSH_ROOT_KEY_FILE" ] && [ "\$INSTALL_SSH_ROOT_KEY_FILE" != "not-detected" ]; then
-        PASS "Root SSH authorized keys detected during install: \${INSTALL_SSH_ROOT_KEY_COUNT} key line(s) in \$INSTALL_SSH_ROOT_KEY_FILE"
-        INFO "Root SSH key target: \${INSTALL_SSH_ROOT_KEY_TARGET:-not-detected}; owner: \${INSTALL_SSH_ROOT_KEY_OWNER:-unknown}; mode: \${INSTALL_SSH_ROOT_KEY_MODE:-unknown}"
-    else
-        WARN "No root SSH authorized keys were detected during install; SSH policy remained audit-only"
-    fi
-else
-    WARN "SSH hardening status unknown: \$INSTALL_SSH_HARDENING_APPLIED"
-fi
-
-# Realtek NIC optimization checks.
-if [ "\$INSTALL_REALTEK_OPTIMIZED" == "yes" ]; then
-    if systemctl is-enabled --quiet realtek-optimize.service; then PASS "Realtek optimization service enabled"; else WARN "Realtek optimization service not enabled"; fi
-    if [ -n "\$INSTALL_REALTEK_IFACE" ] && [ -r "/sys/class/net/\$INSTALL_REALTEK_IFACE/statistics/rx_packets" ]; then PASS "Realtek interface still present"; else WARN "Realtek interface not found after reboot"; fi
-else
-    INFO "No Realtek optimization was applied"
-fi
-
-# Proxmox firewall checks.
-FIREWALL_STATUS="\$(pve-firewall status 2>&1 || true)"
-if echo "\$FIREWALL_STATUS" | grep -q "Status: enabled/running"; then PASS "Proxmox firewall status enabled/running"; else FAIL "Proxmox firewall status is not enabled/running: \$FIREWALL_STATUS"; fi
-if systemctl is-active --quiet pve-firewall; then PASS "Proxmox firewall service active"; else FAIL "Proxmox firewall service inactive"; fi
-if [ -f /etc/pve/firewall/cluster.fw ] && grep -q "enable: 1" /etc/pve/firewall/cluster.fw 2>/dev/null; then PASS "Cluster firewall enable file present"; else FAIL "Cluster firewall enable file missing"; fi
-if grep -Eq "^firewall:[[:space:]]*[0-9]+" /etc/pve/datacenter.cfg 2>/dev/null; then WARN "datacenter.cfg contains a legacy firewall key; Script 1 no longer writes that key on Proxmox 9.2"; else PASS "datacenter.cfg firewall schema left untouched"; fi
-if [ -f "/etc/pve/nodes/\$(hostname -s)/host.fw" ]; then PASS "Node firewall file exists"; else WARN "Node firewall file missing"; fi
-
-if [ "\$INSTALL_ALLOW_PUBLIC_WEB" == "y" ]; then
-    if grep -q "dport 80" "/etc/pve/nodes/\$(hostname -s)/host.fw" 2>/dev/null && grep -q "dport 443" "/etc/pve/nodes/\$(hostname -s)/host.fw" 2>/dev/null; then
-        PASS "Public 80/443 firewall rules present"
-    else
-        WARN "Public 80/443 was selected but rules were not detected"
-    fi
-else
-    INFO "Public host 80/443 was not selected"
-fi
-
-# CrowdSec checks.
-if [ "\$INSTALL_ENABLE_CROWDSEC" == "y" ]; then
-    if systemctl is-active --quiet crowdsec; then PASS "CrowdSec active"; else FAIL "CrowdSec inactive"; fi
-
-    if systemctl list-unit-files 'crowdsec-firewall-bouncer*' --no-pager --no-legend 2>/dev/null | grep -q "crowdsec-firewall-bouncer"; then
-        if systemctl is-active --quiet crowdsec-firewall-bouncer; then PASS "CrowdSec firewall bouncer active"; else WARN "CrowdSec bouncer installed but inactive"; fi
-    else
-        WARN "CrowdSec firewall bouncer service not found"
-    fi
-else
-    INFO "CrowdSec was not selected, check skipped"
-fi
-
-# NumLock checks.
-if [ "\$INSTALL_NUMLOCK_CONFIGURED" == "yes" ]; then
-    if systemctl is-enabled --quiet pve-numlock.service; then PASS "NumLock boot service enabled"; else WARN "NumLock boot service not enabled"; fi
-else
-    INFO "NumLock was not configured"
-fi
-
-# UI nag and sysctl checks.
-if grep -q "if (false)\\|NoMoreNagging" /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js 2>/dev/null; then PASS "Subscription nag patch detected"; else WARN "Subscription nag patch not detected"; fi
-if [ -f /etc/sysctl.d/99-pve9-hardening-network.conf ]; then PASS "Sysctl hardening file present"; else FAIL "Sysctl hardening file missing"; fi
-if sysctl net.ipv4.tcp_syncookies 2>/dev/null | grep -q "= 1"; then PASS "TCP SYN cookies enabled"; else FAIL "TCP SYN cookies not enabled"; fi
-if sysctl net.core.somaxconn 2>/dev/null | awk '{print \$3}' | grep -Eq "^[0-9]+$"; then PASS "Network tuning sysctl readable"; else WARN "Network tuning sysctl not readable"; fi
-if grep -q '^nf_conntrack[[:space:]]' /proc/modules 2>/dev/null; then INFO "nf_conntrack module: loaded"; else WARN "nf_conntrack module: not-loaded"; fi
-if [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then INFO "nf_conntrack_max live value: \$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo unavailable)"; else INFO "nf_conntrack_max live value: unavailable"; fi
-
-echo ""
-echo -e "\${YW}Verification complete. Log saved to \$VERIFY_LOG\${CL}"
-echo -e "\${YW}Removing ghost verifier and systemd service...\${CL}"
-
+touch "$COMPLETE_SENTINEL"
 systemctl disable pve-postinstall-verify.service >/dev/null 2>&1 || true
-rm -f /etc/systemd/system/pve-postinstall-verify.service
-rm -f /root/pve_verify.sh
+rm -f /etc/systemd/system/pve-postinstall-verify.service /root/pve_verify.sh
 systemctl daemon-reload >/dev/null 2>&1 || true
+exit 0
+VERIFY_EOF
 
-echo -e "\${GN}Ghost verifier deleted successfully.\${CL}"
-EOF
+    replace_verify_token() {
+        local token="$1"
+        local value="$2"
+        local escaped=""
+        escaped="$(printf '%s' "$value" | sed -e 's/[\/&]/\\&/g')"
+        sed -i "s|${token}|${escaped}|g" /root/pve_verify.sh
+    }
+
+    replace_verify_token "__SYSTEM_VENDOR__" "$SYSTEM_VENDOR"
+    replace_verify_token "__SYSTEM_PRODUCT__" "$SYSTEM_PRODUCT"
+    replace_verify_token "__SYSTEM_TYPE__" "$SYSTEM_TYPE"
+    replace_verify_token "__CPU_MODEL_CLOCK__" "$CPU_MODEL_CLOCK"
+    replace_verify_token "__CPU_PHYSICAL_CORES__" "$CPU_PHYSICAL_CORES"
+    replace_verify_token "__CPU_THREADS__" "$CPU_THREADS"
+    replace_verify_token "__SYSTEM_RAM_GB__" "$SYSTEM_RAM_GB"
+    replace_verify_token "__IGPU_NAME__" "$IGPU_NAME"
+    replace_verify_token "__DGPU_NAME__" "$DGPU_NAME"
+    replace_verify_token "__DGPU_BDF__" "$DGPU_BDF"
+    replace_verify_token "__DGPU_IDS__" "$DGPU_IDS"
+    replace_verify_token "__DGPU_VRAM__" "$(display_vram_value "$DGPU_VRAM")"
+    replace_verify_token "__VFIO_DISABLE_IDLE_D3__" "$VFIO_DISABLE_IDLE_D3"
+    replace_verify_token "__ENABLE_PASSTHROUGH__" "$ENABLE_PASSTHROUGH"
+    replace_verify_token "__ENABLE_CROWDSEC__" "$ENABLE_CROWDSEC"
+    replace_verify_token "__CROWDSEC_CONSOLE_ENROLLMENT__" "$CROWDSEC_CONSOLE_ENROLLMENT"
+    replace_verify_token "__STORAGE_LAYOUT_MODE__" "$STORAGE_LAYOUT_MODE"
+    replace_verify_token "__PVE_FREE_RESERVE_GB__" "$PVE_FREE_RESERVE_GB"
+    replace_verify_token "__IOMMU_FLAG__" "$IOMMU_FLAG"
 
     chmod +x /root/pve_verify.sh
-    msg_ok "AUTO-VERIFY SCRIPT WRITTEN"
+    msg_ok "POST-REBOOT VERIFIER WRITTEN"
 
-    msg_info "Writing auto-verify systemd service"
+    msg_info "Writing post-reboot verifier service"
     cat <<EOF > /etc/systemd/system/pve-postinstall-verify.service
 [Unit]
-Description=PVE9 Post Install One-Time Verification
+Description=circl8 PVE9 Post-Install Real Verification
 After=multi-user.target network-online.target ssh.service pve-cluster.service pveproxy.service pvedaemon.service pvestatd.service
 Wants=network-online.target pve-cluster.service
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sleep 60
 ExecStart=/bin/bash /root/pve_verify.sh
 StandardOutput=journal
 StandardError=journal
@@ -3545,57 +3521,32 @@ RemainAfterExit=no
 [Install]
 WantedBy=multi-user.target
 EOF
-    msg_ok "AUTO-VERIFY SYSTEMD SERVICE WRITTEN"
+    msg_ok "POST-REBOOT VERIFIER SERVICE WRITTEN"
 
-    msg_info "Writing auto-verify login display helper"
-    cat <<'EOF' > /etc/profile.d/pve-postinstall-verify-display.sh
+    msg_info "Writing sentinel-based SSH login display hook"
+    cat <<'EOF' > "$VERIFY_LOGIN_HOOK"
 #!/usr/bin/env bash
-
-VERIFY_LOG="/var/log/pve9-postinstall-verify.log"
-DISPLAY_MARKER="/root/.pve9-postinstall-verify-displayed"
-
-YW=$'\033[33m'
-BL=$'\033[36m'
-GN=$'\033[1;92m'
-CL=$'\033[m'
-
-if [ "$(id -u)" -ne 0 ]; then
+DISPLAY_LOG="/var/log/pve9-postinstall-verify-display.log"
+COMPLETE_SENTINEL="/root/.pve9-postinstall-verify-complete"
+DISPLAYED_MARKER="/root/.pve9-postinstall-verify-displayed"
+HOOK_FILE="/etc/profile.d/circl8-pve9-postinstall-verify.sh"
+YW=$'\033[33m'; CL=$'\033[m'
+case "$-" in *i*) ;; *) return 0 2>/dev/null || exit 0 ;; esac
+[ "$(id -u)" -eq 0 ] || { return 0 2>/dev/null || exit 0; }
+[ -f "$DISPLAYED_MARKER" ] && { return 0 2>/dev/null || exit 0; }
+if [ ! -f "$COMPLETE_SENTINEL" ]; then
+    echo ""; echo -e "${YW}Final verification is still being prepared.${CL}"; echo -e "${YW}Log out and SSH back in shortly.${CL}"; echo ""
     return 0 2>/dev/null || exit 0
 fi
-
-if [ -f "$DISPLAY_MARKER" ]; then
-    return 0 2>/dev/null || exit 0
-fi
-
-if [ -s "$VERIFY_LOG" ]; then
-    echo ""
-    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-    echo -e "${GN} PVE9 POST-INSTALL VERIFICATION REPORT${CL}"
-    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-    cat "$VERIFY_LOG"
-    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-    echo ""
-
-    touch "$DISPLAY_MARKER"
-    rm -f /etc/profile.d/pve-postinstall-verify-display.sh
-else
-    echo ""
-    echo -e "${YW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-    echo -e "${YW} PVE9 POST-INSTALL VERIFICATION PENDING${CL}"
-    echo -e "${YW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-    echo -e "${YW} PVE9 post-install verification report is not ready yet.${CL}"
-    echo -e "${YW} It will be displayed automatically on your next root SSH login.${CL}"
-    echo -e "${YW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-    echo ""
+if [ -s "$DISPLAY_LOG" ]; then
+    echo ""; cat "$DISPLAY_LOG"; echo ""; touch "$DISPLAYED_MARKER"; rm -f "$HOOK_FILE"
 fi
 EOF
-
-    chmod +x /etc/profile.d/pve-postinstall-verify-display.sh
-    msg_ok "AUTO-VERIFY LOGIN DISPLAY HELPER INSTALLED"
+    chmod +x "$VERIFY_LOGIN_HOOK"
+    msg_ok "SENTINEL-BASED LOGIN DISPLAY HOOK INSTALLED"
 
     run_cmd "reloading systemd daemon" systemctl daemon-reload
-    run_cmd "enabling auto-verify systemd service" systemctl enable pve-postinstall-verify.service
-
+    run_cmd "enabling post-reboot verifier service" systemctl enable pve-postinstall-verify.service
     msg_ok "AUTO-VERIFY GHOST SCRIPT CREATED"
 }
 
@@ -3668,6 +3619,11 @@ Root LV Allocation GB: $ROOT_LV_ALLOCATION_GB
 Root Growth GB: $ROOT_GROWTH_GB
 Create Local LVM: $(yes_no_label "$CREATE_LOCAL_LVM")
 Local LVM Size GB: $LOCAL_LVM_SIZE_GB
+Local LVM Metadata GB: $LOCAL_LVM_METADATA_GB
+Max Local LVM Data GB: $LOCAL_LVM_MAX_DATA_GB
+Existing Local LVM Data: $EXISTING_LOCAL_LVM_DATA_GB
+Existing Local LVM Metadata: $EXISTING_LOCAL_LVM_METADATA_GB
+Existing Local LVM Metadata Usage: $EXISTING_LOCAL_LVM_METADATA_USED_PERCENT
 EOF
 
     msg_ok "PVE9 POST-INSTALL COMPLETION MARKER WRITTEN"
@@ -3677,7 +3633,7 @@ EOF
 # --- FINAL SUMMARY ---
 # Shows a visible finished marker before reboot so the user can confirm the script completed.
 function show_final_summary() {
-    local local_lvm_summary="${LOCAL_LVM_SIZE_GB} GB"
+    local local_lvm_summary="${LOCAL_LVM_SIZE_GB} GB data"
 
     case "${STORAGE_LAYOUT_MODE:-}" in
         preserve_local_lvm) local_lvm_summary="preserved" ;;
@@ -3708,7 +3664,9 @@ function show_final_summary() {
     echo -e "${YW}STORAGE:${CL}"
     echo -e "  ${BL}Layout mode:${CL} ${GN}${STORAGE_LAYOUT_MODE}${CL}"
     echo -e "  ${BL}Root/local:${CL} ${GN}${TARGET_ROOT_SIZE_GB} GB${CL}"
-    echo -e "  ${BL}local-lvm:${CL} ${GN}${local_lvm_summary}${CL}"
+    echo -e "  ${BL}local-lvm data:${CL} ${GN}${local_lvm_summary}${CL}"
+    echo -e "  ${BL}local-lvm metadata:${CL} ${GN}${LOCAL_LVM_METADATA_GB} GB${CL}"
+    echo -e "  ${BL}local-lvm metadata usage:${CL} ${GN}${EXISTING_LOCAL_LVM_METADATA_USED_PERCENT}${CL}"
     echo -e "  ${BL}Reserve free VG space:${CL} ${GN}${PVE_FREE_RESERVE_GB} GB${CL}"
     echo ""
 
@@ -3729,7 +3687,8 @@ function show_final_summary() {
     echo ""
 
     echo -e "${YW}VERIFY:${CL}"
-    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+    echo -e "  ${BL}Machine log:${CL} ${GN}${VERIFY_LOG}${CL}"
+    echo -e "  ${BL}Display log:${CL} ${GN}${VERIFY_DISPLAY_LOG}${CL}"
 
     if [ "${CROWDSEC_CONSOLE_ENROLLMENT:-no}" == "pending" ] || { [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" == "yes" ] && [ "${CROWDSEC_CONSOLE_ENROLLMENT:-no}" != "no" ]; }; then
         echo ""
