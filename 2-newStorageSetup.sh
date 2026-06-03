@@ -26,15 +26,19 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.0"
+SCRIPT_VERSION="v1.4.1"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="ui-explicit-storage-sizing"
+SCRIPT_BUILD="immediate-verification-report"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
 T=15
 LOG_FILE="/var/log/new-storage-setup.log"
 VERIFY_FILE="/var/log/new-storage-setup-verify.log"
+VERIFY_STATUS="not-run"
+VERIFY_PASS_COUNT="0"
+VERIFY_WARN_COUNT="0"
+VERIFY_FAIL_COUNT="0"
 COMPLETED_MARKER="/root/.new-storage-setup-completed"
 
 SELECTED_DISK=""
@@ -2170,90 +2174,408 @@ EOF
 # --- 54. VERIFICATION SCRIPT ---
 # Creates and runs a verification report after storage creation.
 function create_verification_report() {
-    local verify_script="/root/new_storage_verify.sh"
+    local report_body=""
+    local machine_log=""
+    local selected_parent=""
+    local pv_vg=""
+    local vg_pvs=""
+    local thin_attr=""
+    local thin_active=""
+    local thin_monitor=""
+    local data_actual_mib="0"
+    local metadata_actual_mib="0"
+    local data_actual_gb="0"
+    local metadata_actual_gb="0"
+    local metadata_used_percent="unknown"
+    local vg_free_mib="0"
+    local vg_free_gb="0"
+    local status_label=""
+    local wipe_report=""
+    local item=""
+    local content_ok="yes"
+    local scheduler_file=""
+    local scheduler_actual="unknown"
 
     section "VERIFICATION"
 
-    msg_info "Creating verification report"
+    msg_info "Creating immediate verification report"
 
-    TEMP_FILES+=("$verify_script")
+    report_body="$(mktemp)"
+    machine_log="$(mktemp)"
+    TEMP_FILES+=("$report_body" "$machine_log")
 
-    cat <<EOF > "$verify_script"
-#!/usr/bin/env bash
-set +e
-: > "$VERIFY_FILE"
-exec > >(tee -a "$VERIFY_FILE") 2>&1
+    VERIFY_STATUS="PASS"
+    VERIFY_PASS_COUNT="0"
+    VERIFY_WARN_COUNT="0"
+    VERIFY_FAIL_COUNT="0"
 
-echo "--- NEW STORAGE SETUP VERIFICATION REPORT ---"
-echo "Date: \$(date)"
-echo "Disk: ${SELECTED_DISK}"
-echo "Disk Type: ${DISK_TYPE}"
-echo "Disk Bus: ${DISK_BUS}"
-echo "Storage ID: ${STORAGE_ID}"
-echo "VG: ${VG_NAME}"
-echo "Thinpool: ${THINPOOL_NAME}"
-echo "Thinpool Data GB: ${THINPOOL_DATA_GB}"
-echo "Thinpool Metadata GB: ${THINPOOL_METADATA_GB}"
-echo "Reserve Free VG GB: ${VG_RESERVE_GB}"
-echo ""
+    verify_group() {
+        echo "" >> "$report_body"
+        echo -e "  ${YW}$1:${CL}" >> "$report_body"
+    }
 
-PASS() { echo "✓ PASS - \$1"; }
-WARN() { echo "! WARN - \$1"; }
-FAIL() { echo "✗ FAIL - \$1"; }
+    verify_pass() {
+        local key="$1"
+        local label="$2"
+        local actual="${3:-ok}"
+        VERIFY_PASS_COUNT="$(( VERIFY_PASS_COUNT + 1 ))"
+        echo "CHECK_${key}=PASS" >> "$machine_log"
+        if [ -n "$actual" ]; then
+            echo -e "    ${CM} ${GN}PASS${CL} - ${label}: ${GN}${actual}${CL}" >> "$report_body"
+        else
+            echo -e "    ${CM} ${GN}PASS${CL} - ${label}" >> "$report_body"
+        fi
+    }
 
-if pvesm status 2>/dev/null | awk '{print \$1, \$3}' | grep -q "^${STORAGE_ID} active"; then PASS "Proxmox storage is active"; else FAIL "Proxmox storage active state not confirmed"; fi
-if awk '\$0 == "lvmthin: ${STORAGE_ID}" {found=1} END {exit found ? 0 : 1}' /etc/pve/storage.cfg 2>/dev/null; then PASS "storage.cfg block exists"; else FAIL "storage.cfg block missing"; fi
-if awk '\$0 == "lvmthin: ${STORAGE_ID}" {in_block=1; next} in_block && /^[[:space:]]*$/ {in_block=0} in_block && /^[^[:space:]]/ {in_block=0} in_block && \$1 == "vgname" && \$2 == "${VG_NAME}" {found=1} END {exit found ? 0 : 1}' /etc/pve/storage.cfg 2>/dev/null; then PASS "storage.cfg vgname matches"; else FAIL "storage.cfg vgname mismatch"; fi
-if awk '\$0 == "lvmthin: ${STORAGE_ID}" {in_block=1; next} in_block && /^[[:space:]]*$/ {in_block=0} in_block && /^[^[:space:]]/ {in_block=0} in_block && \$1 == "thinpool" && \$2 == "${THINPOOL_NAME}" {found=1} END {exit found ? 0 : 1}' /etc/pve/storage.cfg 2>/dev/null; then PASS "storage.cfg thinpool matches"; else FAIL "storage.cfg thinpool mismatch"; fi
-if vgs "${VG_NAME}" >/dev/null 2>&1; then PASS "VG exists"; else FAIL "VG missing"; fi
-if lvs "${VG_NAME}/${THINPOOL_NAME}" >/dev/null 2>&1; then PASS "Thinpool exists"; else FAIL "Thinpool missing"; fi
-if lvs -o lv_monitor --noheadings "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | grep -q monitored; then PASS "Thinpool monitoring enabled"; else WARN "Thinpool monitoring not confirmed"; fi
-if [ -f "/etc/lvm/backup/${VG_NAME}" ]; then PASS "LVM metadata backup exists"; else WARN "LVM metadata backup not found"; fi
+    verify_warn() {
+        local key="$1"
+        local label="$2"
+        local expected="$3"
+        local actual="$4"
+        local note="$5"
+        VERIFY_WARN_COUNT="$(( VERIFY_WARN_COUNT + 1 ))"
+        echo "CHECK_${key}=WARN" >> "$machine_log"
+        echo "WARN_CHECK_${key}=expected ${expected}; actual ${actual}; note ${note}" >> "$machine_log"
+        echo -e "    ${WARN} ${YW}WARN${CL} - ${label}" >> "$report_body"
+        echo -e "      ${BL}expected:${CL} ${GN}${expected}${CL}" >> "$report_body"
+        echo -e "      ${BL}actual:${CL} ${YW}${actual}${CL}" >> "$report_body"
+        echo -e "      ${BL}note:${CL} ${YW}${note}${CL}" >> "$report_body"
+    }
 
-echo ""
-echo "Proxmox storage status:"
-pvesm status 2>/dev/null || true
+    verify_fail() {
+        local key="$1"
+        local label="$2"
+        local expected="$3"
+        local actual="$4"
+        local fix="$5"
+        VERIFY_FAIL_COUNT="$(( VERIFY_FAIL_COUNT + 1 ))"
+        echo "CHECK_${key}=FAIL" >> "$machine_log"
+        echo "FAIL_CHECK_${key}=expected ${expected}; actual ${actual}; fix ${fix}" >> "$machine_log"
+        echo -e "    ${CROSS} ${RD}FAIL${CL} - ${label}" >> "$report_body"
+        echo -e "      ${BL}expected:${CL} ${GN}${expected}${CL}" >> "$report_body"
+        echo -e "      ${BL}actual:${CL} ${RD}${actual}${CL}" >> "$report_body"
+        echo -e "      ${BL}fix:${CL} ${YW}${fix}${CL}" >> "$report_body"
+    }
 
-echo ""
-echo "Proxmox storage.cfg block:"
-awk '\$0 == "lvmthin: ${STORAGE_ID}" {print; in_block=1; next} in_block && /^[[:space:]]*$/ {in_block=0} in_block && /^[^[:space:]]/ {in_block=0} in_block {print}' /etc/pve/storage.cfg 2>/dev/null || true
+    size_close_mib() {
+        local actual="$1"
+        local expected="$2"
+        local tolerance="${3:-128}"
+        local diff="0"
 
-echo ""
-echo "VG details:"
-vgs -o vg_name,vg_size,vg_free "${VG_NAME}" 2>/dev/null || true
+        [ -z "$actual" ] && actual="0"
+        [ -z "$expected" ] && expected="0"
+        diff="$(( actual - expected ))"
+        [ "$diff" -lt 0 ] && diff="$(( -diff ))"
+        [ "$diff" -le "$tolerance" ]
+    }
 
-echo ""
-echo "Thinpool usage:"
-lvs -a -o lv_name,lv_size,data_percent,metadata_percent,lv_attr "${VG_NAME}" 2>/dev/null || true
+    get_lv_size_mib_for_verify() {
+        local lv_path="$1"
+        lvs --noheadings --units m --nosuffix -o lv_size "$lv_path" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); printf "%d", $1; exit}' || true
+    }
 
-echo ""
-echo "Selected disk residual signatures after setup:"
-wipefs -n "${SELECTED_DISK}" 2>/dev/null || true
+    get_thin_metadata_mib_for_verify() {
+        local vg="$1"
+        local thinpool="$2"
+        local raw=""
 
-echo ""
-if [ "${IS_SSD}" == "yes" ]; then
-    systemctl is-active --quiet fstrim.timer && PASS "SSD TRIM active" || FAIL "SSD TRIM inactive"
-else
-    WARN "SSD TRIM check skipped because selected disk is HDD"
-fi
+        raw="$(lvs -a --noheadings --units m --nosuffix -o lv_metadata_size "${vg}/${thinpool}" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); printf "%d", $1; exit}' || true)"
+        if ! [[ "$raw" =~ ^[0-9]+$ ]] || [ "$raw" -le 0 ]; then
+            raw="$(get_lv_size_mib_for_verify "${vg}/${thinpool}_tmeta")"
+        fi
+        if [[ "$raw" =~ ^[0-9]+$ ]]; then
+            echo "$raw"
+        else
+            echo "0"
+        fi
+    }
 
-if [ -n "${IO_SCHEDULER_SERVICE}" ]; then
-    systemctl is-enabled --quiet "${IO_SCHEDULER_SERVICE}" && PASS "IO scheduler service enabled" || WARN "IO scheduler service not enabled"
-else
-    WARN "IO scheduler service was not created"
-fi
+    selected_parent="$(basename "$SELECTED_DISK")"
+    pv_vg="$(pvs --noheadings -o vg_name "$SELECTED_DISK" 2>/dev/null | xargs || true)"
+    vg_pvs="$(pvs --noheadings -o pv_name --select "vg_name=${VG_NAME}" 2>/dev/null | xargs || true)"
+    thin_attr="$(lvs --noheadings -o lv_attr "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | xargs || true)"
+    thin_active="$(lvs --noheadings -o lv_active "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | xargs || true)"
+    thin_monitor="$(lvs --noheadings -o lv_monitor "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | xargs || true)"
+    data_actual_mib="$(get_lv_size_mib_for_verify "${VG_NAME}/${THINPOOL_NAME}")"
+    metadata_actual_mib="$(get_thin_metadata_mib_for_verify "$VG_NAME" "$THINPOOL_NAME")"
+    data_actual_gb="$(lvm_mib_to_ui_gb "${data_actual_mib:-0}")"
+    metadata_actual_gb="$(lvm_mib_to_ui_gb "${metadata_actual_mib:-0}")"
+    metadata_used_percent="$(lvs -a --noheadings -o metadata_percent "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
+    [ -n "$metadata_used_percent" ] || metadata_used_percent="unknown"
+    vg_free_mib="$(get_actual_vg_free_mib "$VG_NAME")"
+    vg_free_gb="$(lvm_mib_to_ui_gb "${vg_free_mib:-0}")"
 
-if [ -f "$COMPLETED_MARKER" ]; then PASS "Completion marker exists"; else WARN "Completion marker missing"; fi
+    echo -e "${GN}NEW STORAGE SETUP VERIFICATION${CL}" >> "$report_body"
+    echo "" >> "$report_body"
+    echo -e "${YW}STORAGE TARGET:${CL}" >> "$report_body"
+    echo -e "  ${BL}Disk:${CL} ${GN}${SELECTED_DISK}${CL}" >> "$report_body"
+    echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}" >> "$report_body"
+    echo -e "  ${BL}Type/bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}" >> "$report_body"
+    echo -e "  ${BL}Storage ID:${CL} ${GN}${STORAGE_ID}${CL}" >> "$report_body"
+    echo -e "  ${BL}VG:${CL} ${GN}${VG_NAME}${CL}" >> "$report_body"
+    echo -e "  ${BL}Thinpool:${CL} ${GN}${THINPOOL_NAME}${CL}" >> "$report_body"
+    echo "" >> "$report_body"
+    echo -e "${YW}SIZING:${CL}" >> "$report_body"
+    echo -e "  ${BL}Thinpool data target:${CL} ${GN}${THINPOOL_DATA_GB} GB${CL}" >> "$report_body"
+    echo -e "  ${BL}Thinpool data actual:${CL} ${GN}${data_actual_gb} GB${CL}" >> "$report_body"
+    echo -e "  ${BL}Thinpool metadata target:${CL} ${GN}${THINPOOL_METADATA_GB} GB${CL}" >> "$report_body"
+    echo -e "  ${BL}Thinpool metadata actual:${CL} ${GN}${metadata_actual_gb} GB${CL}" >> "$report_body"
+    echo -e "  ${BL}Metadata usage:${CL} ${GN}${metadata_used_percent}${CL}" >> "$report_body"
+    echo -e "  ${BL}Reserve free VG target:${CL} ${GN}${VG_RESERVE_GB} GB${CL}" >> "$report_body"
+    echo -e "  ${BL}VG free actual:${CL} ${GN}${vg_free_gb} GB${CL}" >> "$report_body"
+    echo "" >> "$report_body"
+    echo -e "${YW}SCRIPT 2 CHANGES VERIFIED:${CL}" >> "$report_body"
 
-echo ""
-echo "Verification complete."
-rm -f "$verify_script"
-EOF
+    verify_group "LVM changes"
+    if [ -b "$SELECTED_DISK" ]; then
+        verify_pass "SELECTED_DISK" "Selected disk" "block device exists"
+    else
+        verify_fail "SELECTED_DISK" "Selected disk" "${SELECTED_DISK} block device exists" "missing" "inspect disk path and rerun only after confirming hardware"
+    fi
 
-    chmod +x "$verify_script"
-    run_optional "$verify_script"
+    if [ "$pv_vg" == "$VG_NAME" ]; then
+        verify_pass "PV_EXISTS" "Physical volume" "created on selected disk"
+    else
+        verify_fail "PV_EXISTS" "Physical volume" "PV on ${SELECTED_DISK} assigned to ${VG_NAME}" "${pv_vg:-not found}" "inspect pvs/vgs before rerun"
+    fi
 
-    msg_ok "VERIFICATION REPORT CREATED"
+    if vgs "$VG_NAME" >/dev/null 2>&1; then
+        verify_pass "VG_EXISTS" "Volume group" "exists"
+    else
+        verify_fail "VG_EXISTS" "Volume group" "${VG_NAME} exists" "missing" "inspect LVM state before rerun"
+    fi
+
+    if echo "$vg_pvs" | grep -qw "$SELECTED_DISK"; then
+        verify_pass "VG_ON_SELECTED_DISK" "Volume group disk" "uses selected disk"
+    else
+        verify_fail "VG_ON_SELECTED_DISK" "Volume group disk" "${VG_NAME} uses ${SELECTED_DISK}" "PVs: ${vg_pvs:-none}" "inspect pvs for unexpected devices"
+    fi
+
+    if lvs "${VG_NAME}/${THINPOOL_NAME}" >/dev/null 2>&1; then
+        verify_pass "THINPOOL_EXISTS" "Thinpool" "exists"
+    else
+        verify_fail "THINPOOL_EXISTS" "Thinpool" "${VG_NAME}/${THINPOOL_NAME} exists" "missing" "inspect lvs before rerun"
+    fi
+
+    if [[ "$thin_attr" == t* ]]; then
+        verify_pass "THINPOOL_ACTIVE" "Thinpool type" "thin pool attr ${thin_attr}"
+    else
+        verify_fail "THINPOOL_ACTIVE" "Thinpool type" "lv_attr begins with t" "${thin_attr:-unknown}" "inspect lvs -a and recreate manually if required"
+    fi
+
+    if [ "$thin_active" == "active" ]; then
+        verify_pass "THINPOOL_LV_ACTIVE" "Thinpool active state" "active"
+    else
+        verify_fail "THINPOOL_LV_ACTIVE" "Thinpool active state" "active" "${thin_active:-unknown}" "run lvchange -ay after inspecting LVM state"
+    fi
+
+    if echo "$thin_monitor" | grep -qi monitored; then
+        verify_pass "THINPOOL_MONITORING" "Thinpool monitoring" "enabled"
+    else
+        verify_warn "THINPOOL_MONITORING" "Thinpool monitoring" "monitored" "${thin_monitor:-unknown}" "enable with lvchange --monitor y ${VG_NAME}/${THINPOOL_NAME}"
+    fi
+
+    if [ -f "/etc/lvm/backup/${VG_NAME}" ]; then
+        verify_pass "LVM_METADATA_BACKUP" "LVM metadata backup" "present"
+    else
+        verify_warn "LVM_METADATA_BACKUP" "LVM metadata backup" "backup file present" "missing" "run vgcfgbackup ${VG_NAME} after reviewing LVM state"
+    fi
+
+    verify_group "Proxmox storage changes"
+    if pvesm status 2>/dev/null | awk '{print $1, $3}' | grep -q "^${STORAGE_ID} active"; then
+        verify_pass "PVESM_STORAGE_ACTIVE" "pvesm storage" "active"
+    else
+        verify_fail "PVESM_STORAGE_ACTIVE" "pvesm storage" "${STORAGE_ID} active in pvesm status" "not active" "inspect pvesm status and storage.cfg"
+    fi
+
+    if storage_id_in_cfg "$STORAGE_ID"; then
+        verify_pass "STORAGE_CFG_BLOCK" "storage.cfg block" "present"
+    else
+        verify_fail "STORAGE_CFG_BLOCK" "storage.cfg block" "lvmthin block for ${STORAGE_ID}" "missing" "register storage with pvesm add lvmthin"
+    fi
+
+    if [ "$(get_storage_cfg_field "$STORAGE_ID" vgname | xargs || true)" == "$VG_NAME" ]; then
+        verify_pass "STORAGE_CFG_VGNAME" "storage.cfg vgname" "matches ${VG_NAME}"
+    else
+        verify_fail "STORAGE_CFG_VGNAME" "storage.cfg vgname" "${VG_NAME}" "$(get_storage_cfg_field "$STORAGE_ID" vgname | xargs || echo missing)" "fix storage.cfg or recreate registration"
+    fi
+
+    if [ "$(get_storage_cfg_field "$STORAGE_ID" thinpool | xargs || true)" == "$THINPOOL_NAME" ]; then
+        verify_pass "STORAGE_CFG_THINPOOL" "storage.cfg thinpool" "matches ${THINPOOL_NAME}"
+    else
+        verify_fail "STORAGE_CFG_THINPOOL" "storage.cfg thinpool" "${THINPOOL_NAME}" "$(get_storage_cfg_field "$STORAGE_ID" thinpool | xargs || echo missing)" "fix storage.cfg or recreate registration"
+    fi
+
+    content_ok="yes"
+    for item in ${CONTENT_TYPES//,/ }; do
+        if ! storage_content_has_item "$(get_storage_cfg_field "$STORAGE_ID" content | xargs || true)" "$item"; then
+            content_ok="no"
+        fi
+    done
+    if [ "$content_ok" == "yes" ]; then
+        verify_pass "STORAGE_CFG_CONTENT" "storage.cfg content" "matches ${CONTENT_TYPES}"
+    else
+        verify_fail "STORAGE_CFG_CONTENT" "storage.cfg content" "includes ${CONTENT_TYPES}" "$(get_storage_cfg_field "$STORAGE_ID" content | xargs || echo missing)" "update storage content list in Proxmox"
+    fi
+
+    verify_group "Sizing changes"
+    if size_close_mib "${data_actual_mib:-0}" "$THINPOOL_DATA_MIB" "128"; then
+        verify_pass "THINPOOL_DATA_SIZE" "Thinpool data size" "target ${THINPOOL_DATA_GB} GB, actual ${data_actual_gb} GB"
+    else
+        verify_fail "THINPOOL_DATA_SIZE" "Thinpool data size" "${THINPOOL_DATA_GB} GB" "${data_actual_gb} GB" "recreate or resize thinpool after reviewing LVM extents"
+    fi
+
+    if size_close_mib "${metadata_actual_mib:-0}" "$THINPOOL_METADATA_MIB" "128"; then
+        verify_pass "THINPOOL_METADATA_SIZE" "Thinpool metadata size" "target ${THINPOOL_METADATA_GB} GB, actual ${metadata_actual_gb} GB"
+    else
+        verify_fail "THINPOOL_METADATA_SIZE" "Thinpool metadata size" "${THINPOOL_METADATA_GB} GB" "${metadata_actual_gb} GB" "recreate or extend thin metadata after reviewing LVM state"
+    fi
+
+    if [ "$metadata_used_percent" != "unknown" ]; then
+        verify_pass "THINPOOL_METADATA_USAGE" "Thinpool metadata usage" "$metadata_used_percent"
+    else
+        verify_warn "THINPOOL_METADATA_USAGE" "Thinpool metadata usage" "readable metadata_percent" "unknown" "inspect lvs -a output"
+    fi
+
+    if [ "$vg_free_gb" -ge "$VG_RESERVE_GB" ]; then
+        verify_pass "VG_RESERVE" "VG reserve" "target ${VG_RESERVE_GB} GB, actual ${vg_free_gb} GB"
+    else
+        verify_fail "VG_RESERVE" "VG reserve" ">= ${VG_RESERVE_GB} GB free" "${vg_free_gb} GB" "reduce thinpool size or extend VG"
+    fi
+
+    verify_group "Disk cleanup check"
+    wipe_report="$(wipefs -n "$SELECTED_DISK" 2>/dev/null || true)"
+    if echo "$wipe_report" | grep -Eiq 'ext[234]|xfs|zfs|linux_raid_member|mdraid|btrfs'; then
+        verify_warn "DISK_RESIDUAL_SIGNATURES" "Residual old signatures" "only expected LVM metadata" "$(echo "$wipe_report" | tr '\n' ';' | cut -c1-180)" "review wipefs output; LVM signatures are expected, old filesystems are not"
+    else
+        verify_pass "DISK_RESIDUAL_SIGNATURES" "Residual old signatures" "no old filesystem/ZFS/mdraid signatures detected"
+    fi
+
+    verify_group "Tuning changes"
+    if [ "$IS_SSD" == "yes" ]; then
+        if systemctl is-enabled --quiet fstrim.timer && systemctl is-active --quiet fstrim.timer; then
+            verify_pass "TRIM" "SSD TRIM" "enabled and active"
+        else
+            verify_fail "TRIM" "SSD TRIM" "fstrim.timer enabled and active" "not confirmed" "systemctl enable --now fstrim.timer"
+        fi
+    else
+        verify_warn "TRIM" "SSD TRIM" "SSD/NVMe disk" "${DISK_TYPE}" "TRIM skipped for HDD; safe to continue"
+    fi
+
+    if [ "$IO_SCHEDULER" == "skip" ] || [ -z "$IO_SCHEDULER_SERVICE" ]; then
+        verify_warn "IO_SCHEDULER" "IO scheduler" "supported scheduler" "skipped" "scheduler unsupported/unavailable; safe to continue"
+    else
+        if systemctl is-enabled --quiet "$IO_SCHEDULER_SERVICE"; then
+            verify_pass "IO_SCHEDULER" "IO scheduler service" "enabled"
+        else
+            verify_warn "IO_SCHEDULER" "IO scheduler service" "${IO_SCHEDULER_SERVICE} enabled" "not enabled" "enable manually after checking scheduler support"
+        fi
+
+        scheduler_file="/sys/block/${SELECTED_DISK_NAME}/queue/scheduler"
+        if [ -r "$scheduler_file" ]; then
+            scheduler_actual="$(cat "$scheduler_file" 2>/dev/null || echo unknown)"
+            if echo "$scheduler_actual" | grep -q "\[${IO_SCHEDULER}\]"; then
+                verify_pass "IO_SCHEDULER_ACTIVE" "IO scheduler active value" "$IO_SCHEDULER"
+            else
+                verify_warn "IO_SCHEDULER_ACTIVE" "IO scheduler active value" "${IO_SCHEDULER}" "${scheduler_actual}" "service may apply on next boot or scheduler may be unavailable"
+            fi
+        else
+            verify_warn "IO_SCHEDULER_ACTIVE" "IO scheduler active value" "readable scheduler file" "missing" "safe if device does not expose a scheduler file"
+        fi
+    fi
+
+    if [ -f /etc/sysctl.d/98-storage-memory-tuning.conf ] && \
+       grep -q '^vm\.swappiness[[:space:]]*=[[:space:]]*10' /etc/sysctl.d/98-storage-memory-tuning.conf && \
+       grep -q '^vm\.vfs_cache_pressure[[:space:]]*=[[:space:]]*100' /etc/sysctl.d/98-storage-memory-tuning.conf; then
+        verify_pass "MEMORY_TUNING" "Memory tuning" "sysctl file configured"
+    else
+        verify_fail "MEMORY_TUNING" "Memory tuning" "swappiness=10 and vfs_cache_pressure=100" "not confirmed" "re-run memory tuning or inspect /etc/sysctl.d/98-storage-memory-tuning.conf"
+    fi
+
+    if [ -f /sys/module/zfs/parameters/zfs_arc_max ]; then
+        if [ -f /etc/modprobe.d/zfs-arc.conf ]; then
+            verify_pass "ZFS_ARC" "ZFS ARC cap" "configured"
+        else
+            verify_warn "ZFS_ARC" "ZFS ARC cap" "zfs-arc.conf present" "missing" "ZFS module present; consider rerunning memory tuning"
+        fi
+    else
+        verify_pass "ZFS_ARC" "ZFS ARC cap" "not required"
+    fi
+
+    verify_group "Marker"
+    if [ -f "$COMPLETED_MARKER" ]; then
+        if grep -q "STORAGE_ID=${STORAGE_ID}" "$COMPLETED_MARKER" && \
+           grep -q "VG_NAME=${VG_NAME}" "$COMPLETED_MARKER" && \
+           grep -q "THINPOOL_NAME=${THINPOOL_NAME}" "$COMPLETED_MARKER" && \
+           grep -q "THINPOOL_DATA_GB=${THINPOOL_DATA_GB}" "$COMPLETED_MARKER" && \
+           grep -q "THINPOOL_METADATA_GB=${THINPOOL_METADATA_GB}" "$COMPLETED_MARKER" && \
+           grep -q "VG_RESERVE_GB=${VG_RESERVE_GB}" "$COMPLETED_MARKER"; then
+            verify_pass "COMPLETION_MARKER" "Completion marker" "present with sizing fields"
+        else
+            verify_warn "COMPLETION_MARKER" "Completion marker" "marker contains storage and sizing fields" "marker present but incomplete" "rewrite marker after confirming storage state"
+        fi
+    else
+        verify_fail "COMPLETION_MARKER" "Completion marker" "$COMPLETED_MARKER present" "missing" "create marker after confirming storage state"
+    fi
+
+    if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="FAIL"
+    elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="PASS_WITH_WARNINGS"
+    else
+        VERIFY_STATUS="PASS"
+    fi
+
+    {
+        echo "SCRIPT2_VERIFY_VERSION=$SCRIPT_VERSION"
+        echo "VERIFY_STATUS=$VERIFY_STATUS"
+        echo "VERIFY_PASS_COUNT=$VERIFY_PASS_COUNT"
+        echo "VERIFY_WARN_COUNT=$VERIFY_WARN_COUNT"
+        echo "VERIFY_FAIL_COUNT=$VERIFY_FAIL_COUNT"
+        echo "SCRIPT2_STATUS=completed"
+        echo "SELECTED_DISK=$SELECTED_DISK"
+        echo "DISK_TYPE=$DISK_TYPE"
+        echo "DISK_BUS=$DISK_BUS"
+        echo "DISK_MODEL=${DISK_MODEL:-unknown}"
+        echo "DISK_SIZE_GB=$DISK_SIZE_GB"
+        echo "STORAGE_ID=$STORAGE_ID"
+        echo "VG_NAME=$VG_NAME"
+        echo "THINPOOL_NAME=$THINPOOL_NAME"
+        echo "THINPOOL_DATA_GB=$THINPOOL_DATA_GB"
+        echo "THINPOOL_METADATA_GB=$THINPOOL_METADATA_GB"
+        echo "THINPOOL_METADATA_USED_PERCENT=$metadata_used_percent"
+        echo "VG_FREE_GB=$vg_free_gb"
+        echo "VG_RESERVE_GB=$VG_RESERVE_GB"
+        echo "CONTENT_TYPES=$CONTENT_TYPES"
+        echo "IO_SCHEDULER=$IO_SCHEDULER"
+        cat "$machine_log"
+        echo "VERIFY_COMPLETE=yes"
+        echo ""
+        echo -e "${GN}NEW STORAGE SETUP VERIFICATION${CL}"
+        echo ""
+        echo -e "${YW}RESULT:${CL}"
+        status_label="$VERIFY_STATUS"
+        echo -e "  ${BL}Status:${CL} ${GN}${status_label}${CL}"
+        echo -e "  ${BL}Failed checks:${CL} ${GN}${VERIFY_FAIL_COUNT}${CL}"
+        echo -e "  ${BL}Warnings:${CL} ${GN}${VERIFY_WARN_COUNT}${CL}"
+        cat "$report_body"
+        echo ""
+        echo -e "${YW}LOGS:${CL}"
+        echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_FILE}${CL}"
+    } > "$VERIFY_FILE"
+
+    cat "$VERIFY_FILE"
+
+    if [ "$VERIFY_STATUS" == "FAIL" ]; then
+        msg_warn "VERIFICATION COMPLETED WITH FAILURES - REVIEW ${VERIFY_FILE}"
+    elif [ "$VERIFY_STATUS" == "PASS_WITH_WARNINGS" ]; then
+        msg_warn "VERIFICATION COMPLETED WITH WARNINGS - REVIEW ${VERIFY_FILE}"
+    else
+        msg_ok "VERIFICATION REPORT CREATED"
+    fi
+
+    rm -f "$report_body" "$machine_log"
 }
 
 
@@ -2361,6 +2683,10 @@ function show_final_summary() {
     echo ""
 
     echo -e "${YW}VERIFY:${CL}"
+    echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}"
+    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+    echo -e "  ${BL}Warnings:${CL} ${GN}${VERIFY_WARN_COUNT}${CL}"
+    echo -e "  ${BL}Failed checks:${CL} ${GN}${VERIFY_FAIL_COUNT}${CL}"
     echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_FILE}${CL}"
     echo ""
     echo -e "${YW}New Proxmox LVM-thin storage is ready for VM disks, containers and backups according to selected content types.${CL}"
