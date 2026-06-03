@@ -1713,7 +1713,7 @@ function select_disk() {
     local selected_model=""
 
     show_disk_lists
-
+    echo ""
     disk_idx="$(timed_number_input "Select disk number to format" "1" "1" "${#SAFE_DISKS[@]}" "quiet")"
 
     selected_entry="${SAFE_DISKS[$((disk_idx-1))]}"
