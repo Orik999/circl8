@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.1"
+SCRIPT_VERSION="v1.4.2"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="immediate-verification-report"
+SCRIPT_BUILD="ui-consolidation-reserve-overhead"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -63,9 +63,11 @@ THIN_PERCENT="legacy-unused"
 THINPOOL_DATA_GB="0"
 THINPOOL_METADATA_GB="1"
 VG_RESERVE_GB="0"
+VG_SAFETY_OVERHEAD_GB="1"
 THINPOOL_DATA_MIB="0"
 THINPOOL_METADATA_MIB="1024"
 VG_RESERVE_MIB="0"
+VG_SAFETY_OVERHEAD_MIB="1024"
 THINPOOL_MAX_DATA_GB="0"
 THINPOOL_MAX_DATA_MIB="0"
 ACTUAL_VG_FREE_GB="0"
@@ -102,7 +104,7 @@ TEMP_FILES=()
 # Displays the New Storage Setup ASCII banner.
 function header_info {
     echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
-    echo -e "${GN}${CLF}Storage Setup${CL}"
+    echo -e "${GN}${CLF}                    Storage Setup                    ${CL}"
     echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 }
 
@@ -307,6 +309,7 @@ function tty_read_yes_no_blocking() {
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
+    local confirm_mode="${3:-show}"
     local answer=""
     local key=""
     local default_label="Y/n"
@@ -365,7 +368,9 @@ function timed_yes_no() {
     final_label="$(yes_no_label "$answer")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    if [ "$confirm_mode" != "quiet" ]; then
+        tty_println "${CM} ${BL}${prompt}:${CL} ${ANS}${final_label}${CL}"
+    fi
 
     echo "$answer"
 }
@@ -476,6 +481,7 @@ function editable_input_loop() {
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
+    local confirm_mode="${3:-show}"
     local answer=""
 
     # Text/path/name inputs are deliberately NOT timed.
@@ -485,7 +491,9 @@ function timed_text_input() {
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    if [ "$confirm_mode" != "quiet" ]; then
+        tty_println "${CM} ${BL}${prompt}:${CL} ${ANS}${answer}${CL}"
+    fi
 
     echo "$answer"
 }
@@ -500,6 +508,7 @@ function timed_number_input() {
     local default="$2"
     local min_value="${3:-1}"
     local max_value="${4:-}"
+    local confirm_mode="${5:-show}"
     local answer=""
 
     # Numeric inputs are deliberately NOT timed.
@@ -510,7 +519,9 @@ function timed_number_input() {
 
         if validate_number "$answer" "$min_value" "$max_value"; then
             tty_print "${BFR}"
-            tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+            if [ "$confirm_mode" != "quiet" ]; then
+                tty_println "${CM} ${BL}${prompt}:${CL} ${ANS}${answer}${CL}"
+            fi
             echo "$answer"
             return 0
         fi
@@ -1336,7 +1347,7 @@ function select_disk() {
 
     show_disk_lists
 
-    disk_idx="$(timed_number_input "Select disk number to format" "1" "1" "${#SAFE_DISKS[@]}")"
+    disk_idx="$(timed_number_input "Select disk number to format" "1" "1" "${#SAFE_DISKS[@]}" "quiet")"
 
     selected_entry="${SAFE_DISKS[$((disk_idx-1))]}"
     SELECTED_DISK_NAME="$(echo "$selected_entry" | cut -d'|' -f1)"
@@ -1407,28 +1418,30 @@ function inspect_selected_disk() {
 # Shows selected disk details and one detailed risk report.
 function show_selected_disk_summary() {
     echo ""
-    echo -e "${YW}SELECTED DISK:${CL}"
-    echo -e "  ${BL}Disk:${CL} ${GN}${SELECTED_DISK}${CL}"
+    section "SELECTED DISK"
+
+    echo -e "${YW}Disk:${CL}"
+    echo -e "  ${BL}Path:${CL} ${ANS}${SELECTED_DISK}${CL}"
     echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
     echo -e "  ${BL}Type/bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
     echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
-    echo -e "  ${BL}Selection mode:${CL} ${GN}${SELECTED_DISK_ENTRY_TYPE}${CL}"
+    echo -e "  ${BL}Mode:${CL} ${ANS}${SELECTED_DISK_ENTRY_TYPE}${CL}"
     echo ""
-    echo -e "${YW}DATA RISK:${CL}"
+
+    echo -e "${YW}Data risk:${CL}"
+    if [ "$HAS_DATA" == "yes" ]; then
+        echo -e "  ${BL}Risk:${CL} ${RD}destructive reuse${CL}"
+        echo -e "  ${BL}Existing VG(s):${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK:-none}${CL}"
+        echo -e "  ${BL}Existing PV(s):${CL} ${YW}${EXISTING_PVS_ON_SELECTED_DISK:-none}${CL}"
+    else
+        echo -e "  ${BL}Risk:${CL} ${GN}none detected${CL}"
+    fi
+
     print_selected_data_risk_report "$DATA_RISK_REPORT"
 
-    if [ -n "${EXISTING_VGS_ON_SELECTED_DISK:-}" ]; then
-        echo -e "  ${BL}Existing VG(s):${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK}${CL}"
-    fi
-
-    if [ -n "${EXISTING_PVS_ON_SELECTED_DISK:-}" ]; then
-        echo -e "  ${BL}Existing PV(s):${CL} ${YW}${EXISTING_PVS_ON_SELECTED_DISK}${CL}"
-    fi
-
-    if [ "$HAS_DATA" == "yes" ]; then
-        echo ""
-        echo -e "${RD}WARNING: Continuing will erase/recreate storage on ${SELECTED_DISK}.${CL}"
-    fi
+    echo ""
+    echo -e "${YW}Destructive action:${CL}"
+    echo -e "  ${RD}Continuing will erase/recreate storage on ${SELECTED_DISK}.${CL}"
 }
 
 
@@ -1438,21 +1451,13 @@ function first_destructive_confirmation() {
     local proceed_yn=""
 
     if [ "$HAS_DATA" == "yes" ]; then
-        echo ""
-        echo -e "${RD}WARNING: Existing data, partitions, signatures, or LVM metadata were detected on ${SELECTED_DISK}.${CL}"
-        if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
-            echo -e "${RD}Existing VG(s) on selected disk:${CL} ${YW}${EXISTING_VGS_ON_SELECTED_DISK}${CL}"
-            echo -e "${RD}Old PV/VG/LV metadata on this disk will be destroyed if you continue.${CL}"
-        fi
-        proceed_yn="$(timed_yes_no "Destructively reuse ${SELECTED_DISK} for new Proxmox storage?" "n")"
-        if [[ "$proceed_yn" =~ ^[Nn] ]]; then
-            msg_error "Aborted by user."
-        fi
+        proceed_yn="$(timed_yes_no "Destructively reuse ${SELECTED_DISK} for new Proxmox storage?" "n" "quiet")"
     else
-        proceed_yn="$(timed_yes_no "Create Proxmox storage on empty disk ${SELECTED_DISK}?" "y")"
-        if [[ "$proceed_yn" =~ ^[Nn] ]]; then
-            msg_error "Aborted by user."
-        fi
+        proceed_yn="$(timed_yes_no "Create Proxmox storage on empty disk ${SELECTED_DISK}?" "y" "quiet")"
+    fi
+
+    if [[ "$proceed_yn" =~ ^[Nn] ]]; then
+        msg_error "Aborted by user."
     fi
 
     return 0
@@ -1491,9 +1496,9 @@ function collect_storage_names() {
     set_adaptive_storage_defaults
 
     while [ "$valid_names" != "yes" ]; do
-        VG_NAME="$(timed_text_input "Enter VG name" "$VG_NAME_DEFAULT")"
-        THINPOOL_NAME="$(timed_text_input "Enter thinpool name" "$THINPOOL_NAME_DEFAULT")"
-        STORAGE_ID="$(timed_text_input "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT")"
+        VG_NAME="$(timed_text_input "Enter VG name" "$VG_NAME_DEFAULT" "quiet")"
+        THINPOOL_NAME="$(timed_text_input "Enter thinpool name" "$THINPOOL_NAME_DEFAULT" "quiet")"
+        STORAGE_ID="$(timed_text_input "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT" "quiet")"
 
         validate_name_or_error "VG name" "$VG_NAME" '^[a-zA-Z0-9_+.-]+$'
         validate_name_or_error "Thinpool name" "$THINPOOL_NAME" '^[a-zA-Z0-9_+.-]+$'
@@ -1581,12 +1586,6 @@ function check_storage_conflicts() {
         fi
     fi
 
-    echo ""
-    echo -e "${BL}New storage to create:${CL}"
-    echo -e "  ${BL}VG:${CL} ${GN}${VG_NAME}${CL}"
-    echo -e "  ${BL}Thinpool:${CL} ${GN}${THINPOOL_NAME}${CL}"
-    echo -e "  ${BL}Proxmox storage ID:${CL} ${GN}${STORAGE_ID}${CL}"
-
     msg_ok "No blocking conflicts outside the selected disk."
 }
 
@@ -1664,7 +1663,8 @@ function calculate_secondary_storage_plan() {
 
     THINPOOL_METADATA_MIB="$(ui_gb_to_lvm_mib "$THINPOOL_METADATA_GB")"
     VG_RESERVE_MIB="$(ui_gb_to_lvm_mib "$VG_RESERVE_GB")"
-    THINPOOL_MAX_DATA_GB="$(( available_gb - THINPOOL_METADATA_GB - VG_RESERVE_GB ))"
+    VG_SAFETY_OVERHEAD_MIB="$(ui_gb_to_lvm_mib "$VG_SAFETY_OVERHEAD_GB")"
+    THINPOOL_MAX_DATA_GB="$(( available_gb - THINPOOL_METADATA_GB - VG_RESERVE_GB - VG_SAFETY_OVERHEAD_GB ))"
     if [ "$THINPOOL_MAX_DATA_GB" -lt 0 ]; then
         THINPOOL_MAX_DATA_GB="0"
     fi
@@ -1688,9 +1688,9 @@ function validate_secondary_storage_plan() {
         msg_error "Thinpool data size must be greater than zero."
     fi
 
-    total_gb="$(( THINPOOL_DATA_GB + THINPOOL_METADATA_GB + VG_RESERVE_GB ))"
+    total_gb="$(( THINPOOL_DATA_GB + THINPOOL_METADATA_GB + VG_RESERVE_GB + VG_SAFETY_OVERHEAD_GB ))"
     if [ "$total_gb" -gt "$available_gb" ]; then
-        msg_error "Storage plan needs ${total_gb}GB but only about ${available_gb}GB is available."
+        msg_error "Storage plan needs ${total_gb}GB including ${VG_SAFETY_OVERHEAD_GB}GB safety overhead, but only about ${available_gb}GB is available."
     fi
 }
 
@@ -1723,6 +1723,7 @@ function display_storage_plan() {
     echo -e "  ${BL}Thinpool data:${CL} ${ANS}${THINPOOL_DATA_GB} GB${CL}"
     echo -e "  ${BL}Thinpool metadata:${CL} ${ANS}${THINPOOL_METADATA_GB} GB${CL}"
     echo -e "  ${BL}Reserve free VG:${CL} ${ANS}${VG_RESERVE_GB} GB${CL}"
+    echo -e "  ${BL}Safety overhead:${CL} ${GN}${VG_SAFETY_OVERHEAD_GB} GB${CL}"
     echo -e "  ${BL}Max thinpool data:${CL} ${GN}${THINPOOL_MAX_DATA_GB} GB${CL}"
 }
 
@@ -1730,15 +1731,15 @@ function collect_thinpool_sizing() {
     local reserve_default=""
 
     reserve_default="$(default_vg_reserve_gb)"
-    THINPOOL_METADATA_GB="$(timed_number_input "Set thinpool metadata size in GB" "1" "1")"
-    VG_RESERVE_GB="$(timed_number_input "Reserve free VG space in GB" "$reserve_default" "0")"
+    THINPOOL_METADATA_GB="$(timed_number_input "Set thinpool metadata size in GB" "1" "1" "" "quiet")"
+    VG_RESERVE_GB="$(timed_number_input "Reserve free VG space in GB" "$reserve_default" "0" "" "quiet")"
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
 
     if [ "$THINPOOL_MAX_DATA_GB" -le 0 ]; then
         msg_error "No space remains for thinpool data after ${THINPOOL_METADATA_GB}GB metadata and ${VG_RESERVE_GB}GB reserve."
     fi
 
-    THINPOOL_DATA_GB="$(timed_number_input "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB")"
+    THINPOOL_DATA_GB="$(timed_number_input "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB" "quiet")"
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
     validate_secondary_storage_plan "$DISK_SIZE_GB"
     display_storage_plan
@@ -1751,7 +1752,7 @@ function collect_thinpool_allocation() {
 # --- 43. CONTENT TYPE SELECTION ---
 # Sets storage content types. Defaults support VM images, containers and backups.
 function collect_content_types() {
-    CONTENT_TYPES="$(timed_text_input "Enter Proxmox content types" "$CONTENT_TYPES")"
+    CONTENT_TYPES="$(timed_text_input "Enter Proxmox content types" "$CONTENT_TYPES" "quiet")"
     CONTENT_TYPES="$(echo "$CONTENT_TYPES" | tr -d ' ' | sed 's/,,*/,/g; s/^,//; s/,$//')"
 
     validate_content_types_or_error "$CONTENT_TYPES"
@@ -1784,6 +1785,7 @@ function final_destructive_confirmation() {
     echo -e "  ${BL}Thinpool data:${CL} ${ANS}${THINPOOL_DATA_GB} GB${CL}"
     echo -e "  ${BL}Thinpool metadata:${CL} ${ANS}${THINPOOL_METADATA_GB} GB${CL}"
     echo -e "  ${BL}Reserve free VG:${CL} ${ANS}${VG_RESERVE_GB} GB${CL}"
+    echo -e "  ${BL}Safety overhead:${CL} ${GN}${VG_SAFETY_OVERHEAD_GB} GB${CL}"
     echo -e "  ${BL}Content:${CL} ${ANS}${CONTENT_TYPES}${CL}"
     echo ""
 
@@ -1984,7 +1986,7 @@ function handle_existing_storage_resume() {
         echo -e " ${BL}3)${CL} Exit without changes"
         echo ""
 
-        recover_action="$(timed_number_input "Select action [1/2/3]" "1" "1" "3")"
+        recover_action="$(timed_number_input "Select action [1/2/3]" "1" "1" "3" "quiet")"
 
         case "$recover_action" in
             1)
@@ -2323,6 +2325,7 @@ function create_verification_report() {
     echo -e "  ${BL}Thinpool metadata actual:${CL} ${GN}${metadata_actual_gb} GB${CL}" >> "$report_body"
     echo -e "  ${BL}Metadata usage:${CL} ${GN}${metadata_used_percent}${CL}" >> "$report_body"
     echo -e "  ${BL}Reserve free VG target:${CL} ${GN}${VG_RESERVE_GB} GB${CL}" >> "$report_body"
+    echo -e "  ${BL}Safety overhead:${CL} ${GN}${VG_SAFETY_OVERHEAD_GB} GB${CL}" >> "$report_body"
     echo -e "  ${BL}VG free actual:${CL} ${GN}${vg_free_gb} GB${CL}" >> "$report_body"
     echo "" >> "$report_body"
     echo -e "${YW}SCRIPT 2 CHANGES VERIFIED:${CL}" >> "$report_body"
@@ -2438,10 +2441,12 @@ function create_verification_report() {
         verify_warn "THINPOOL_METADATA_USAGE" "Thinpool metadata usage" "readable metadata_percent" "unknown" "inspect lvs -a output"
     fi
 
-    if [ "$vg_free_gb" -ge "$VG_RESERVE_GB" ]; then
+    if [ "$vg_free_mib" -ge "$(( VG_RESERVE_MIB - 128 ))" ]; then
         verify_pass "VG_RESERVE" "VG reserve" "target ${VG_RESERVE_GB} GB, actual ${vg_free_gb} GB"
+    elif [ "$vg_free_mib" -gt 0 ]; then
+        verify_warn "VG_RESERVE" "VG reserve" ">= ${VG_RESERVE_GB} GB free" "${vg_free_gb} GB" "below display target but nonzero after ${VG_SAFETY_OVERHEAD_GB}GB safety overhead; inspect if future snapshots fail"
     else
-        verify_fail "VG_RESERVE" "VG reserve" ">= ${VG_RESERVE_GB} GB free" "${vg_free_gb} GB" "reduce thinpool size or extend VG"
+        verify_fail "VG_RESERVE" "VG reserve" ">= ${VG_RESERVE_GB} GB free" "0 GB" "reduce thinpool size or extend VG"
     fi
 
     verify_group "Disk cleanup check"
@@ -2510,7 +2515,8 @@ function create_verification_report() {
            grep -q "THINPOOL_NAME=${THINPOOL_NAME}" "$COMPLETED_MARKER" && \
            grep -q "THINPOOL_DATA_GB=${THINPOOL_DATA_GB}" "$COMPLETED_MARKER" && \
            grep -q "THINPOOL_METADATA_GB=${THINPOOL_METADATA_GB}" "$COMPLETED_MARKER" && \
-           grep -q "VG_RESERVE_GB=${VG_RESERVE_GB}" "$COMPLETED_MARKER"; then
+           grep -q "VG_RESERVE_GB=${VG_RESERVE_GB}" "$COMPLETED_MARKER" && \
+           grep -q "VG_SAFETY_OVERHEAD_GB=${VG_SAFETY_OVERHEAD_GB}" "$COMPLETED_MARKER"; then
             verify_pass "COMPLETION_MARKER" "Completion marker" "present with sizing fields"
         else
             verify_warn "COMPLETION_MARKER" "Completion marker" "marker contains storage and sizing fields" "marker present but incomplete" "rewrite marker after confirming storage state"
@@ -2547,6 +2553,7 @@ function create_verification_report() {
         echo "THINPOOL_METADATA_USED_PERCENT=$metadata_used_percent"
         echo "VG_FREE_GB=$vg_free_gb"
         echo "VG_RESERVE_GB=$VG_RESERVE_GB"
+        echo "VG_SAFETY_OVERHEAD_GB=$VG_SAFETY_OVERHEAD_GB"
         echo "CONTENT_TYPES=$CONTENT_TYPES"
         echo "IO_SCHEDULER=$IO_SCHEDULER"
         cat "$machine_log"
@@ -2565,15 +2572,15 @@ function create_verification_report() {
         echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_FILE}${CL}"
     } > "$VERIFY_FILE"
 
-    cat "$VERIFY_FILE"
-
     if [ "$VERIFY_STATUS" == "FAIL" ]; then
-        msg_warn "VERIFICATION COMPLETED WITH FAILURES - REVIEW ${VERIFY_FILE}"
+        msg_warn "Verification status: ${VERIFY_STATUS}"
     elif [ "$VERIFY_STATUS" == "PASS_WITH_WARNINGS" ]; then
-        msg_warn "VERIFICATION COMPLETED WITH WARNINGS - REVIEW ${VERIFY_FILE}"
+        msg_warn "Verification status: ${VERIFY_STATUS}"
     else
-        msg_ok "VERIFICATION REPORT CREATED"
+        msg_ok "Verification report written"
+        msg_ok "Verification status: ${VERIFY_STATUS}"
     fi
+    echo -e "  ${BL}Log:${CL} ${GN}${VERIFY_FILE}${CL}"
 
     rm -f "$report_body" "$machine_log"
 }
@@ -2601,6 +2608,7 @@ Thinpool: $THINPOOL_NAME
 Thinpool Data GB: $THINPOOL_DATA_GB
 Thinpool Metadata GB: $THINPOOL_METADATA_GB
 Reserve Free VG GB: $VG_RESERVE_GB
+Safety Overhead GB: $VG_SAFETY_OVERHEAD_GB
 Content Types: $CONTENT_TYPES
 IO Scheduler: $IO_SCHEDULER
 Verify Log: $VERIFY_FILE
@@ -2611,6 +2619,7 @@ THINPOOL_NAME=$THINPOOL_NAME
 THINPOOL_DATA_GB=$THINPOOL_DATA_GB
 THINPOOL_METADATA_GB=$THINPOOL_METADATA_GB
 VG_RESERVE_GB=$VG_RESERVE_GB
+VG_SAFETY_OVERHEAD_GB=$VG_SAFETY_OVERHEAD_GB
 EOF
 
     msg_ok "COMPLETION MARKER WRITTEN"
@@ -2674,6 +2683,7 @@ function show_final_summary() {
     echo -e "  ${BL}Thinpool data:${CL} ${GN}${THINPOOL_DATA_GB} GB${CL}"
     echo -e "  ${BL}Thinpool metadata:${CL} ${GN}${THINPOOL_METADATA_GB} GB${CL}"
     echo -e "  ${BL}Reserve free VG:${CL} ${GN}${VG_RESERVE_GB} GB${CL}"
+    echo -e "  ${BL}Safety overhead:${CL} ${GN}${VG_SAFETY_OVERHEAD_GB} GB${CL}"
     echo ""
 
     echo -e "${YW}TUNING:${CL}"
