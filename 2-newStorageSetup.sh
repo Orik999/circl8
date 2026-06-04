@@ -1205,9 +1205,9 @@ function begin_tuning_section_once() {
 
 function selected_disk_action_label() {
     case "$SELECTED_DISK_ACTION" in
-        create) echo "create fresh storage" ;;
-        recreate) echo "wipe/recreate" ;;
-        validate-register) echo "validate/register existing" ;;
+        create) echo "Create fresh storage" ;;
+        recreate) echo "Wipe/Recreate" ;;
+        validate-register) echo "Validate/Register existing" ;;
         *) echo "${SELECTED_DISK_ACTION:-unknown}" ;;
     esac
 }
@@ -1718,7 +1718,7 @@ function show_disk_lists() {
 
         if [ "$entry_type" == "destructive-reuse" ]; then
             echo -e "       ${BL}MODE:${CL} ${RD}DESTRUCTIVE REUSE${CL}"
-            echo -e "       ${YW}DATA RISK:${CL} existing metadata detected"
+            echo -e "       ${YW}DATA RISK: ${YW}Existing Metadata Detected${CL}"
         else
             echo -e "       ${BL}MODE:${CL} ${GN}clean storage candidate${CL}"
             echo -e "       ${BL}DATA RISK:${CL} ${GN}none detected${CL}"
@@ -2074,7 +2074,7 @@ function display_storage_plan() {
     section "STORAGE CONFIG / PLAN"
 
     echo -e "${YW}Disk:${CL}"
-    echo -e "  ${BL}Selected:${CL} ${GN}${SELECTED_DISK}${CL}"
+    echo -e "  ${BL}Selected:${CL} ${ANS}${SELECTED_DISK}${CL}"
     echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
     echo -e "  ${BL}Type/Bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
     echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
@@ -2082,7 +2082,7 @@ function display_storage_plan() {
     if [ "$HAS_DATA" == "yes" ]; then
         echo -e "  ${BL}Data risk:${CL} ${RD}Destructive Reuse${CL}"
     else
-        echo -e "  ${BL}Data risk:${CL} ${GN}none detected${CL}"
+        echo -e "  ${BL}Data risk:${CL} ${GN}None detected${CL}"
     fi
     echo ""
 
