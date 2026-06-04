@@ -10,6 +10,7 @@ shopt -s inherit_errexit nullglob
 # --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
 # Central visual theme for the full script.
 YW="$(printf '\033[33m')"
+YL="$(printf '\033[1;93m')"
 BL="$(printf '\033[36m')"
 RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
@@ -26,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.8"
+SCRIPT_VERSION="v1.4.9"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="single-storage-config-plan-flow"
+SCRIPT_BUILD="replace-storage-config-input-ui"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -124,7 +125,7 @@ function header_info {
     echo -e "${DGN}  ███████║    ██║    ╚██████╔╝ ██║  ██║ ██║  ██║ ╚██████╔╝ ███████╗${CL}"
     echo -e "${DGN}  ╚══════╝    ╚═╝     ╚═════╝  ╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝  ╚══════╝${CL}"
     echo -e "${YW}${CLF}                             Storage Setup                    ${CL}"
-    echo -e "${BL}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+    echo -e "${BL} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 }
 # --- 4. MESSAGE HELPER FUNCTIONS ---
 # Provides consistent status messages for display -> apply -> success flow.
@@ -1731,7 +1732,7 @@ function show_disk_lists() {
 
         if [ "$entry_type" == "destructive-reuse" ]; then
             echo -e "       ${BL}MODE:${CL} ${RD}DESTRUCTIVE REUSE${CL}"
-            echo -e "       ${YW}DATA RISK:${CL} ${BL}${YW}Existing Metadata Detected${CL}"
+            echo -e "       ${YW}DATA RISK:${CL} ${YL}Existing Metadata Detected${CL}"
         else
             echo -e "       ${BL}MODE:${CL} ${GN}clean storage candidate${CL}"
             echo -e "       ${BL}DATA RISK:${CL} ${GN}none detected${CL}"
@@ -1879,24 +1880,41 @@ function set_default_storage_values_for_resume() {
     CONTENT_TYPES="images,rootdir"
 }
 
-# --- STORAGE CONFIG COLLECTION UI HELPERS ---
-# Shows the collection header once, then clears that collection-only header before the final plan redraw.
-function begin_storage_config_collection_once() {
-    if [ "$STORAGE_CONFIG_COLLECTION_SHOWN" != "yes" ]; then
-        section "STORAGE CONFIG / PLAN"
-        STORAGE_CONFIG_COLLECTION_SHOWN="yes"
-    fi
+# --- STORAGE CONFIG TRANSIENT INPUT HELPERS ---
+# Storage config prompts deliberately do not draw a section while collecting answers.
+# Each prompt is one transient terminal line; final values are shown only in the final plan.
+function transient_text_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+
+    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
+    [ -z "$answer" ] && answer="$default"
+
+    tty_print "${BFR}"
+    echo "$answer"
 }
 
-function clear_storage_config_collection_block() {
-    [ "$STORAGE_CONFIG_COLLECTION_SHOWN" == "yes" ] || return 0
+function transient_number_input() {
+    local prompt="$1"
+    local default="$2"
+    local min_value="${3:-1}"
+    local max_value="${4:-}"
+    local answer=""
 
-    if [ -w /dev/tty ]; then
-        # Clear the collection-only section header: blank line, border, title, border.
-        tty_print "\033[4A\033[K\033[1B\033[K\033[1B\033[K\033[1B\033[K\033[3A"
-    fi
+    while true; do
+        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+        [ -z "$answer" ] && answer="$default"
 
-    STORAGE_CONFIG_COLLECTION_SHOWN="cleared"
+        if validate_number "$answer" "$min_value" "$max_value"; then
+            tty_print "${BFR}"
+            echo "$answer"
+            return 0
+        fi
+
+        tty_print "${BFR}"
+        print_number_error "$min_value" "$max_value"
+    done
 }
 
 # --- 40. STORAGE NAME INPUTS ---
@@ -1904,9 +1922,9 @@ function clear_storage_config_collection_block() {
 function collect_storage_names() {
     set_adaptive_storage_defaults
 
-    VG_NAME="$(timed_text_input "Enter VG name" "$VG_NAME_DEFAULT" "quiet")"
-    THINPOOL_NAME="$(timed_text_input "Enter thinpool name" "$THINPOOL_NAME_DEFAULT" "quiet")"
-    STORAGE_ID="$(timed_text_input "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT" "quiet")"
+    VG_NAME="$(transient_text_input "Enter VG name" "$VG_NAME_DEFAULT")"
+    THINPOOL_NAME="$(transient_text_input "Enter thinpool name" "$THINPOOL_NAME_DEFAULT")"
+    STORAGE_ID="$(transient_text_input "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT")"
 
     validate_name_or_error "VG name" "$VG_NAME" '^[a-zA-Z0-9_+.-]+$'
     validate_name_or_error "Thinpool name" "$THINPOOL_NAME" '^[a-zA-Z0-9_+.-]+$'
@@ -2137,15 +2155,15 @@ function collect_thinpool_sizing() {
     local reserve_default=""
 
     reserve_default="$(default_vg_reserve_gb)"
-    THINPOOL_METADATA_GB="$(timed_number_input "Set thinpool metadata size in GB" "1" "1" "" "quiet")"
-    VG_RESERVE_GB="$(timed_number_input "Reserve free VG space in GB" "$reserve_default" "0" "" "quiet")"
+    THINPOOL_METADATA_GB="$(transient_number_input "Set thinpool metadata size in GB" "1" "1" "")"
+    VG_RESERVE_GB="$(transient_number_input "Reserve free VG space in GB" "$reserve_default" "0" "")"
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
 
     if [ "$THINPOOL_MAX_DATA_GB" -le 0 ]; then
         msg_error "No space remains for thinpool data after ${THINPOOL_METADATA_GB}GB metadata and ${VG_RESERVE_GB}GB reserve."
     fi
 
-    THINPOOL_DATA_GB="$(timed_number_input "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB" "quiet")"
+    THINPOOL_DATA_GB="$(transient_number_input "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB")"
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
     validate_secondary_storage_plan "$DISK_SIZE_GB"
 }
@@ -2157,7 +2175,7 @@ function collect_thinpool_allocation() {
 # --- 43. CONTENT TYPE SELECTION ---
 # Sets storage content types. Defaults support VM images, containers and backups.
 function collect_content_types() {
-    CONTENT_TYPES="$(timed_text_input "Enter Proxmox content types" "$CONTENT_TYPES" "quiet")"
+    CONTENT_TYPES="$(transient_text_input "Enter Proxmox content types" "$CONTENT_TYPES")"
     CONTENT_TYPES="$(echo "$CONTENT_TYPES" | tr -d ' ' | sed 's/,,*/,/g; s/^,//; s/,$//')"
 
     validate_content_types_or_error "$CONTENT_TYPES"
@@ -2180,14 +2198,11 @@ function final_destructive_confirmation() {
 # --- SINGLE STORAGE CONFIG / PLAN FLOW ---
 # Owns all storage config collection, final plan redraw and final destructive confirmation.
 function collect_storage_config_and_show_final_plan() {
-    begin_storage_config_collection_once
-
     collect_storage_names
     collect_content_types
     check_storage_conflicts
     collect_thinpool_sizing
 
-    clear_storage_config_collection_block
     display_storage_plan
     final_destructive_confirmation
 }
