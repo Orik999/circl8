@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.9"
-SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="replace-storage-config-input-ui"
+SCRIPT_VERSION="v1.5.0"
+SCRIPT_UPDATED="2026-06-04"
+SCRIPT_BUILD="storage-config-line-input-block"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -106,6 +106,7 @@ RESET_SECTION_SHOWN="no"
 CREATE_SECTION_SHOWN="no"
 TUNING_SECTION_SHOWN="no"
 STORAGE_CONFIG_COLLECTION_SHOWN="no"
+STORAGE_CONFIG_COLLECTION_LINES="0"
 COMPLETION_MARKER_WRITTEN="no"
 
 TEMP_FILES=()
@@ -118,12 +119,12 @@ TEMP_FILES=()
 # Displays the New Storage Setup ASCII banner.
 function header_info {
     echo -e ""
-    echo -e "${DGN}  ███████╗ ████████╗  ██████╗  ██████╗   █████╗   ██████╗  ███████╗${CL}"
-    echo -e "${DGN}  ██╔════╝ ╚══██╔══╝ ██╔═══██╗ ██╔══██╗ ██╔══██╗ ██╔════╝  ██╔════╝${CL}"
-    echo -e "${DGN}  ███████╗    ██║    ██║   ██║ ██████╔╝ ███████║ ██║  ███╗ █████╗  ${CL}"
-    echo -e "${DGN}  ╚════██║    ██║    ██║   ██║ ██╔══██╗ ██╔══██║ ██║   ██║ ██╔══╝  ${CL}"
-    echo -e "${DGN}  ███████║    ██║    ╚██████╔╝ ██║  ██║ ██║  ██║ ╚██████╔╝ ███████╗${CL}"
-    echo -e "${DGN}  ╚══════╝    ╚═╝     ╚═════╝  ╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝  ╚══════╝${CL}"
+    echo -e "${GN}  ███████╗ ████████╗  ██████╗  ██████╗   █████╗   ██████╗  ███████╗${CL}"
+    echo -e "${GN}  ██╔════╝ ╚══██╔══╝ ██╔═══██╗ ██╔══██╗ ██╔══██╗ ██╔════╝  ██╔════╝${CL}"
+    echo -e "${GN}  ███████╗    ██║    ██║   ██║ ██████╔╝ ███████║ ██║  ███╗ █████╗  ${CL}"
+    echo -e "${GN}  ╚════██║    ██║    ██║   ██║ ██╔══██╗ ██╔══██║ ██║   ██║ ██╔══╝  ${CL}"
+    echo -e "${GN}  ███████║    ██║    ╚██████╔╝ ██║  ██║ ██║  ██║ ╚██████╔╝ ███████╗${CL}"
+    echo -e "${GN}  ╚══════╝    ╚═╝     ╚═════╝  ╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝  ╚══════╝${CL}"
     echo -e "${YW}${CLF}                             Storage Setup                    ${CL}"
     echo -e "${BL} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 }
@@ -1880,41 +1881,121 @@ function set_default_storage_values_for_resume() {
     CONTENT_TYPES="images,rootdir"
 }
 
-# --- STORAGE CONFIG TRANSIENT INPUT HELPERS ---
-# Storage config prompts deliberately do not draw a section while collecting answers.
-# Each prompt is one transient terminal line; final values are shown only in the final plan.
-function transient_text_input() {
+# --- STORAGE CONFIG LINE-BASED INPUT HELPERS ---
+# Storage config collection uses normal full-line prompts inside one visible section.
+# It deliberately avoids editable_input_loop/BFR same-line redraw behavior for this block.
+function storage_config_prompt() {
     local prompt="$1"
     local default="$2"
-    local answer=""
 
-    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
-    [ -z "$answer" ] && answer="$default"
-
-    tty_print "${BFR}"
-    echo "$answer"
+    if [ -w /dev/tty ]; then
+        printf '%b' "${YW}${prompt} [default: ${default}]: ${CL}" > /dev/tty
+    else
+        printf '%b' "${YW}${prompt} [default: ${default}]: ${CL}" >&2
+    fi
 }
 
-function transient_number_input() {
-    local prompt="$1"
-    local default="$2"
-    local min_value="${3:-1}"
-    local max_value="${4:-}"
-    local answer=""
+function storage_config_print_error() {
+    local message="$1"
+
+    if [ -w /dev/tty ]; then
+        echo -e "${RD}${message}${CL}" > /dev/tty
+    else
+        echo -e "${RD}${message}${CL}" >&2
+    fi
+
+    STORAGE_CONFIG_COLLECTION_LINES="$(( STORAGE_CONFIG_COLLECTION_LINES + 1 ))"
+}
+
+function storage_config_read_line() {
+    local __result_var="$1"
+    local prompt="$2"
+    local default="$3"
+    local value=""
 
     while true; do
-        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
-        [ -z "$answer" ] && answer="$default"
+        storage_config_prompt "$prompt" "$default"
 
-        if validate_number "$answer" "$min_value" "$max_value"; then
-            tty_print "${BFR}"
-            echo "$answer"
+        if [ -r /dev/tty ]; then
+            IFS= read -r value < /dev/tty || true
+        else
+            IFS= read -r value || true
+        fi
+
+        STORAGE_CONFIG_COLLECTION_LINES="$(( STORAGE_CONFIG_COLLECTION_LINES + 1 ))"
+        [ -z "$value" ] && value="$default"
+
+        if [[ "$value" == *$'\e'* ]]; then
+            storage_config_print_error "Invalid input. Arrow keys are not accepted here; type the value or press Enter for default."
+            continue
+        fi
+
+        printf -v "$__result_var" '%s' "$value"
+        return 0
+    done
+}
+
+function storage_config_read_text() {
+    storage_config_read_line "$1" "$2" "$3"
+}
+
+function storage_config_read_number() {
+    local __result_var="$1"
+    local prompt="$2"
+    local default="$3"
+    local min_value="${4:-1}"
+    local max_value="${5:-}"
+    local value=""
+
+    while true; do
+        storage_config_read_line value "$prompt" "$default"
+
+        if validate_number "$value" "$min_value" "$max_value"; then
+            printf -v "$__result_var" '%s' "$value"
             return 0
         fi
 
-        tty_print "${BFR}"
-        print_number_error "$min_value" "$max_value"
+        if [[ "$value" == *$'\e'* ]]; then
+            storage_config_print_error "Invalid input. Use numbers only."
+        else
+            if [ -n "$max_value" ]; then
+                storage_config_print_error "Invalid input. Enter numbers only between ${min_value} and ${max_value}."
+            else
+                storage_config_print_error "Invalid input. Enter numbers only. Minimum value is ${min_value}."
+            fi
+        fi
     done
+}
+
+function show_storage_config_collection_header_once() {
+    if [ "$STORAGE_CONFIG_COLLECTION_SHOWN" != "yes" ]; then
+        echo ""
+        echo -e "${BORDER}"
+        echo -e "${BL}STORAGE CONFIG / PLAN${CL}"
+        echo -e "${BORDER}"
+        STORAGE_CONFIG_COLLECTION_SHOWN="yes"
+        STORAGE_CONFIG_COLLECTION_LINES="4"
+    fi
+}
+
+function clear_previous_lines() {
+    local count="${1:-0}"
+    local i="0"
+
+    [ "$count" -gt 0 ] || return 0
+    [ -w /dev/tty ] || return 0
+
+    for (( i=0; i<count; i++ )); do
+        tty_print "\033[1A\033[2K"
+    done
+}
+
+function clear_storage_config_collection_block_once() {
+    [ "$STORAGE_CONFIG_COLLECTION_SHOWN" == "yes" ] || return 0
+
+    clear_previous_lines "$STORAGE_CONFIG_COLLECTION_LINES"
+    STORAGE_CONFIG_COLLECTION_SHOWN="cleared"
+    STORAGE_CONFIG_COLLECTION_LINES="0"
 }
 
 # --- 40. STORAGE NAME INPUTS ---
@@ -1922,9 +2003,9 @@ function transient_number_input() {
 function collect_storage_names() {
     set_adaptive_storage_defaults
 
-    VG_NAME="$(transient_text_input "Enter VG name" "$VG_NAME_DEFAULT")"
-    THINPOOL_NAME="$(transient_text_input "Enter thinpool name" "$THINPOOL_NAME_DEFAULT")"
-    STORAGE_ID="$(transient_text_input "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT")"
+    storage_config_read_text VG_NAME "Enter VG name" "$VG_NAME_DEFAULT"
+    storage_config_read_text THINPOOL_NAME "Enter thinpool name" "$THINPOOL_NAME_DEFAULT"
+    storage_config_read_text STORAGE_ID "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT"
 
     validate_name_or_error "VG name" "$VG_NAME" '^[a-zA-Z0-9_+.-]+$'
     validate_name_or_error "Thinpool name" "$THINPOOL_NAME" '^[a-zA-Z0-9_+.-]+$'
@@ -2155,15 +2236,15 @@ function collect_thinpool_sizing() {
     local reserve_default=""
 
     reserve_default="$(default_vg_reserve_gb)"
-    THINPOOL_METADATA_GB="$(transient_number_input "Set thinpool metadata size in GB" "1" "1" "")"
-    VG_RESERVE_GB="$(transient_number_input "Reserve free VG space in GB" "$reserve_default" "0" "")"
+    storage_config_read_number THINPOOL_METADATA_GB "Set thinpool metadata size in GB" "1" "1" ""
+    storage_config_read_number VG_RESERVE_GB "Reserve free VG space in GB" "$reserve_default" "0" ""
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
 
     if [ "$THINPOOL_MAX_DATA_GB" -le 0 ]; then
         msg_error "No space remains for thinpool data after ${THINPOOL_METADATA_GB}GB metadata and ${VG_RESERVE_GB}GB reserve."
     fi
 
-    THINPOOL_DATA_GB="$(transient_number_input "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB")"
+    storage_config_read_number THINPOOL_DATA_GB "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB"
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
     validate_secondary_storage_plan "$DISK_SIZE_GB"
 }
@@ -2175,7 +2256,7 @@ function collect_thinpool_allocation() {
 # --- 43. CONTENT TYPE SELECTION ---
 # Sets storage content types. Defaults support VM images, containers and backups.
 function collect_content_types() {
-    CONTENT_TYPES="$(transient_text_input "Enter Proxmox content types" "$CONTENT_TYPES")"
+    storage_config_read_text CONTENT_TYPES "Enter Proxmox content types" "$CONTENT_TYPES"
     CONTENT_TYPES="$(echo "$CONTENT_TYPES" | tr -d ' ' | sed 's/,,*/,/g; s/^,//; s/,$//')"
 
     validate_content_types_or_error "$CONTENT_TYPES"
@@ -2198,11 +2279,14 @@ function final_destructive_confirmation() {
 # --- SINGLE STORAGE CONFIG / PLAN FLOW ---
 # Owns all storage config collection, final plan redraw and final destructive confirmation.
 function collect_storage_config_and_show_final_plan() {
+    show_storage_config_collection_header_once
+
     collect_storage_names
     collect_content_types
     check_storage_conflicts
     collect_thinpool_sizing
 
+    clear_storage_config_collection_block_once
     display_storage_plan
     final_destructive_confirmation
 }
@@ -3087,7 +3171,7 @@ function show_iso_next_step_reminder() {
     echo -e "${YW}Upload Ubuntu Server ISO:${CL}"
     echo ""
     echo -e "  ${BL}Proxmox Web UI:${CL}"
-    echo -e "    ${GN}https://${proxmox_ip}:8006{CL}${DGN} > ${proxmox_node} > local > ISO Images > Upload${CL}"
+    echo -e "    ${GN}https://${proxmox_ip}:8006${CL}${DGN} > ${proxmox_node} > local > ISO Images > Upload${CL}"
     echo ""
     echo -e "  ${BL}Or copy from your laptop:${CL}"
     echo -e "    ${GN}scp /path/to/ubuntu-live-server.iso${CL} ${DGN}root@${proxmox_ip}:/var/lib/vz/template/iso/${CL}"
