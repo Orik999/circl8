@@ -1485,7 +1485,7 @@ function choose_selected_disk_action() {
             fi
             echo ""
             echo -e "${YW}Action:${CL}"
-            echo -e "  ${BL}1)${CL} ${RD}Wipe/recreate this disk as fresh storage${CL}"
+            echo -e "  ${BL}1)${CL} ${RD}Wipe/Recreate this disk as fresh storage${CL}"
             echo -e "  ${BL}2)${CL} Cancel"
             echo ""
             action="$(timed_number_input "Select action" "2" "1" "2" "quiet")"
@@ -1504,7 +1504,7 @@ function choose_selected_disk_action() {
             echo ""
             echo -e "${YW}Action:${CL}"
             echo -e "  ${BL}1)${CL} ${GN}Validate/register existing storage without wiping${CL}"
-            echo -e "  ${BL}2)${CL} ${RD}Wipe/recreate this disk as new storage${CL}"
+            echo -e "  ${BL}2)${CL} ${RD}Wipe/Recreate this disk as new storage${CL}"
             echo -e "  ${BL}3)${CL} Cancel"
             echo ""
             action="$(timed_number_input "Select action" "1" "1" "3" "quiet")"
