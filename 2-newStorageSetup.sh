@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.5.1"
+SCRIPT_VERSION="v1.5.2"
 SCRIPT_UPDATED="2026-06-04"
-SCRIPT_BUILD="storage-config-input-confirmations"
+SCRIPT_BUILD="verified-summary-warning-details"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -1995,7 +1995,6 @@ function storage_config_read_number() {
 
 function show_storage_config_collection_header_once() {
     if [ "$STORAGE_CONFIG_COLLECTION_SHOWN" != "yes" ]; then
-        echo ""
         echo -e "${BORDER}"
         echo -e "${BL}STORAGE CONFIG / PLAN${CL}"
         echo -e "${BORDER}"
@@ -3086,11 +3085,11 @@ function create_verification_report() {
     fi
 
     if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then
-        VERIFY_STATUS="${RD}FAIL${CL}"
+        VERIFY_STATUS="FAIL"
     elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then
-        VERIFY_STATUS="${YW}PASS_WITH_WARNINGS${CL}"
+        VERIFY_STATUS="PASS_WITH_WARNINGS"
     else
-        VERIFY_STATUS="${GN}PASS${CL}"
+        VERIFY_STATUS="PASS"
     fi
 
     {
@@ -3205,9 +3204,144 @@ function show_iso_next_step_reminder() {
     echo -e "  ${YW}Then run Script 3.${CL}"
     echo ""
 }
+function format_verify_status() {
+    local status="$1"
+
+    case "$status" in
+        PASS)
+            echo -e "${GN}${status}${CL}"
+            ;;
+        PASS_WITH_WARNINGS)
+            echo -e "${YW}${status}${CL}"
+            ;;
+        FAIL)
+            echo -e "${RD}${status}${CL}"
+            ;;
+        *)
+            echo -e "${YW}${status:-unknown}${CL}"
+            ;;
+    esac
+}
+
+function readable_verify_check_name() {
+    local key="$1"
+
+    case "$key" in
+        THINPOOL_MONITORING) echo "Thinpool monitoring" ;;
+        VG_RESERVE) echo "VG reserve" ;;
+        IO_SCHEDULER) echo "IO scheduler" ;;
+        IO_SCHEDULER_ACTIVE) echo "IO scheduler active value" ;;
+        LVM_METADATA_BACKUP) echo "LVM metadata backup" ;;
+        THINPOOL_DATA_SIZE) echo "Thinpool data size" ;;
+        THINPOOL_METADATA_SIZE) echo "Thinpool metadata size" ;;
+        THINPOOL_METADATA_USAGE) echo "Thinpool metadata usage" ;;
+        DISK_RESIDUAL_SIGNATURES) echo "Residual old signatures" ;;
+        TRIM) echo "SSD TRIM" ;;
+        MEMORY_TUNING) echo "Memory tuning" ;;
+        ZFS_ARC) echo "ZFS ARC cap" ;;
+        PVESM_STORAGE_ACTIVE) echo "pvesm storage" ;;
+        STORAGE_CFG_BLOCK) echo "storage.cfg block" ;;
+        STORAGE_CFG_VGNAME) echo "storage.cfg vgname" ;;
+        STORAGE_CFG_THINPOOL) echo "storage.cfg thinpool" ;;
+        STORAGE_CFG_CONTENT) echo "storage.cfg content" ;;
+        COMPLETION_MARKER) echo "Completion marker" ;;
+        *) echo "$key" | tr '_' ' ' | awk '{for (i=1;i<=NF;i++) {$i=tolower($i); sub(/^./, toupper(substr($i,1,1)), $i)}; print}' ;;
+    esac
+}
+
+function verify_issue_expected_value() {
+    local payload="$1"
+    local value=""
+
+    value="$(echo "$payload" | sed -n 's/^expected \(.*\); actual .*/\1/p')"
+    echo "${value:-unknown}"
+}
+
+function verify_issue_actual_value() {
+    local payload="$1"
+    local value=""
+
+    value="$(echo "$payload" | sed -n 's/^expected .*; actual \(.*\); \(note\|fix\) .*/\1/p')"
+    echo "${value:-unknown}"
+}
+
+function verify_issue_fix_value() {
+    local payload="$1"
+    local value=""
+
+    value="$(echo "$payload" | sed -n 's/^expected .*; actual .*; \(note\|fix\) \(.*\)$/\2/p')"
+    echo "${value:-inspect ${VERIFY_FILE}}"
+}
+
+function print_verify_issue_preview_line() {
+    local issue_type="$1"
+    local line="$2"
+    local index="$3"
+    local key=""
+    local payload=""
+    local expected=""
+    local actual=""
+    local fix=""
+
+    key="${line%%=*}"
+    key="${key#FAIL_CHECK_}"
+    key="${key#WARN_CHECK_}"
+    payload="${line#*=}"
+    expected="$(verify_issue_expected_value "$payload")"
+    actual="$(verify_issue_actual_value "$payload")"
+    fix="$(verify_issue_fix_value "$payload")"
+
+    echo ""
+    echo -e "  ${YW}${issue_type} ${index}:${CL}"
+    echo -e "    ${BL}Check:${CL} ${GN}$(readable_verify_check_name "$key")${CL}"
+    echo -e "    ${BL}Reason:${CL} ${YW}expected ${expected}, actual ${actual}${CL}"
+    echo -e "    ${BL}Fix:${CL} ${GN}${fix}${CL}"
+}
+
+function show_verify_issue_previews() {
+    local shown="0"
+    local failure_index="0"
+    local warning_index="0"
+    local line=""
+
+    [ -r "$VERIFY_FILE" ] || return 0
+
+    while IFS= read -r line; do
+        [ "$shown" -lt 3 ] || break
+        failure_index="$(( failure_index + 1 ))"
+        print_verify_issue_preview_line "Failure" "$line" "$failure_index"
+        shown="$(( shown + 1 ))"
+    done < <(grep '^FAIL_CHECK_' "$VERIFY_FILE" 2>/dev/null || true)
+
+    while IFS= read -r line; do
+        [ "$shown" -lt 3 ] || break
+        warning_index="$(( warning_index + 1 ))"
+        print_verify_issue_preview_line "Warning" "$line" "$warning_index"
+        shown="$(( shown + 1 ))"
+    done < <(grep '^WARN_CHECK_' "$VERIFY_FILE" 2>/dev/null || true)
+}
+
 # --- 57. FINAL SUMMARY ---
 # Shows final storage details.
 function show_final_summary() {
+    local final_thinpool_data_gb=""
+    local final_thinpool_metadata_gb=""
+    local final_vg_free_gb=""
+
+    final_thinpool_data_gb="$(get_thinpool_data_gb "$VG_NAME" "$THINPOOL_NAME")"
+    final_thinpool_metadata_gb="$(get_thinpool_metadata_gb "$VG_NAME" "$THINPOOL_NAME")"
+    final_vg_free_gb="$(get_actual_vg_free_gb "$VG_NAME")"
+
+    if ! [[ "$final_thinpool_data_gb" =~ ^[0-9]+$ ]] || [ "$final_thinpool_data_gb" -le 0 ]; then
+        final_thinpool_data_gb="$THINPOOL_DATA_GB"
+    fi
+    if ! [[ "$final_thinpool_metadata_gb" =~ ^[0-9]+$ ]] || [ "$final_thinpool_metadata_gb" -le 0 ]; then
+        final_thinpool_metadata_gb="$THINPOOL_METADATA_GB"
+    fi
+    if ! [[ "$final_vg_free_gb" =~ ^[0-9]+$ ]]; then
+        final_vg_free_gb="$VG_RESERVE_GB"
+    fi
+
     section_flash_success "FINISHED"
 
     if [ "$COMPLETION_MARKER_WRITTEN" == "yes" ]; then
@@ -3231,13 +3365,21 @@ function show_final_summary() {
     echo ""
 
     echo -e "${YW}Sizing:${CL}"
-    echo -e "  ${BL}Thinpool data:${CL} ${GN}${THINPOOL_DATA_GB} GB${CL}"
-    echo -e "  ${BL}Thinpool metadata:${CL} ${GN}${THINPOOL_METADATA_GB} GB${CL}"
-    echo -e "  ${BL}Reserve free VG:${CL} ${GN}${VG_RESERVE_GB} GB${CL}"
+    echo -e "  ${BL}Thinpool data:${CL} ${GN}${final_thinpool_data_gb} GB${CL}"
+    echo -e "  ${BL}Thinpool metadata:${CL} ${GN}${final_thinpool_metadata_gb} GB${CL}"
+    echo -e "  ${BL}Reserve free VG:${CL} ${GN}${final_vg_free_gb} GB${CL}"
     echo ""
 
     echo -e "${YW}Verification:${CL}"
-    echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}"
+    echo -e "  ${BL}Status:${CL} $(format_verify_status "$VERIFY_STATUS")"
+    if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then
+        echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+    fi
+    if [ "$VERIFY_WARN_COUNT" -gt 0 ]; then
+        echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+    fi
+    show_verify_issue_previews
+    echo ""
     echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_FILE}${CL}"
 
     show_iso_next_step_reminder
