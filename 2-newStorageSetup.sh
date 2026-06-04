@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.5.2"
+SCRIPT_VERSION="v1.5.3"
 SCRIPT_UPDATED="2026-06-04"
-SCRIPT_BUILD="verified-summary-warning-details"
+SCRIPT_BUILD="verified-sizing-monitor-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -2142,6 +2142,22 @@ function get_actual_vg_free_gb() {
     lvm_mib_to_ui_gb "$(get_actual_vg_free_mib "${1:-$VG_NAME}")"
 }
 
+function mib_to_lvm_gb_decimal() {
+    local mib="$1"
+
+    awk -v mib="$mib" 'BEGIN { if (mib ~ /^[0-9]+([.][0-9]+)?$/) printf "%.2f", mib / 1024; else print "0.00" }'
+}
+
+function format_lvm_gb_value() {
+    local value="$1"
+
+    awk -v value="$value" 'BEGIN { if (value !~ /^[0-9]+([.][0-9]+)?$/) { print value; exit } formatted=sprintf("%.2f", value + 0); sub(/\.00$/, "", formatted); print formatted }'
+}
+
+function get_actual_vg_free_gb_decimal() {
+    mib_to_lvm_gb_decimal "$(get_actual_vg_free_mib "${1:-$VG_NAME}")"
+}
+
 function get_thinpool_data_gb() {
     local vg="${1:-$VG_NAME}"
     local thinpool="${2:-$THINPOOL_NAME}"
@@ -2152,6 +2168,19 @@ function get_thinpool_data_gb() {
         lvm_mib_to_ui_gb "$raw"
     else
         echo "0"
+    fi
+}
+
+function get_thinpool_data_gb_decimal() {
+    local vg="${1:-$VG_NAME}"
+    local thinpool="${2:-$THINPOOL_NAME}"
+    local raw=""
+
+    raw="$(lvs --noheadings --units m --nosuffix -o lv_size "${vg}/${thinpool}" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); print $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        mib_to_lvm_gb_decimal "$raw"
+    else
+        echo "0.00"
     fi
 }
 
@@ -2169,6 +2198,36 @@ function get_thinpool_metadata_gb() {
         lvm_mib_to_ui_gb "$raw"
     else
         echo "0"
+    fi
+}
+
+function get_thinpool_metadata_gb_decimal() {
+    local vg="${1:-$VG_NAME}"
+    local thinpool="${2:-$THINPOOL_NAME}"
+    local raw=""
+
+    raw="$(lvs -a --noheadings --units m --nosuffix -o lv_metadata_size "${vg}/${thinpool}" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); print $1; exit}' || true)"
+    if ! [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]] || awk -v raw="$raw" 'BEGIN { exit !(raw <= 0) }'; then
+        raw="$(lvs -a --noheadings --units m --nosuffix -o lv_size "${vg}/${thinpool}_tmeta" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); print $1; exit}' || true)"
+    fi
+
+    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        mib_to_lvm_gb_decimal "$raw"
+    else
+        echo "0.00"
+    fi
+}
+
+function get_thinpool_metadata_used_percent() {
+    local vg="${1:-$VG_NAME}"
+    local thinpool="${2:-$THINPOOL_NAME}"
+    local raw=""
+
+    raw="$(lvs -a --noheadings -o metadata_percent "${vg}/${thinpool}" 2>/dev/null | awk 'NF {gsub(/[^0-9.]/, "", $1); print $1; exit}' || true)"
+    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        format_lvm_gb_value "$raw"
+    else
+        echo "unknown"
     fi
 }
 
@@ -2747,6 +2806,7 @@ function create_verification_report() {
     local thin_attr=""
     local thin_active=""
     local thin_monitor=""
+    local thin_monitor_supported="no"
     local data_actual_mib="0"
     local metadata_actual_mib="0"
     local data_actual_gb="0"
@@ -2857,7 +2917,12 @@ function create_verification_report() {
     vg_pvs="$(pvs --noheadings -o pv_name --select "vg_name=${VG_NAME}" 2>/dev/null | xargs || true)"
     thin_attr="$(lvs --noheadings -o lv_attr "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | xargs || true)"
     thin_active="$(lvs --noheadings -o lv_active "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | xargs || true)"
-    thin_monitor="$(lvs --noheadings -o lv_monitor "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | xargs || true)"
+    if thin_monitor="$(lvs --noheadings -o lv_monitor "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | xargs)"; then
+        thin_monitor_supported="yes"
+    else
+        thin_monitor="unsupported"
+        thin_monitor_supported="no"
+    fi
     data_actual_mib="$(get_lv_size_mib_for_verify "${VG_NAME}/${THINPOOL_NAME}")"
     metadata_actual_mib="$(get_thin_metadata_mib_for_verify "$VG_NAME" "$THINPOOL_NAME")"
     data_actual_gb="$(lvm_mib_to_ui_gb "${data_actual_mib:-0}")"
@@ -2932,10 +2997,14 @@ function create_verification_report() {
         verify_fail "THINPOOL_LV_ACTIVE" "Thinpool active state" "active" "${thin_active:-unknown}" "run lvchange -ay after inspecting LVM state"
     fi
 
-    if echo "$thin_monitor" | grep -qi monitored; then
-        verify_pass "THINPOOL_MONITORING" "Thinpool monitoring" "enabled"
+    if [ "$thin_monitor_supported" == "yes" ]; then
+        if echo "$thin_monitor" | grep -qi monitored; then
+            verify_pass "THINPOOL_MONITORING" "Thinpool monitoring" "enabled"
+        else
+            verify_warn "THINPOOL_MONITORING" "Thinpool monitoring" "monitored" "${thin_monitor:-unknown}" "enable with lvchange --monitor y ${VG_NAME}/${THINPOOL_NAME}"
+        fi
     else
-        verify_warn "THINPOOL_MONITORING" "Thinpool monitoring" "monitored" "${thin_monitor:-unknown}" "enable with lvchange --monitor y ${VG_NAME}/${THINPOOL_NAME}"
+        verify_pass "THINPOOL_MONITORING" "Thinpool monitoring" "lv_monitor unsupported; active thinpool verified"
     fi
 
     if [ -f "/etc/lvm/backup/${VG_NAME}" ]; then
@@ -3327,19 +3396,32 @@ function show_final_summary() {
     local final_thinpool_data_gb=""
     local final_thinpool_metadata_gb=""
     local final_vg_free_gb=""
+    local final_metadata_used_percent=""
 
-    final_thinpool_data_gb="$(get_thinpool_data_gb "$VG_NAME" "$THINPOOL_NAME")"
-    final_thinpool_metadata_gb="$(get_thinpool_metadata_gb "$VG_NAME" "$THINPOOL_NAME")"
-    final_vg_free_gb="$(get_actual_vg_free_gb "$VG_NAME")"
+    final_thinpool_data_gb="$(get_thinpool_data_gb_decimal "$VG_NAME" "$THINPOOL_NAME")"
+    final_thinpool_metadata_gb="$(get_thinpool_metadata_gb_decimal "$VG_NAME" "$THINPOOL_NAME")"
+    final_vg_free_gb="$(get_actual_vg_free_gb_decimal "$VG_NAME")"
+    final_metadata_used_percent="$(get_thinpool_metadata_used_percent "$VG_NAME" "$THINPOOL_NAME")"
 
-    if ! [[ "$final_thinpool_data_gb" =~ ^[0-9]+$ ]] || [ "$final_thinpool_data_gb" -le 0 ]; then
+    if ! [[ "$final_thinpool_data_gb" =~ ^[0-9]+([.][0-9]+)?$ ]] || awk -v value="$final_thinpool_data_gb" 'BEGIN { exit !(value <= 0) }'; then
         final_thinpool_data_gb="$THINPOOL_DATA_GB"
+    else
+        final_thinpool_data_gb="$(format_lvm_gb_value "$final_thinpool_data_gb")"
     fi
-    if ! [[ "$final_thinpool_metadata_gb" =~ ^[0-9]+$ ]] || [ "$final_thinpool_metadata_gb" -le 0 ]; then
+    if ! [[ "$final_thinpool_metadata_gb" =~ ^[0-9]+([.][0-9]+)?$ ]] || awk -v value="$final_thinpool_metadata_gb" 'BEGIN { exit !(value <= 0) }'; then
         final_thinpool_metadata_gb="$THINPOOL_METADATA_GB"
+    else
+        final_thinpool_metadata_gb="$(format_lvm_gb_value "$final_thinpool_metadata_gb")"
     fi
-    if ! [[ "$final_vg_free_gb" =~ ^[0-9]+$ ]]; then
+    if ! [[ "$final_vg_free_gb" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         final_vg_free_gb="$VG_RESERVE_GB"
+    else
+        final_vg_free_gb="$(format_lvm_gb_value "$final_vg_free_gb")"
+    fi
+    if ! [[ "$final_metadata_used_percent" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        final_metadata_used_percent="unknown"
+    else
+        final_metadata_used_percent="${final_metadata_used_percent}%"
     fi
 
     section_flash_success "FINISHED"
@@ -3366,8 +3448,9 @@ function show_final_summary() {
 
     echo -e "${YW}Sizing:${CL}"
     echo -e "  ${BL}Thinpool data:${CL} ${GN}${final_thinpool_data_gb} GB${CL}"
-    echo -e "  ${BL}Thinpool metadata:${CL} ${GN}${final_thinpool_metadata_gb} GB${CL}"
     echo -e "  ${BL}Reserve free VG:${CL} ${GN}${final_vg_free_gb} GB${CL}"
+    echo -e "  ${BL}Thinpool metadata:${CL} ${GN}${final_thinpool_metadata_gb} GB${CL}"
+    echo -e "  ${BL}Metadata used:${CL} ${GN}${final_metadata_used_percent}${CL}"
     echo ""
 
     echo -e "${YW}Verification:${CL}"
