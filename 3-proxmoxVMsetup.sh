@@ -26,15 +26,19 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.3.5"
-SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="marker-yesno-recreate-mac-default"
+SCRIPT_VERSION="v1.3.6"
+SCRIPT_UPDATED="2026-06-04"
+SCRIPT_BUILD="verification-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
 T=15
 LOG_FILE="/var/log/proxmox-vm-setup.log"
 VERIFY_LOG="/var/log/proxmox-vm-setup-verify.log"
+VERIFY_STATUS="not-run"
+VERIFY_PASS_COUNT="0"
+VERIFY_WARN_COUNT="0"
+VERIFY_FAIL_COUNT="0"
 COMPLETED_MARKER="/root/.proxmox-vm-setup-completed"
 
 DEFAULT_VM_NAME="circl8-ubuntu"
@@ -115,12 +119,12 @@ TEMP_FILES=()
 # Displays the one-line Proxmox VM Setup banner.
 function header_info {
 echo -e "${BL}
-██████╗ ██████╗  ██████╗ ██╗  ██╗███╗   ███╗ ██████╗ ██╗  ██╗    ██╗   ██╗███╗   ███╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
-██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝████╗ ████║██╔═══██╗╚██╗██╔╝    ██║   ██║████╗ ████║    ██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
-██████╔╝██████╔╝██║   ██║ ╚███╔╝ ██╔████╔██║██║   ██║ ╚███╔╝     ██║   ██║██╔████╔██║    ███████╗█████╗     ██║   ██║   ██║██████╔╝
-██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗ ██║╚██╔╝██║██║   ██║ ██╔██╗     ╚██╗ ██╔╝██║╚██╔╝██║    ╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝ 
-██║     ██║  ██║╚██████╔╝██╔╝ ██╗██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗     ╚████╔╝ ██║ ╚═╝ ██║    ███████║███████╗   ██║   ╚██████╔╝██║     
-╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝      ╚═══╝  ╚═╝     ╚═╝    ╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝     
+   ██╗   ██╗ ███╗   ███╗    ███████╗ ███████╗ ████████╗ ██╗   ██╗ ██████╗
+   ██║   ██║ ████╗ ████║    ██╔════╝ ██╔════╝ ╚══██╔══╝ ██║   ██║ ██╔══██╗
+   ██║   ██║ ██╔████╔██║    ███████╗ █████╗      ██║    ██║   ██║ ██████╔╝
+   ╚██╗ ██╔╝ ██║╚██╔╝██║    ╚════██║ ██╔══╝      ██║    ██║   ██║ ██╔═══╝
+    ╚████╔╝  ██║ ╚═╝ ██║    ███████║ ███████╗    ██║    ╚██████╔╝ ██║
+     ╚═══╝   ╚═╝     ╚═╝    ╚══════╝ ╚══════╝    ╚═╝     ╚═════╝  ╚═╝
 ${CL}"
 }
 
@@ -2471,61 +2475,115 @@ EOF
 function create_verification_report() {
     msg_info "Creating VM verification report"
 
-    cat <<EOF > "$VERIFY_LOG"
---- PROXMOX VM SETUP VERIFICATION REPORT ---
-Date: $(date)
-VMID: ${VMID}
-Name: ${VM_NAME}
-Verify Log: ${VERIFY_LOG}
+    local config=""
+    local report_body=""
+    local vm_status="unknown"
 
-Results:
-EOF
+    report_body="$(mktemp)"
+    TEMP_FILES+=("$report_body")
+
+    VERIFY_STATUS="PASS"
+    VERIFY_PASS_COUNT="0"
+    VERIFY_WARN_COUNT="0"
+    VERIFY_FAIL_COUNT="0"
+
+    verify_pass() {
+        VERIFY_PASS_COUNT="$(( VERIFY_PASS_COUNT + 1 ))"
+        echo "✓ PASS - $1" >> "$report_body"
+    }
+
+    verify_warn() {
+        VERIFY_WARN_COUNT="$(( VERIFY_WARN_COUNT + 1 ))"
+        echo "! WARN - $1" >> "$report_body"
+    }
+
+    verify_fail() {
+        VERIFY_FAIL_COUNT="$(( VERIFY_FAIL_COUNT + 1 ))"
+        echo "✗ FAIL - $1" >> "$report_body"
+    }
+
+    verify_info() {
+        echo "- INFO - $1" >> "$report_body"
+    }
+
+    config="$(qm config "$VMID" 2>/dev/null || true)"
+    vm_status="$(qm status "$VMID" 2>/dev/null | awk '{print $2}' || true)"
+    [ -n "$vm_status" ] || vm_status="unknown"
+
+    if [ -n "$config" ]; then verify_pass "VM config exists"; else verify_fail "VM config missing"; fi
+    if grep -q "^name: ${VM_NAME}$" <<< "$config"; then verify_pass "VM name matches"; else verify_warn "VM name not confirmed"; fi
+    if grep -q "^cores: ${CPU_INPUT}$" <<< "$config"; then verify_pass "CPU core count matches"; else verify_warn "CPU core count not confirmed"; fi
+    if grep -q "^memory: ${RAM_MB}$" <<< "$config"; then verify_pass "RAM value matches"; else verify_warn "RAM value not confirmed"; fi
+    if grep -qi "${VM_MAC_ADDRESS}" <<< "$config"; then verify_pass "VM MAC address matches"; else verify_fail "VM MAC address not found in config"; fi
+    if grep -q "^boot: order=${BOOT_ORDER}" <<< "$config"; then verify_pass "Boot order matches"; else verify_warn "Boot order not confirmed"; fi
+
+    if grep -q "^machine: ${MACHINE_TYPE}$" <<< "$config"; then verify_pass "Machine type matches ${MACHINE_TYPE}"; else verify_warn "Machine type not confirmed"; fi
+    if grep -q "^bios: ${BIOS_TYPE}$" <<< "$config"; then verify_pass "BIOS matches ${BIOS_TYPE}"; else verify_warn "BIOS not confirmed"; fi
+    if grep -q "^cpu: ${CPU_TYPE_VM}$" <<< "$config"; then verify_pass "CPU type matches ${CPU_TYPE_VM}"; else verify_warn "CPU type not confirmed"; fi
+    if grep -q "^scsihw: ${DISK_CONTROLLER}$" <<< "$config"; then verify_pass "SCSI controller matches ${DISK_CONTROLLER}"; else verify_warn "SCSI controller not confirmed"; fi
+    if grep -q "^ostype: l26$" <<< "$config"; then verify_pass "OS type matches l26"; else verify_warn "OS type not confirmed"; fi
+
+    if grep -q "^net0: ${NETWORK_MODEL}=" <<< "$config"; then verify_pass "Network model matches ${NETWORK_MODEL}"; else verify_warn "Network model not confirmed"; fi
+    if grep -q "^net0: .*bridge=vmbr0" <<< "$config"; then verify_pass "Network bridge matches vmbr0"; else verify_warn "Network bridge not confirmed"; fi
+
+    if grep -q "^balloon: ${BALLOON_VALUE}$" <<< "$config"; then verify_pass "Ballooning value matches ${BALLOON_VALUE}"; else verify_warn "Ballooning value not confirmed"; fi
+    if grep -q "^onboot: 1$" <<< "$config"; then verify_warn "Autostart/onboot enabled unexpectedly"; else verify_pass "Autostart/onboot disabled"; fi
+
+    if [ "$BIOS_TYPE" == "ovmf" ]; then
+        if grep -q "^efidisk0:" <<< "$config"; then verify_pass "EFI disk exists"; else verify_fail "EFI disk missing"; fi
+        if grep -q "^efidisk0: ${STORAGE_ID}:" <<< "$config"; then verify_pass "EFI disk storage matches ${STORAGE_ID}"; else verify_warn "EFI disk storage not confirmed"; fi
+    else
+        verify_info "EFI disk check skipped because BIOS is ${BIOS_TYPE}"
+    fi
+
+    if grep -q "^scsi0:" <<< "$config"; then verify_pass "OS disk exists"; else verify_fail "OS disk missing"; fi
+    if grep -q "^scsi0: ${STORAGE_ID}:" <<< "$config"; then verify_pass "OS disk storage matches ${STORAGE_ID}"; else verify_warn "OS disk storage not confirmed"; fi
+
+    if [ -n "$ISO_PATH" ]; then
+        if grep -q "^ide2: ${ISO_PATH}" <<< "$config"; then verify_pass "ISO storage/path matches selected ISO"; else verify_warn "ISO attachment not confirmed"; fi
+    else
+        verify_info "ISO check skipped because no ISO was selected"
+    fi
+
+    if [ "$vm_status" == "stopped" ]; then verify_pass "VM status is stopped"; else verify_warn "VM status is ${vm_status}"; fi
+    if grep -q "^agent: ${QEMU_AGENT_VALUE}" <<< "$config"; then verify_pass "QEMU guest agent setting matches"; else verify_warn "QEMU guest agent setting not confirmed"; fi
+    if grep -q "discard=${DISCARD_VALUE}" <<< "$config"; then verify_pass "Discard/TRIM setting matches"; else verify_warn "Discard/TRIM setting not confirmed"; fi
+
+    if [ "$ENABLE_GPU" == "y" ]; then
+        if grep -q "^hostpci" <<< "$config"; then verify_pass "GPU hostpci entries exist"; else verify_fail "GPU hostpci entries missing"; fi
+    else
+        verify_info "GPU passthrough not selected"
+    fi
+
+    if [ -f "$COMPLETED_MARKER" ]; then verify_pass "Completion marker exists"; else verify_warn "Completion marker missing at verification time"; fi
+
+    if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="FAIL"
+    elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="PASS_WITH_WARNINGS"
+    else
+        VERIFY_STATUS="PASS"
+    fi
 
     {
-        local config=""
-        config="$(qm config "$VMID" 2>/dev/null || true)"
-
-        PASS() { echo "✓ PASS - $1"; }
-        WARN() { echo "! WARN - $1"; }
-        FAIL() { echo "✗ FAIL - $1"; }
-
-        if [ -n "$config" ]; then PASS "VM config exists"; else FAIL "VM config missing"; fi
-        if grep -q "^name: ${VM_NAME}$" <<< "$config"; then PASS "VM name matches"; else WARN "VM name not confirmed"; fi
-        if grep -q "^cores: ${CPU_INPUT}$" <<< "$config"; then PASS "CPU core count matches"; else WARN "CPU core count not confirmed"; fi
-        if grep -q "^memory: ${RAM_MB}$" <<< "$config"; then PASS "RAM value matches"; else WARN "RAM value not confirmed"; fi
-        if grep -qi "${VM_MAC_ADDRESS}" <<< "$config"; then PASS "VM MAC address matches"; else FAIL "VM MAC address not found in config"; fi
-        if grep -q "^boot: order=${BOOT_ORDER}" <<< "$config"; then PASS "Boot order matches"; else WARN "Boot order not confirmed"; fi
-
-        if [ "$BIOS_TYPE" == "ovmf" ]; then
-            if grep -q "^efidisk0:" <<< "$config"; then PASS "EFI disk exists"; else FAIL "EFI disk missing"; fi
-        else
-            WARN "EFI disk check skipped because BIOS is ${BIOS_TYPE}"
-        fi
-
-        if grep -q "^scsi0:" <<< "$config"; then PASS "OS disk exists"; else FAIL "OS disk missing"; fi
-
-        if [ -n "$ISO_PATH" ]; then
-            if grep -q "${ISO_PATH}" <<< "$config"; then PASS "ISO attached"; else WARN "ISO attachment not confirmed"; fi
-        else
-            WARN "ISO check skipped because no ISO was selected"
-        fi
-
-        if grep -q "^agent: ${QEMU_AGENT_VALUE}" <<< "$config"; then PASS "QEMU guest agent setting matches"; else WARN "QEMU guest agent setting not confirmed"; fi
-        if grep -q "discard=${DISCARD_VALUE}" <<< "$config"; then PASS "Discard/TRIM setting matches"; else WARN "Discard/TRIM setting not confirmed"; fi
-
-        if [ "$ENABLE_GPU" == "y" ]; then
-            if grep -q "^hostpci" <<< "$config"; then PASS "GPU hostpci entries exist"; else FAIL "GPU hostpci entries missing"; fi
-        else
-            WARN "GPU passthrough not selected"
-        fi
-
-        if [ -f "$COMPLETED_MARKER" ]; then PASS "Completion marker exists"; else WARN "Completion marker missing at verification time"; fi
-
+        echo "--- PROXMOX VM SETUP VERIFICATION REPORT ---"
+        echo "Date: $(date)"
+        echo "VMID: ${VMID}"
+        echo "Name: ${VM_NAME}"
+        echo "Verify Log: ${VERIFY_LOG}"
+        echo "VERIFY_STATUS=${VERIFY_STATUS}"
+        echo "VERIFY_PASS_COUNT=${VERIFY_PASS_COUNT}"
+        echo "VERIFY_WARN_COUNT=${VERIFY_WARN_COUNT}"
+        echo "VERIFY_FAIL_COUNT=${VERIFY_FAIL_COUNT}"
+        echo ""
+        echo "Results:"
+        cat "$report_body"
         echo ""
         echo "VM config summary:"
         qm config "$VMID" 2>/dev/null || true
-    } | tee -a "$VERIFY_LOG" >/dev/null
+    } > "$VERIFY_LOG"
 
+    rm -f "$report_body"
     msg_ok "verification report created"
 }
 
@@ -2584,7 +2642,27 @@ function show_final_summary() {
     echo -e "  ${BL}DISCARD/TRIM:${CL} ${ANS}$(yes_no_label "$DISCARD_ENABLED")${CL}"
     echo -e "  ${BL}BOOT ORDER:${CL} ${GN}${BOOT_ORDER:-unknown}${CL}"
     echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${ANS}$(yes_no_label "$ADVANCED_SETTINGS")${CL}"
-    echo -e "  ${BL}VERIFY LOG:${CL} ${GN}${VERIFY_LOG}${CL}"
+    echo ""
+
+    echo -e "${YW}Verification:${CL}"
+    case "$VERIFY_STATUS" in
+        PASS)
+            echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}"
+            ;;
+        PASS_WITH_WARNINGS)
+            echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}"
+            ;;
+        FAIL)
+            echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}"
+            ;;
+        *)
+            echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}"
+            ;;
+    esac
+    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+    echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+    echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
     echo ""
 
     echo -e "${YW}NETWORK / DHCP:${CL}"
