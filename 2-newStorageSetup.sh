@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.5.0"
+SCRIPT_VERSION="v1.5.1"
 SCRIPT_UPDATED="2026-06-04"
-SCRIPT_BUILD="storage-config-line-input-block"
+SCRIPT_BUILD="storage-config-input-confirmations"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -1836,7 +1836,7 @@ function show_selected_disk_summary() {
     echo -e "${YW}Disk:${CL}"
     echo -e "  ${BL}Path:${CL} ${ANS}${SELECTED_DISK}${CL}"
     echo -e "  ${BL}Model:${CL} ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e "  ${BL}Type/Bus:${CL} ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
+    echo -e "  ${BL}Type/Bus:${CL} ${GN}${DISK_TYPE} ${BL}/{CL} ${GN}${DISK_BUS}${CL}"
     echo -e "  ${BL}Size:${CL} ${GN}${DISK_SIZE_GB} GB${CL}"
 }
 
@@ -1895,22 +1895,39 @@ function storage_config_prompt() {
     fi
 }
 
-function storage_config_print_error() {
+function storage_config_replace_last_line() {
     local message="$1"
 
     if [ -w /dev/tty ]; then
-        echo -e "${RD}${message}${CL}" > /dev/tty
+        printf '%b\n' "\033[1A\r\033[K${message}" > /dev/tty
     else
-        echo -e "${RD}${message}${CL}" >&2
+        printf '%b\n' "${message}" >&2
     fi
 
     STORAGE_CONFIG_COLLECTION_LINES="$(( STORAGE_CONFIG_COLLECTION_LINES + 1 ))"
 }
 
-function storage_config_read_line() {
+function storage_config_confirm_line() {
+    local label="$1"
+    local value="$2"
+    local suffix="${3:-}"
+    local suffix_text=""
+
+    [ -n "$suffix" ] && suffix_text=" ${suffix}"
+    storage_config_replace_last_line " ${CM} ${GN}${label}:${CL} ${ANS}${value}${suffix_text}${CL}"
+}
+
+function storage_config_print_error() {
+    local message="$1"
+
+    storage_config_replace_last_line " ${CROSS} ${RD}${message}${CL}"
+}
+
+function storage_config_read_text() {
     local __result_var="$1"
     local prompt="$2"
     local default="$3"
+    local label="${4:-$2}"
     local value=""
 
     while true; do
@@ -1922,7 +1939,6 @@ function storage_config_read_line() {
             IFS= read -r value || true
         fi
 
-        STORAGE_CONFIG_COLLECTION_LINES="$(( STORAGE_CONFIG_COLLECTION_LINES + 1 ))"
         [ -z "$value" ] && value="$default"
 
         if [[ "$value" == *$'\e'* ]]; then
@@ -1931,12 +1947,9 @@ function storage_config_read_line() {
         fi
 
         printf -v "$__result_var" '%s' "$value"
+        storage_config_confirm_line "$label" "$value"
         return 0
     done
-}
-
-function storage_config_read_text() {
-    storage_config_read_line "$1" "$2" "$3"
 }
 
 function storage_config_read_number() {
@@ -1945,24 +1958,37 @@ function storage_config_read_number() {
     local default="$3"
     local min_value="${4:-1}"
     local max_value="${5:-}"
+    local label="${6:-$2}"
+    local suffix="${7:-}"
     local value=""
 
     while true; do
-        storage_config_read_line value "$prompt" "$default"
+        storage_config_prompt "$prompt" "$default"
 
-        if validate_number "$value" "$min_value" "$max_value"; then
-            printf -v "$__result_var" '%s' "$value"
-            return 0
+        if [ -r /dev/tty ]; then
+            IFS= read -r value < /dev/tty || true
+        else
+            IFS= read -r value || true
         fi
+
+        value="$(printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+        [ -z "$value" ] && value="$default"
 
         if [[ "$value" == *$'\e'* ]]; then
             storage_config_print_error "Invalid input. Use numbers only."
+            continue
+        fi
+
+        if validate_number "$value" "$min_value" "$max_value"; then
+            printf -v "$__result_var" '%s' "$value"
+            storage_config_confirm_line "$label" "$value" "$suffix"
+            return 0
+        fi
+
+        if [ -n "$max_value" ]; then
+            storage_config_print_error "Invalid input. Enter numbers only between ${min_value} and ${max_value}."
         else
-            if [ -n "$max_value" ]; then
-                storage_config_print_error "Invalid input. Enter numbers only between ${min_value} and ${max_value}."
-            else
-                storage_config_print_error "Invalid input. Enter numbers only. Minimum value is ${min_value}."
-            fi
+            storage_config_print_error "Invalid input. Enter numbers only. Minimum value is ${min_value}."
         fi
     done
 }
@@ -2003,9 +2029,9 @@ function clear_storage_config_collection_block_once() {
 function collect_storage_names() {
     set_adaptive_storage_defaults
 
-    storage_config_read_text VG_NAME "Enter VG name" "$VG_NAME_DEFAULT"
-    storage_config_read_text THINPOOL_NAME "Enter thinpool name" "$THINPOOL_NAME_DEFAULT"
-    storage_config_read_text STORAGE_ID "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT"
+    storage_config_read_text VG_NAME "Enter VG name" "$VG_NAME_DEFAULT" "VG name"
+    storage_config_read_text THINPOOL_NAME "Enter thinpool name" "$THINPOOL_NAME_DEFAULT" "Thinpool name"
+    storage_config_read_text STORAGE_ID "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT" "Proxmox storage ID"
 
     validate_name_or_error "VG name" "$VG_NAME" '^[a-zA-Z0-9_+.-]+$'
     validate_name_or_error "Thinpool name" "$THINPOOL_NAME" '^[a-zA-Z0-9_+.-]+$'
@@ -2236,15 +2262,15 @@ function collect_thinpool_sizing() {
     local reserve_default=""
 
     reserve_default="$(default_vg_reserve_gb)"
-    storage_config_read_number THINPOOL_METADATA_GB "Set thinpool metadata size in GB" "1" "1" ""
-    storage_config_read_number VG_RESERVE_GB "Reserve free VG space in GB" "$reserve_default" "0" ""
+    storage_config_read_number THINPOOL_METADATA_GB "Set thinpool metadata size in GB" "1" "1" "" "Thinpool metadata size" "GB"
+    storage_config_read_number VG_RESERVE_GB "Reserve free VG space in GB" "$reserve_default" "0" "" "Reserve free VG space" "GB"
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
 
     if [ "$THINPOOL_MAX_DATA_GB" -le 0 ]; then
         msg_error "No space remains for thinpool data after ${THINPOOL_METADATA_GB}GB metadata and ${VG_RESERVE_GB}GB reserve."
     fi
 
-    storage_config_read_number THINPOOL_DATA_GB "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB"
+    storage_config_read_number THINPOOL_DATA_GB "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB" "Thinpool data size" "GB"
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
     validate_secondary_storage_plan "$DISK_SIZE_GB"
 }
@@ -2256,7 +2282,7 @@ function collect_thinpool_allocation() {
 # --- 43. CONTENT TYPE SELECTION ---
 # Sets storage content types. Defaults support VM images, containers and backups.
 function collect_content_types() {
-    storage_config_read_text CONTENT_TYPES "Enter Proxmox content types" "$CONTENT_TYPES"
+    storage_config_read_text CONTENT_TYPES "Enter Proxmox content types" "$CONTENT_TYPES" "Proxmox content types"
     CONTENT_TYPES="$(echo "$CONTENT_TYPES" | tr -d ' ' | sed 's/,,*/,/g; s/^,//; s/,$//')"
 
     validate_content_types_or_error "$CONTENT_TYPES"
