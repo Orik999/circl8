@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.3.6"
+SCRIPT_VERSION="v1.3.7"
 SCRIPT_UPDATED="2026-06-04"
-SCRIPT_BUILD="verification-polish"
+SCRIPT_BUILD="safe-gpu-ui-previous-summary"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -68,6 +68,13 @@ DGPU_BDFS=""
 DGPU_VENDOR_IDS=""
 GPU_SUMMARY=""
 GPU_DETECTION_STATUS="ok"
+
+SCRIPT1_INTEGRATED_GPU="unknown"
+SCRIPT1_DISCRETE_GPU="unknown"
+SCRIPT1_DISCRETE_GPU_VRAM="unknown"
+SCRIPT1_DGPU_DRIVER="unknown"
+SCRIPT1_VFIO_IDLE_D3_DISABLED="unknown"
+SCRIPT1_VFIO_NOT_READY_WARNING="unknown"
 
 STORAGE_ID=""
 STORAGE_TYPE=""
@@ -672,73 +679,30 @@ function marker_yes_no_value_or_unknown() {
 }
 
 # --- 22B. PREVIOUS MARKER SUMMARY DISPLAY ---
-# Displays previous run marker details using the unified Circl8 UI style.
+# Displays a short action-focused previous-run summary without changing continue/recreate flow.
 function show_previous_marker_summary() {
     local marker_file="$1"
     local completed_on=""
     local marker_recreate=""
-    local marker_cpu_cores=""
-    local marker_cpu_threads=""
-    local marker_cpu_pair="unknown"
+    local marker_iso=""
 
     completed_on="$(marker_value_or_unknown "$marker_file" "Proxmox VM Setup completed on")"
     marker_recreate="$(marker_yes_no_value_or_unknown "$marker_file" "Recreate Existing VM")"
-    marker_cpu_cores="$(marker_value_or_unknown "$marker_file" "CPU Physical Cores")"
-    marker_cpu_threads="$(marker_value_or_unknown "$marker_file" "CPU Threads")"
+    marker_iso="$(marker_value_or_unknown "$marker_file" "ISO")"
+    marker_iso="${marker_iso##*/}"
 
-    if [ "$marker_cpu_cores" != "unknown" ] && [ "$marker_cpu_threads" != "unknown" ]; then
-        marker_cpu_pair="${marker_cpu_cores} / ${marker_cpu_threads}"
-    fi
-
-    echo -e "${YW}Marker:${CL}"
-    echo -e "  ${BL}path:${CL} ${GN}${marker_file}${CL}"
-    echo -e "  ${BL}completed on:${CL} ${GN}${completed_on}${CL}"
-    echo ""
-
-    echo -e "${YW}VM SUMMARY:${CL}"
+    echo -e "${YW}Existing VM:${CL}"
     echo -e "  ${BL}VM ID:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "VMID")${CL}"
-    echo -e "  ${BL}VM NAME:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Name")${CL}"
-    echo -e "  ${BL}RAM:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "RAM")${CL}"
-    echo -e "  ${BL}CPU CORES:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "CPU Cores")${CL}"
-    echo -e "  ${BL}OS DISK:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "OS Disk")${CL}"
-    echo -e "  ${BL}STORAGE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Storage")${CL}"
-    echo -e "  ${BL}STORAGE TYPE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Storage Type")${CL}"
-    echo -e "  ${BL}ISO:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "ISO")${CL}"
-    echo ""
-
-    echo -e "${YW}HOST RESOURCES:${CL}"
-    echo -e "  ${BL}CPU Model/Clock:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "CPU Model/Clock")${CL}"
-    echo -e "  ${BL}CPU Cores/Threads:${CL} ${GN}${marker_cpu_pair}${CL}"
-    echo -e "  ${BL}System RAM:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "System RAM")${CL}"
-    echo ""
-
-    echo -e "${YW}GPU SUMMARY:${CL}"
-    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "GPU Passthrough")${CL}"
-    echo -e "  ${BL}GPU DEVICES:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "GPU Functions Attached")${CL}"
-    echo ""
-
-    echo -e "${YW}NETWORK / DHCP:${CL}"
-    echo -e "  ${BL}VM MAC ADDRESS:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "VM MAC Address")${CL}"
-    echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "Custom MAC Selected")${CL}"
-    echo ""
-
-    echo -e "${YW}PLATFORM SETTINGS:${CL}"
-    echo -e "  ${BL}MACHINE TYPE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Machine Type")${CL}"
-    echo -e "  ${BL}BIOS:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "BIOS")${CL}"
-    echo -e "  ${BL}EFI FORMAT MODE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "EFI Format Mode")${CL}"
-    echo -e "  ${BL}EFI FORMAT:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "EFI Format")${CL}"
-    echo -e "  ${BL}CPU TYPE:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "CPU Type")${CL}"
-    echo -e "  ${BL}BALLOONING:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "Ballooning Enabled")${CL}"
-    echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "QEMU Guest Agent")${CL}"
-    echo -e "  ${BL}DISCARD/TRIM:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "Discard/TRIM")${CL}"
-    echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${GN}$(marker_yes_no_value_or_unknown "$marker_file" "Advanced Settings Used")${CL}"
+    echo -e "  ${BL}Name:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Name")${CL}"
+    echo -e "  ${BL}Storage:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Storage")${CL}"
+    echo -e "  ${BL}ISO:${CL} ${GN}${marker_iso:-unknown}${CL}"
+    echo -e "  ${BL}Completed:${CL} ${GN}${completed_on}${CL}"
 
     if [ "$marker_recreate" == "yes" ]; then
         echo ""
-        echo -e "${YW}RECREATE:${CL}"
-        echo -e "  ${BL}Existing VM replaced:${CL} ${GN}yes${CL}"
-        echo -e "  ${BL}Recreated VM ID:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Recreated VMID")${CL}"
-        echo -e "  ${BL}Recreated VM name:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Recreated VM Name")${CL}"
+        echo -e "${YW}Recreate:${CL}"
+        echo -e "  ${BL}Existing VM:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Recreated VMID")${CL}"
+        echo -e "  ${BL}Action:${CL} ${YW}destroy/recreate after final confirmation${CL}"
     fi
 }
 
@@ -825,8 +789,8 @@ function handle_existing_vmid() {
     echo ""
     echo -e "${YW}Choose action:${CL}"
     echo -e "  ${RD}1) Destroy and recreate VM ${VMID}${CL}"
-    echo -e "  ${YW}2) Choose another VM ID${CL}"
-    echo -e "  ${YW}3) Exit without changes${CL}"
+    echo -e "  ${GN}2) Choose another VM ID${CL}"
+    echo -e "  ${BL}3) Exit without changes${CL}"
     echo ""
 
     action="$(timed_number_input "Select existing VM action" "1" "1" "3")"
@@ -1333,6 +1297,135 @@ function gpu_display_name_for_bdf() {
     echo "GPU [${bdf}]"
 }
 
+# --- SCRIPT 1 GPU SUMMARY SOURCE HELPERS ---
+# Reads Script 1 marker/log GPU display fields without heavy probing or control-flow effects.
+function clean_script1_gpu_value() {
+    local value="$1"
+
+    value="$(printf '%s' "$value" | sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+    value="${value#- }"
+    value="${value#! }"
+    value="${value#✓ }"
+    value="${value#✗ }"
+    value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+
+    echo "$value"
+}
+
+function latest_script1_health_log() {
+    local candidate=""
+    local latest=""
+
+    for candidate in /root/circl8-script1-final-health-*.log; do
+        [ -f "$candidate" ] || continue
+        latest="$candidate"
+    done
+
+    echo "$latest"
+}
+
+function extract_script1_gpu_field() {
+    local field="$1"
+    local source_file=""
+    local health_log=""
+    local value=""
+
+    health_log="$(latest_script1_health_log || true)"
+
+    for source_file in \
+        "$health_log" \
+        /root/.pve9-postinstall-completed \
+        /var/log/pve9-postinstall-verify-display.log \
+        /var/log/pve9-postinstall-verify.log; do
+        [ -n "$source_file" ] || continue
+        [ -r "$source_file" ] || continue
+
+        value="$(awk -v key="$field" '
+            {
+                line=$0
+                gsub(/\033\[[0-9;]*[A-Za-z]/, "", line)
+                sub(/^[[:space:]]*/, "", line)
+                if (index(line, key ":") == 1) {
+                    sub(/^[^:]*:[[:space:]]*/, "", line)
+                    print line
+                    exit
+                }
+            }
+        ' "$source_file" 2>/dev/null || true)"
+
+        value="$(clean_script1_gpu_value "$value")"
+        if [ -n "$value" ]; then
+            echo "$value"
+            return 0
+        fi
+    done
+
+    return 0
+}
+
+function first_discrete_gpu_bdf() {
+    echo "$DGPU_BDFS" | awk '{print $1}'
+}
+
+function discrete_gpu_display_name() {
+    local gpu_pci_id=""
+
+    if [ -n "$SCRIPT1_DISCRETE_GPU" ] && [ "$SCRIPT1_DISCRETE_GPU" != "unknown" ]; then
+        echo "$SCRIPT1_DISCRETE_GPU"
+        return 0
+    fi
+
+    gpu_pci_id="$(first_discrete_gpu_bdf)"
+    if [ -n "$gpu_pci_id" ]; then
+        gpu_display_name_for_bdf "$gpu_pci_id"
+    else
+        echo "unknown"
+    fi
+}
+
+function load_script1_gpu_summary() {
+    local value=""
+    local gpu_pci_id=""
+
+    value="$(extract_script1_gpu_field "Integrated GPU" || true)"
+    [ -n "$value" ] && SCRIPT1_INTEGRATED_GPU="$value"
+
+    value="$(extract_script1_gpu_field "Discrete GPU" || true)"
+    [ -n "$value" ] && SCRIPT1_DISCRETE_GPU="$value"
+
+    value="$(extract_script1_gpu_field "Discrete GPU VRAM" || true)"
+    [ -n "$value" ] && SCRIPT1_DISCRETE_GPU_VRAM="$value"
+
+    value="$(extract_script1_gpu_field "dGPU driver" || true)"
+    [ -n "$value" ] && SCRIPT1_DGPU_DRIVER="$value"
+
+    value="$(extract_script1_gpu_field "VFIO idle D3 disabled" || true)"
+    [ -n "$value" ] && SCRIPT1_VFIO_IDLE_D3_DISABLED="$value"
+
+    value="$(extract_script1_gpu_field "VFIO not-ready warning" || true)"
+    [ -n "$value" ] && SCRIPT1_VFIO_NOT_READY_WARNING="$value"
+
+    if [ "$SCRIPT1_INTEGRATED_GPU" == "unknown" ] && [ -n "$IGPU_LINES" ]; then
+        gpu_pci_id="$(printf '%s\n' "$IGPU_LINES" | awk 'NF {print $1; exit}')"
+        [ -n "$gpu_pci_id" ] && SCRIPT1_INTEGRATED_GPU="$(gpu_display_name_for_bdf "$gpu_pci_id")"
+    fi
+
+    if [ "$SCRIPT1_DISCRETE_GPU" == "unknown" ] && [ -n "$DGPU_BDFS" ]; then
+        gpu_pci_id="$(first_discrete_gpu_bdf)"
+        [ -n "$gpu_pci_id" ] && SCRIPT1_DISCRETE_GPU="$(gpu_display_name_for_bdf "$gpu_pci_id")"
+    fi
+}
+
+function print_gpu_vfio_summary() {
+    echo -e "${YW}GPU / VFIO:${CL}"
+    echo -e "  ${BL}Integrated GPU:${CL} ${GN}${SCRIPT1_INTEGRATED_GPU:-unknown}${CL}"
+    echo -e "  ${BL}Discrete GPU:${CL} ${GN}${SCRIPT1_DISCRETE_GPU:-unknown}${CL}"
+    echo -e "  ${BL}Discrete GPU VRAM:${CL} ${GN}${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}${CL}"
+    echo -e "  ${BL}dGPU driver:${CL} ${GN}${SCRIPT1_DGPU_DRIVER:-unknown}${CL}"
+    echo -e "  ${BL}VFIO idle D3 disabled:${CL} ${GN}${SCRIPT1_VFIO_IDLE_D3_DISABLED:-unknown}${CL}"
+    echo -e "  ${BL}VFIO not-ready warning:${CL} ${GN}${SCRIPT1_VFIO_NOT_READY_WARNING:-unknown}${CL}"
+}
+
 # --- 30. SAME-SLOT GPU FUNCTION HELPER ---
 # Returns every PCI function in the same slot as the selected GPU.
 # Example: 0000:01:00.0 -> 0000:01:00.0 0000:01:00.1 ...
@@ -1607,6 +1700,7 @@ function audit_system_resources() {
 function audit_gpu_hardware() {
     detect_gpus_sysfs
     GPU_SUMMARY="$(build_gpu_summary)"
+    load_script1_gpu_summary || true
 
     if [ -n "$GPU_ALL" ]; then
         GPU_DETECTION_STATUS="ok"
@@ -1655,10 +1749,7 @@ function show_system_audit() {
     echo -e "  ${BL}System RAM:${CL} ${GN}${TOTAL_RAM_GB}GB${CL}"
 
     echo ""
-    echo -e "${YW}GPU:${CL}"
-    print_gpu_group "Integrated" "$IGPU_LINES" "host/laptop display"
-    echo ""
-    print_gpu_group "Discrete" "$DGPU_LINES" "VM passthrough candidate"
+    print_gpu_vfio_summary
 
     echo ""
     echo -e "${YW}Storage availability:${CL}"
@@ -1712,7 +1803,7 @@ function start_confirmation() {
 
     echo ""
     echo -e "${YW}Start confirmation:${CL}"
-    start_yn="$(timed_yes_no "Start the Proxmox VM Setup Script?" "y" "  ")"
+    start_yn="$(timed_yes_no "  Start the Proxmox VM Setup Script?" "y" "  ")"
 
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
@@ -1783,7 +1874,7 @@ function select_iso_image() {
 
         echo ""
         ISO_IDX="$(timed_number_input "Select ISO number" "1" "1" "${#ISOS[@]}")"
-        ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
+        ISO_PATH="$(basename "${ISOS[$((ISO_IDX-1))]}")"
     fi
 }
 
@@ -1959,36 +2050,27 @@ function collect_gpu_passthrough_option() {
     local gpu_yn=""
     local gpu_pci_id=""
     local gpu_display_name=""
-    local gpu_func=""
-    local gpu_function_count="0"
 
-    section "GPU OPTION"
+    section "GPU PASSTHROUGH"
 
     if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
-        gpu_pci_id="$(echo "$DGPU_BDFS" | awk '{print $1}')"
-        gpu_display_name="$(gpu_display_name_for_bdf "$gpu_pci_id")"
+        gpu_pci_id="$(first_discrete_gpu_bdf)"
+        gpu_display_name="$(discrete_gpu_display_name)"
         GPU_SAME_SLOT_BDFS="$(get_same_slot_functions_for_bdf "$gpu_pci_id")"
         [ -z "$GPU_SAME_SLOT_BDFS" ] && GPU_SAME_SLOT_BDFS="$gpu_pci_id"
 
-        gpu_function_count="$(wc -w <<< "$GPU_SAME_SLOT_BDFS" | xargs)"
-
-        echo -e "${YW}Discrete GPU:${CL}"
-        echo -e "  ${BL}name:${CL} ${GN}${gpu_display_name}${CL}"
-        echo -e "  ${BL}passthrough role:${CL} ${YW}optional / not required initially${CL}"
-
-        if [ "$gpu_function_count" -le 1 ]; then
-            echo -e "  ${BL}passthrough device:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
-        else
-            echo ""
-            echo -e "${BL}Related same-card functions:${CL}"
-            for gpu_func in $GPU_SAME_SLOT_BDFS; do
-                echo -e "  - ${GN}${gpu_func}${CL}"
-            done
-            echo -e "${YW}Note: these functions belong to the same physical GPU/card and may need to be passed together.${CL}"
-        fi
+        echo -e "${YW}Candidate:${CL}"
+        echo -e "  ${BL}GPU:${CL} ${GN}${gpu_display_name}${CL}"
+        echo -e "  ${BL}VRAM:${CL} ${GN}${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}${CL}"
+        echo -e "  ${BL}PCI:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
+        echo -e "  ${BL}Driver:${CL} ${GN}${SCRIPT1_DGPU_DRIVER:-unknown}${CL}"
+        echo ""
+        echo -e "${YW}Recommendation:${CL}"
+        echo -e "  ${YW}Optional. Leave disabled for initial Ubuntu install.${CL}"
+        echo -e "  ${YW}Enable later after VM base install/snapshot if needed.${CL}"
         echo ""
 
-        gpu_yn="$(timed_yes_no "Add DISCRETE GPU to VM?" "n")"
+        gpu_yn="$(timed_yes_no "Add discrete GPU to VM?" "n")"
 
         if [[ "$gpu_yn" =~ ^[Yy] ]]; then
             ENABLE_GPU="y"
@@ -1997,7 +2079,11 @@ function collect_gpu_passthrough_option() {
         fi
     else
         ENABLE_GPU="n"
-        msg_ok "NO DISCRETE GPU PASSTHROUGH TARGET FOUND"
+        echo -e "${YW}Candidate:${CL}"
+        echo -e "  ${YW}none detected${CL}"
+        echo ""
+        echo -e "${YW}Result:${CL}"
+        echo -e "  ${YW}GPU passthrough will be skipped.${CL}"
     fi
 
     return 0
@@ -2203,7 +2289,7 @@ function final_apply_confirmation() {
         echo -e "${RD}RECREATE WARNING:${CL}"
         echo -e "  ${BL}Existing VM ID:${CL} ${ANS}${RECREATE_EXISTING_VMID}${CL}"
         echo -e "  ${BL}Existing VM name:${CL} ${GN}${RECREATE_EXISTING_VM_NAME:-unknown}${CL}"
-        echo -e "  ${BL}Action after final confirmation:${CL} ${RD}destroy and recreate this VM${CL}"
+        echo -e "  ${BL}Action after final confirmation:${CL} ${RD}Destroy and Recreate this VM${CL}"
         echo ""
     fi
 
@@ -2613,20 +2699,14 @@ function show_final_summary() {
         echo ""
     fi
 
-    echo -e "${YW}GPU SUMMARY:${CL}"
-    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
+    echo -e "${YW}GPU:${CL}"
+    echo -e "  ${BL}Passthrough:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
     if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_FUNCTIONS_ATTACHED" ]; then
-        gpu_function_count="$(wc -w <<< "$GPU_FUNCTIONS_ATTACHED" | xargs)"
-        if [ "$gpu_function_count" -le 1 ]; then
-            echo -e "  ${BL}GPU DEVICE:${CL} ${GN}${GPU_FUNCTIONS_ATTACHED}${CL}"
-        else
-            echo -e "  ${BL}GPU DEVICES:${CL}"
-            for gpu_func in $GPU_FUNCTIONS_ATTACHED; do
-                echo -e "    - ${GN}${gpu_func}${CL}"
-            done
-        fi
+        echo -e "  ${BL}Device:${CL} ${GN}$(discrete_gpu_display_name)${CL}"
+        echo -e "  ${BL}VRAM:${CL} ${GN}${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}${CL}"
+        echo -e "  ${BL}PCI:${CL} ${GN}${GPU_FUNCTIONS_ATTACHED}${CL}"
     else
-        echo -e "  ${BL}GPU DEVICES:${CL} ${ANS}not attached${CL}"
+        echo -e "  ${BL}Device:${CL} ${ANS}not attached${CL}"
     fi
     echo ""
 
