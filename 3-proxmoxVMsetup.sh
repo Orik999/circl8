@@ -18,6 +18,7 @@ ANS="$(printf '\033[1;95m')"
 DGN="$(printf '\033[32m')"
 CL="$(printf '\033[m')"
 CLF="$(printf '\033[5m')"
+NST="$(printf '\033[1;4;93m')"   # Next Step title: bold underline bright yellow
 BFR="\\r\\033[K"
 HOLD="-"
 CM="${GN}✓${CL}"
@@ -26,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.3.7"
+SCRIPT_VERSION="v1.3.9"
 SCRIPT_UPDATED="2026-06-04"
-SCRIPT_BUILD="safe-gpu-ui-previous-summary"
+SCRIPT_BUILD="iso-volid-verify-nextstep-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -81,6 +82,7 @@ STORAGE_TYPE=""
 EFI_FORMAT="raw"
 EFI_FORMAT_MODE="auto"
 ISO_PATH=""
+ISO_NAME=""
 ENABLE_GPU="n"
 GPU_SAME_SLOT_BDFS=""
 GPU_FUNCTIONS_ATTACHED=""
@@ -702,7 +704,7 @@ function show_previous_marker_summary() {
         echo ""
         echo -e "${YW}Recreate:${CL}"
         echo -e "  ${BL}Existing VM:${CL} ${GN}$(marker_value_or_unknown "$marker_file" "Recreated VMID")${CL}"
-        echo -e "  ${BL}Action:${CL} ${YW}destroy/recreate after final confirmation${CL}"
+        echo -e "  ${BL}Action:${CL} ${YW}Destroy/Recreate after final confirmation${CL}"
     fi
 }
 
@@ -1383,6 +1385,37 @@ function discrete_gpu_display_name() {
     fi
 }
 
+function format_gpu_vram_for_display() {
+    local value="$1"
+    local amount=""
+    local unit=""
+    local suffix=""
+    local gb=""
+
+    if [ -z "$value" ] || [ "$value" == "unknown" ]; then
+        echo "unknown"
+        return 0
+    fi
+
+    if [[ "$value" =~ ^([0-9]+)[[:space:]]*(MiB|MB)[[:space:]]*(.*)$ ]]; then
+        amount="${BASH_REMATCH[1]}"
+        unit="${BASH_REMATCH[2]}"
+        suffix="${BASH_REMATCH[3]}"
+        gb="$(( amount / 1024 ))"
+
+        if [ "$gb" -gt 0 ] && [ "$(( amount % 1024 ))" -eq 0 ]; then
+            if [ -n "$suffix" ]; then
+                echo "${gb} GB ${suffix}"
+            else
+                echo "${gb} GB"
+            fi
+            return 0
+        fi
+    fi
+
+    echo "$value"
+}
+
 function load_script1_gpu_summary() {
     local value=""
     local gpu_pci_id=""
@@ -1420,7 +1453,7 @@ function print_gpu_vfio_summary() {
     echo -e "${YW}GPU / VFIO:${CL}"
     echo -e "  ${BL}Integrated GPU:${CL} ${GN}${SCRIPT1_INTEGRATED_GPU:-unknown}${CL}"
     echo -e "  ${BL}Discrete GPU:${CL} ${GN}${SCRIPT1_DISCRETE_GPU:-unknown}${CL}"
-    echo -e "  ${BL}Discrete GPU VRAM:${CL} ${GN}${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}${CL}"
+    echo -e "  ${BL}Discrete GPU VRAM:${CL} ${GN}$(format_gpu_vram_for_display "${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}")${CL}"
     echo -e "  ${BL}dGPU driver:${CL} ${GN}${SCRIPT1_DGPU_DRIVER:-unknown}${CL}"
     echo -e "  ${BL}VFIO idle D3 disabled:${CL} ${GN}${SCRIPT1_VFIO_IDLE_D3_DISABLED:-unknown}${CL}"
     echo -e "  ${BL}VFIO not-ready warning:${CL} ${GN}${SCRIPT1_VFIO_NOT_READY_WARNING:-unknown}${CL}"
@@ -1717,11 +1750,8 @@ function show_system_audit() {
     local audit_storage_list=()
     local storage_name=""
     local storage_type=""
-    local snapshot_support=""
-    local recommended_use=""
-    local role=""
-    local printed_system="no"
-    local printed_secondary="no"
+    local recommended_storage="none"
+    local options_detected="no"
 
     mapfile -t audit_storage_list < <(get_storage_list | sort)
 
@@ -1736,6 +1766,7 @@ function show_system_audit() {
     fi
 
     if [ "${#audit_storage_list[@]}" -gt 0 ]; then
+        options_detected="yes"
         msg_ok "STORAGE OPTIONS DETECTED"
     else
         msg_warn "NO VM STORAGE OPTIONS DETECTED"
@@ -1751,47 +1782,21 @@ function show_system_audit() {
     echo ""
     print_gpu_vfio_summary
 
-    echo ""
-    echo -e "${YW}Storage availability:${CL}"
-
-    for storage_name in "${audit_storage_list[@]}"; do
-        storage_type="$(get_storage_type "$storage_name")"
-        snapshot_support="$(storage_supports_snapshots "$storage_type")"
-        recommended_use="$(storage_recommended_use "$storage_type")"
-        role="$(storage_role_label "$storage_name" "$storage_type")"
-
-        if [ "$role" == "Proxmox system disk" ]; then
-            if [ "$printed_system" == "no" ]; then
-                echo -e "  ${YW}Proxmox system storage:${CL}"
-                printed_system="yes"
-            else
-                echo ""
+    if [ "${#audit_storage_list[@]}" -gt 0 ]; then
+        recommended_storage="${audit_storage_list[0]}"
+        for storage_name in "${audit_storage_list[@]}"; do
+            storage_type="$(get_storage_type "$storage_name")"
+            if [ "$(storage_supports_snapshots "$storage_type")" == "yes" ]; then
+                recommended_storage="$storage_name"
+                break
             fi
-            print_storage_option_card "" "$storage_name" "$storage_type" "$snapshot_support" "$recommended_use" "$role"
-        fi
-    done
-
-    for storage_name in "${audit_storage_list[@]}"; do
-        storage_type="$(get_storage_type "$storage_name")"
-        snapshot_support="$(storage_supports_snapshots "$storage_type")"
-        recommended_use="$(storage_recommended_use "$storage_type")"
-        role="$(storage_role_label "$storage_name" "$storage_type")"
-
-        if [ "$role" != "Proxmox system disk" ]; then
-            if [ "$printed_secondary" == "no" ]; then
-                [ "$printed_system" == "yes" ] && echo ""
-                echo -e "  ${YW}Secondary VM storage:${CL}"
-                printed_secondary="yes"
-            else
-                echo ""
-            fi
-            print_storage_option_card "" "$storage_name" "$storage_type" "$snapshot_support" "$recommended_use" "$role"
-        fi
-    done
-
-    if [ "${#audit_storage_list[@]}" -eq 0 ]; then
-        echo -e "  ${YW}No active VM image storage detected yet.${CL}"
+        done
     fi
+
+    echo ""
+    echo -e "${YW}Storage:${CL}"
+    echo -e "  ${BL}Options detected:${CL} ${GN}${options_detected}${CL}"
+    echo -e "  ${BL}Recommended VM storage:${CL} ${GN}${recommended_storage}${CL}"
 
     return 0
 }
@@ -1874,7 +1879,8 @@ function select_iso_image() {
 
         echo ""
         ISO_IDX="$(timed_number_input "Select ISO number" "1" "1" "${#ISOS[@]}")"
-        ISO_PATH="$(basename "${ISOS[$((ISO_IDX-1))]}")"
+        ISO_NAME="$(basename "${ISOS[$((ISO_IDX-1))]}")"
+        ISO_PATH="local:iso/${ISO_NAME}"
     fi
 }
 
@@ -1929,7 +1935,7 @@ function storage_role_label() {
             echo "Proxmox system disk"
             ;;
         circl8-vm)
-            echo "secondary VM storage disk"
+            echo "Secondary VM storage disk"
             ;;
         *)
             if [ "$type" == "lvmthin" ]; then
@@ -2061,7 +2067,7 @@ function collect_gpu_passthrough_option() {
 
         echo -e "${YW}Candidate:${CL}"
         echo -e "  ${BL}GPU:${CL} ${GN}${gpu_display_name}${CL}"
-        echo -e "  ${BL}VRAM:${CL} ${GN}${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}${CL}"
+        echo -e "  ${BL}VRAM:${CL} ${GN}$(format_gpu_vram_for_display "${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}")${CL}"
         echo -e "  ${BL}PCI:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
         echo -e "  ${BL}Driver:${CL} ${GN}${SCRIPT1_DGPU_DRIVER:-unknown}${CL}"
         echo ""
@@ -2216,80 +2222,69 @@ function collect_mac_configuration() {
 function final_apply_confirmation() {
     local apply_yn=""
     local gpu_pci_id=""
-    local gpu_display_name="not selected"
-    local gpu_func=""
-    local gpu_function_count="0"
+    local gpu_display_name="not attached"
+    local mac_reuse="no"
 
     section "READY TO CREATE VM"
 
     if [ -n "$DGPU_BDFS" ]; then
-        gpu_pci_id="$(echo "$DGPU_BDFS" | awk '{print $1}')"
-        gpu_display_name="$(gpu_display_name_for_bdf "$gpu_pci_id")"
-    elif [ -n "$GPU_ALL" ]; then
-        gpu_display_name="detected GPU available"
+        gpu_pci_id="$(first_discrete_gpu_bdf)"
+        gpu_display_name="$(discrete_gpu_display_name)"
     fi
 
-    echo -e "${YW}VM SUMMARY:${CL}"
-    echo -e "  ${BL}VM ID:${CL} ${ANS}${VMID}${CL}"
-    echo -e "  ${BL}VM NAME:${CL} ${ANS}${VM_NAME}${CL}"
-    echo -e "  ${BL}CPU CORES:${CL} ${ANS}${CPU_INPUT}${CL}"
-    echo -e "  ${BL}RAM:${CL} ${ANS}${RAM_GB_INPUT}GB${CL}"
-    echo -e "  ${BL}OS DISK:${CL} ${ANS}${DISK_GB_INPUT}GB${CL}"
-    echo -e "  ${BL}STORAGE:${CL} ${ANS}${STORAGE_ID}${CL}"
-    echo -e "  ${BL}STORAGE TYPE:${CL} ${GN}${STORAGE_TYPE:-unknown}${CL}"
-    echo -e "  ${BL}ISO:${CL} ${ANS}${ISO_PATH:-none}${CL}"
+    [ "$MAC_SOURCE" == "reused-existing" ] && mac_reuse="yes"
+
+    echo -e "${YW}VM:${CL}"
+    echo -e "  ${BL}ID:${CL} ${ANS}${VMID}${CL}"
+    echo -e "  ${BL}Name:${CL} ${ANS}${VM_NAME}${CL}"
+    echo -e "  ${BL}CPU cores:${CL} ${ANS}${CPU_INPUT}${CL}"
+    echo -e "  ${BL}RAM:${CL} ${ANS}${RAM_GB_INPUT} GB${CL}"
+    echo -e "  ${BL}OS disk:${CL} ${ANS}${DISK_GB_INPUT} GB${CL}"
+    echo -e "  ${BL}Storage:${CL} ${ANS}${STORAGE_ID}${CL}"
+    echo -e "  ${BL}ISO:${CL} ${ANS}${ISO_NAME:-none}${CL}"
     echo ""
 
     if [ "$RECREATE_EXISTING_VM" == "yes" ]; then
-        echo -e "${YW}RECREATE:${CL}"
-        echo -e "  ${BL}Existing VM replaced:${CL} ${ANS}yes${CL}"
-        echo -e "  ${BL}Recreated VM ID:${CL} ${ANS}${RECREATE_EXISTING_VMID}${CL}"
+        echo -e "${YW}Recreate:${CL}"
+        echo -e "  ${BL}Existing VM:${CL} ${ANS}${RECREATE_EXISTING_VMID}${CL}"
+        echo -e "  ${BL}Action:${CL} ${RD}Destroy/Recreate after final confirmation${CL}"
+        echo -e "  ${BL}MAC reuse:${CL} ${ANS}${mac_reuse}${CL}"
+        echo ""
+    else
+        echo -e "${YW}Create:${CL}"
+        echo -e "  ${BL}New VM:${CL} ${ANS}${VMID}${CL}"
         echo ""
     fi
 
-    echo -e "${YW}GPU SUMMARY:${CL}"
-    echo -e "  ${BL}GPU:${CL} ${GN}${gpu_display_name}${CL}"
-    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
+    echo -e "${YW}GPU:${CL}"
+    echo -e "  ${BL}Passthrough:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
     if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_SAME_SLOT_BDFS" ]; then
-        gpu_function_count="$(wc -w <<< "$GPU_SAME_SLOT_BDFS" | xargs)"
-        if [ "$gpu_function_count" -le 1 ]; then
-            echo -e "  ${BL}GPU DEVICE:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
-        else
-            echo -e "  ${BL}GPU DEVICES:${CL}"
-            for gpu_func in $GPU_SAME_SLOT_BDFS; do
-                echo -e "    - ${GN}${gpu_func}${CL}"
-            done
-        fi
+        echo -e "  ${BL}Device:${CL} ${GN}${gpu_display_name}${CL}"
+        echo -e "  ${BL}VRAM:${CL} ${GN}$(format_gpu_vram_for_display "${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}")${CL}"
+        echo -e "  ${BL}PCI:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
     else
-        echo -e "  ${BL}GPU DEVICES:${CL} ${ANS}not attached${CL}"
+        echo -e "  ${BL}Device:${CL} ${ANS}not attached${CL}"
     fi
     echo ""
 
-    echo -e "${YW}NETWORK SUMMARY:${CL}"
-    echo -e "  ${BL}VM MAC ADDRESS:${CL} ${ANS}${VM_MAC_ADDRESS}${CL}"
-    echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${ANS}${CUSTOM_MAC_SELECTED}${CL}"
+    echo -e "${YW}Network:${CL}"
+    echo -e "  ${BL}Bridge:${CL} ${GN}vmbr0${CL}"
+    echo -e "  ${BL}MAC address:${CL} ${ANS}${VM_MAC_ADDRESS}${CL}"
+    echo -e "  ${BL}MAC source:${CL} ${GN}${MAC_SOURCE:-unknown}${CL}"
     echo ""
 
-    echo -e "${YW}VM PLATFORM SETTINGS:${CL}"
-    echo -e "  ${BL}MACHINE TYPE:${CL} ${GN}${MACHINE_TYPE}${CL}"
+    echo -e "${YW}Platform:${CL}"
+    echo -e "  ${BL}Machine:${CL} ${GN}${MACHINE_TYPE}${CL}"
     echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_TYPE}${CL}"
-    echo -e "  ${BL}EFI FORMAT MODE:${CL} ${GN}${EFI_FORMAT_MODE}${CL}"
-    echo -e "  ${BL}EFI FORMAT:${CL} ${GN}${EFI_FORMAT}${CL}"
-    echo -e "  ${BL}CPU TYPE:${CL} ${GN}${CPU_TYPE_VM}${CL}"
-    echo -e "  ${BL}BALLOONING ENABLED:${CL} ${ANS}$(yes_no_label "$BALLOONING_ENABLED")${CL}"
-    echo -e "  ${BL}BALLOON VALUE:${CL} ${GN}${BALLOON_VALUE}${CL}"
-    echo -e "  ${BL}NETWORK MODEL:${CL} ${GN}${NETWORK_MODEL}${CL}"
-    echo -e "  ${BL}QEMU GUEST AGENT:${CL} ${ANS}$(yes_no_label "$QEMU_AGENT_ENABLED")${CL}"
-    echo -e "  ${BL}DISK CONTROLLER:${CL} ${GN}${DISK_CONTROLLER}${CL}"
-    echo -e "  ${BL}DISCARD/TRIM:${CL} ${ANS}$(yes_no_label "$DISCARD_ENABLED")${CL}"
-    echo -e "  ${BL}ADVANCED SETTINGS USED:${CL} ${ANS}$(yes_no_label "$ADVANCED_SETTINGS")${CL}"
+    echo -e "  ${BL}CPU type:${CL} ${GN}${CPU_TYPE_VM}${CL}"
+    echo -e "  ${BL}Disk controller:${CL} ${GN}${DISK_CONTROLLER}${CL}"
+    echo -e "  ${BL}QEMU guest agent:${CL} ${ANS}$(yes_no_label "$QEMU_AGENT_ENABLED")${CL}"
+    echo -e "  ${BL}Discard/TRIM:${CL} ${ANS}$(yes_no_label "$DISCARD_ENABLED")${CL}"
     echo ""
 
     if [ "$RECREATE_EXISTING_VM" == "yes" ]; then
-        echo -e "${RD}RECREATE WARNING:${CL}"
-        echo -e "  ${BL}Existing VM ID:${CL} ${ANS}${RECREATE_EXISTING_VMID}${CL}"
-        echo -e "  ${BL}Existing VM name:${CL} ${GN}${RECREATE_EXISTING_VM_NAME:-unknown}${CL}"
-        echo -e "  ${BL}Action after final confirmation:${CL} ${RD}Destroy and Recreate this VM${CL}"
+        echo -e "${YW}Final warning:${CL}"
+        echo -e "  ${RD}VM ${RECREATE_EXISTING_VMID} will be destroyed and recreated.${CL}"
         echo ""
     fi
 
@@ -2681,7 +2676,7 @@ function show_final_summary() {
 
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
-    echo -e "${YW}VM SUMMARY:${CL}"
+    echo -e "${YW}VM:${CL}"
     echo -e "  ${BL}VM ID:${CL} ${ANS}${VMID}${CL}"
     echo -e "  ${BL}VM NAME:${CL} ${ANS}${VM_NAME}${CL}"
     echo -e "  ${BL}RAM:${CL} ${ANS}${RAM_GB_INPUT}GB${CL}"
@@ -2689,7 +2684,7 @@ function show_final_summary() {
     echo -e "  ${BL}OS DISK:${CL} ${ANS}${DISK_GB_INPUT}GB${CL}"
     echo -e "  ${BL}STORAGE:${CL} ${ANS}${STORAGE_ID}${CL}"
     echo -e "  ${BL}STORAGE TYPE:${CL} ${GN}${STORAGE_TYPE:-unknown}${CL}"
-    echo -e "  ${BL}ISO:${CL} ${ANS}${ISO_PATH:-none}${CL}"
+    echo -e "  ${BL}ISO:${CL} ${ANS}${ISO_NAME:-none}${CL}"
     echo ""
 
     if [ "$RECREATE_EXISTING_VM" == "yes" ]; then
@@ -2703,14 +2698,14 @@ function show_final_summary() {
     echo -e "  ${BL}Passthrough:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
     if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_FUNCTIONS_ATTACHED" ]; then
         echo -e "  ${BL}Device:${CL} ${GN}$(discrete_gpu_display_name)${CL}"
-        echo -e "  ${BL}VRAM:${CL} ${GN}${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}${CL}"
+        echo -e "  ${BL}VRAM:${CL} ${GN}$(format_gpu_vram_for_display "${SCRIPT1_DISCRETE_GPU_VRAM:-unknown}")${CL}"
         echo -e "  ${BL}PCI:${CL} ${GN}${GPU_FUNCTIONS_ATTACHED}${CL}"
     else
         echo -e "  ${BL}Device:${CL} ${ANS}not attached${CL}"
     fi
     echo ""
 
-    echo -e "${YW}PLATFORM SETTINGS:${CL}"
+    echo -e "${YW}Platform:${CL}"
     echo -e "  ${BL}MACHINE TYPE:${CL} ${GN}${MACHINE_TYPE}${CL}"
     echo -e "  ${BL}BIOS:${CL} ${GN}${BIOS_TYPE}${CL}"
     echo -e "  ${BL}EFI FORMAT:${CL} ${GN}${EFI_FORMAT}${CL}"
@@ -2745,18 +2740,22 @@ function show_final_summary() {
     echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
     echo ""
 
-    echo -e "${YW}NETWORK / DHCP:${CL}"
+    echo -e "${YW}Network:${CL}"
     echo -e "  ${BL}VM MAC ADDRESS:${CL} ${ANS}${VM_MAC_ADDRESS}${CL}"
     echo -e "  ${BL}CUSTOM MAC SELECTED:${CL} ${ANS}$(yes_no_label "$CUSTOM_MAC_SELECTED")${CL}"
     if [ -n "$MAC_SOURCE" ]; then
         echo -e "  ${BL}MAC SOURCE:${CL} ${GN}${MAC_SOURCE}${CL}"
     fi
     echo -e "  ${YW}Reminder: reserve this MAC in your router if you want a fixed VM IP.${CL}"
-    echo ""
 
-    echo -e "${YW}NEXT STEP:${CL}"
-    echo -e "  ${BL}Manual install:${CL} ${YW}start the VM and install Ubuntu from the Proxmox console.${CL}"
-    echo -e "  ${BL}Autoinstall:${CL} ${YW}run Script 3.5 next to generate and attach the Ubuntu autoinstall ISO.${CL}"
+    section "Next Step"
+#    echo -e "${YW}Next Step${CL}"
+    echo ""
+    echo -e "${YW}Option A${CL} - ${GN}automated install:${CL}"
+    echo -e "  ${BL}Run ${ANS}Script 3.5${CL}${BL} to generate and attach the Ubuntu autoinstall ISO.${CL}"
+    echo ""
+    echo -e "${YW}Option B${CL} - ${GN}manual install:${CL}"
+    echo -e "  ${BL}Start ${ANS}VM ${VMID}${CL}${BL} and install Ubuntu from the Proxmox console.${CL}"
     echo ""
 }
 
