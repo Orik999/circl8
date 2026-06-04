@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.6"
+SCRIPT_VERSION="v1.4.7"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="input-config-verification-ui-polish"
+SCRIPT_BUILD="storage-config-loop-removal"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -1902,27 +1902,21 @@ function clear_storage_config_collection_block() {
 # --- 40. STORAGE NAME INPUTS ---
 # Collects VG, thinpool and Proxmox storage ID with validation.
 function collect_storage_names() {
-    local valid_names="no"
-
     begin_storage_config_collection_once
 
     set_adaptive_storage_defaults
 
-    while [ "$valid_names" != "yes" ]; do
-        VG_NAME="$(timed_text_input "Enter VG name" "$VG_NAME_DEFAULT" "quiet")"
-        THINPOOL_NAME="$(timed_text_input "Enter thinpool name" "$THINPOOL_NAME_DEFAULT" "quiet")"
-        STORAGE_ID="$(timed_text_input "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT" "quiet")"
+    VG_NAME="$(timed_text_input "Enter VG name" "$VG_NAME_DEFAULT" "quiet")"
+    THINPOOL_NAME="$(timed_text_input "Enter thinpool name" "$THINPOOL_NAME_DEFAULT" "quiet")"
+    STORAGE_ID="$(timed_text_input "Enter Proxmox storage ID" "$STORAGE_ID_DEFAULT" "quiet")"
 
-        validate_name_or_error "VG name" "$VG_NAME" '^[a-zA-Z0-9_+.-]+$'
-        validate_name_or_error "Thinpool name" "$THINPOOL_NAME" '^[a-zA-Z0-9_+.-]+$'
-        validate_name_or_error "Storage ID" "$STORAGE_ID" '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+    validate_name_or_error "VG name" "$VG_NAME" '^[a-zA-Z0-9_+.-]+$'
+    validate_name_or_error "Thinpool name" "$THINPOOL_NAME" '^[a-zA-Z0-9_+.-]+$'
+    validate_name_or_error "Storage ID" "$STORAGE_ID" '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
 
-        reject_reserved_name_or_error "VG name" "$VG_NAME"
-        reject_reserved_name_or_error "Thinpool name" "$THINPOOL_NAME"
-        reject_reserved_name_or_error "Storage ID" "$STORAGE_ID"
-
-        valid_names="yes"
-    done
+    reject_reserved_name_or_error "VG name" "$VG_NAME"
+    reject_reserved_name_or_error "Thinpool name" "$THINPOOL_NAME"
+    reject_reserved_name_or_error "Storage ID" "$STORAGE_ID"
 }
 
 # --- 41. STORAGE SAFETY CHECK ---
@@ -2103,8 +2097,6 @@ function validate_secondary_storage_plan() {
 }
 
 function display_storage_plan() {
-    clear_storage_config_collection_block
-
     echo ""
     section "STORAGE CONFIG / PLAN"
 
@@ -2160,6 +2152,8 @@ function collect_thinpool_sizing() {
     THINPOOL_DATA_GB="$(timed_number_input "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB" "quiet")"
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
     validate_secondary_storage_plan "$DISK_SIZE_GB"
+
+    clear_storage_config_collection_block
     display_storage_plan
 }
 
