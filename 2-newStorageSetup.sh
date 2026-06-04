@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.5"
+SCRIPT_VERSION="v1.4.6"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="final-ui-flow-consolidation"
+SCRIPT_BUILD="input-config-verification-ui-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -104,6 +104,7 @@ SELECTED_STORAGE_CONFLICT_REASON=""
 RESET_SECTION_SHOWN="no"
 CREATE_SECTION_SHOWN="no"
 TUNING_SECTION_SHOWN="no"
+STORAGE_CONFIG_COLLECTION_SHOWN="no"
 COMPLETION_MARKER_WRITTEN="no"
 
 TEMP_FILES=()
@@ -450,6 +451,18 @@ function editable_input_loop() {
         fi
 
         case "$key" in
+            $'\e')
+                # Ignore full terminal escape sequences, such as arrow keys.
+                # A single Down arrow normally arrives as ESC [ B; without this,
+                # numeric prompts report one invalid error for each byte.
+                while true; do
+                    if [ -r /dev/tty ]; then
+                        IFS= read -rsn1 -t 0.01 key < /dev/tty || break
+                    else
+                        IFS= read -rsn1 -t 0.01 key || break
+                    fi
+                done
+                ;;
             "")
                 [ -z "$answer" ] && answer="$default"
 
@@ -1866,12 +1879,32 @@ function set_default_storage_values_for_resume() {
     CONTENT_TYPES="images,rootdir"
 }
 
+# --- STORAGE CONFIG COLLECTION UI HELPERS ---
+# Shows the collection header once, then clears that collection-only header before the final plan redraw.
+function begin_storage_config_collection_once() {
+    if [ "$STORAGE_CONFIG_COLLECTION_SHOWN" != "yes" ]; then
+        section "STORAGE CONFIG / PLAN"
+        STORAGE_CONFIG_COLLECTION_SHOWN="yes"
+    fi
+}
+
+function clear_storage_config_collection_block() {
+    [ "$STORAGE_CONFIG_COLLECTION_SHOWN" == "yes" ] || return 0
+
+    if [ -w /dev/tty ]; then
+        # Clear the collection-only section header: blank line, border, title, border.
+        tty_print "\033[4A\033[K\033[1B\033[K\033[1B\033[K\033[1B\033[K\033[3A"
+    fi
+
+    STORAGE_CONFIG_COLLECTION_SHOWN="cleared"
+}
+
 # --- 40. STORAGE NAME INPUTS ---
 # Collects VG, thinpool and Proxmox storage ID with validation.
 function collect_storage_names() {
     local valid_names="no"
 
-    section "STORAGE CONFIG / PLAN"
+    begin_storage_config_collection_once
 
     set_adaptive_storage_defaults
 
@@ -2070,6 +2103,8 @@ function validate_secondary_storage_plan() {
 }
 
 function display_storage_plan() {
+    clear_storage_config_collection_block
+
     echo ""
     section "STORAGE CONFIG / PLAN"
 
@@ -2099,10 +2134,19 @@ function display_storage_plan() {
     echo -e "  ${BL}Reserve free VG:${CL} ${ANS}${VG_RESERVE_GB} GB${CL}"
     echo -e "  ${BL}Safety overhead:${CL} ${GN}${VG_SAFETY_OVERHEAD_GB} GB${CL}"
     echo -e "  ${BL}Max thinpool data:${CL} ${GN}${THINPOOL_MAX_DATA_GB} GB${CL}"
+    echo ""
+
+    echo -e "${YW}Final warning:${CL}"
+    echo -e "  ${RD}All data on ${SELECTED_DISK} will be destroyed.${CL}"
+    if [ "$SELECTED_DISK_ACTION" == "recreate" ]; then
+        echo -e "  ${RD}Existing matching Proxmox storage on this disk will be replaced.${CL}"
+    fi
 }
 
 function collect_thinpool_sizing() {
     local reserve_default=""
+
+    begin_storage_config_collection_once
 
     reserve_default="$(default_vg_reserve_gb)"
     THINPOOL_METADATA_GB="$(timed_number_input "Set thinpool metadata size in GB" "1" "1" "" "quiet")"
@@ -2126,6 +2170,8 @@ function collect_thinpool_allocation() {
 # --- 43. CONTENT TYPE SELECTION ---
 # Sets storage content types. Defaults support VM images, containers and backups.
 function collect_content_types() {
+    begin_storage_config_collection_once
+
     CONTENT_TYPES="$(timed_text_input "Enter Proxmox content types" "$CONTENT_TYPES" "quiet")"
     CONTENT_TYPES="$(echo "$CONTENT_TYPES" | tr -d ' ' | sed 's/,,*/,/g; s/^,//; s/,$//')"
 
@@ -2138,13 +2184,6 @@ function final_destructive_confirmation() {
     local final_yn=""
 
     echo ""
-    echo -e "${YW}Final warning:${CL}"
-    echo -e "  ${RD}All data on ${SELECTED_DISK} will be destroyed.${CL}"
-    if [ "$SELECTED_DISK_ACTION" == "recreate" ]; then
-        echo -e "  ${RD}Existing matching Proxmox storage on this disk will be replaced.${CL}"
-    fi
-    echo ""
-
     final_yn="$(timed_yes_no "Proceed with disk wipe and storage creation?" "n")"
     if [[ "$final_yn" =~ ^[Nn] ]]; then
         msg_error "Aborted by user."
@@ -2598,10 +2637,6 @@ function create_verification_report() {
     local scheduler_file=""
     local scheduler_actual="unknown"
 
-    section "VERIFICATION"
-
-    msg_info "Creating immediate verification report"
-
     report_body="$(mktemp)"
     machine_log="$(mktemp)"
     TEMP_FILES+=("$report_body" "$machine_log")
@@ -2971,16 +3006,6 @@ function create_verification_report() {
         echo -e "${YW}LOGS:${CL}"
         echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_FILE}${CL}"
     } > "$VERIFY_FILE"
-
-    if [ "$VERIFY_STATUS" == "FAIL" ]; then
-        msg_warn "Verification status: ${VERIFY_STATUS}"
-    elif [ "$VERIFY_STATUS" == "PASS_WITH_WARNINGS" ]; then
-        msg_warn "Verification status: ${VERIFY_STATUS}"
-    else
-        msg_ok "Verification report written"
-        msg_ok "Verification status: ${VERIFY_STATUS}"
-    fi
-    echo -e "  ${BL}Log:${CL} ${GN}${VERIFY_FILE}${CL}"
 
     rm -f "$report_body" "$machine_log"
 }
