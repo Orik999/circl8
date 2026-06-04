@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.3.7"
+SCRIPT_VERSION="v1.3.6"
 SCRIPT_UPDATED="2026-06-04"
-SCRIPT_BUILD="gpu-ui-script1-source"
+SCRIPT_BUILD="verification-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -68,13 +68,6 @@ DGPU_BDFS=""
 DGPU_VENDOR_IDS=""
 GPU_SUMMARY=""
 GPU_DETECTION_STATUS="ok"
-SCRIPT1_GPU_SOURCE=""
-SCRIPT1_INTEGRATED_GPU="unknown"
-SCRIPT1_DISCRETE_GPU="unknown"
-SCRIPT1_DISCRETE_GPU_VRAM="unknown"
-SCRIPT1_DGPU_DRIVER="unknown"
-SCRIPT1_VFIO_IDLE_D3="unknown"
-SCRIPT1_VFIO_WARNING="unknown"
 
 STORAGE_ID=""
 STORAGE_TYPE=""
@@ -832,8 +825,8 @@ function handle_existing_vmid() {
     echo ""
     echo -e "${YW}Choose action:${CL}"
     echo -e "  ${RD}1) Destroy and recreate VM ${VMID}${CL}"
-    echo -e "  ${GN}2) Choose another VM ID${CL}"
-    echo -e "  ${BL}3) Exit without changes${CL}"
+    echo -e "  ${YW}2) Choose another VM ID${CL}"
+    echo -e "  ${YW}3) Exit without changes${CL}"
     echo ""
 
     action="$(timed_number_input "Select existing VM action" "1" "1" "3")"
@@ -1340,132 +1333,6 @@ function gpu_display_name_for_bdf() {
     echo "GPU [${bdf}]"
 }
 
-
-function clean_script1_gpu_value() {
-    local value="$1"
-
-    value="$(echo "$value" | sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g; s/^[[:space:]]+//; s/[[:space:]]+$//')"
-    value="${value#- }"
-    value="${value#*: }"
-    echo "${value:-unknown}"
-}
-
-function extract_script1_field() {
-    local file="$1"
-    local label="$2"
-    local key="$3"
-    local value=""
-
-    [ -r "$file" ] || return 0
-
-    value="$(awk -F': ' -v label="$label" '$0 ~ label ":" {sub(/^.*" label ":[[:space:]]*/, ""); print; exit}' "$file" 2>/dev/null || true)"
-    if [ -z "$value" ] && [ -n "$key" ]; then
-        value="$(awk -F'=' -v key="$key" '$1 == key {print $2; exit}' "$file" 2>/dev/null || true)"
-    fi
-
-    [ -n "$value" ] || return 0
-    clean_script1_gpu_value "$value"
-}
-
-function latest_script1_health_log() {
-    local candidate=""
-
-    candidate="$(ls -1t /root/circl8-script1-final-health-*.log 2>/dev/null | head -n 1 || true)"
-    [ -n "$candidate" ] && echo "$candidate"
-}
-
-function load_script1_gpu_summary() {
-    local files=()
-    local latest_health=""
-    local file=""
-    local value=""
-
-    latest_health="$(latest_script1_health_log)"
-    [ -n "$latest_health" ] && files+=("$latest_health")
-    files+=(
-        "/root/.pve9-postinstall-completed"
-        "/var/log/pve9-postinstall-verify-display.log"
-        "/var/log/pve9-postinstall-verify.log"
-    )
-
-    for file in "${files[@]}"; do
-        [ -r "$file" ] || continue
-
-        value="$(extract_script1_field "$file" "Integrated GPU" "INTEGRATED_GPU")"
-        if [ -n "$value" ] && [ "$value" != "unknown" ]; then
-            SCRIPT1_INTEGRATED_GPU="$value"
-            [ -z "$SCRIPT1_GPU_SOURCE" ] && SCRIPT1_GPU_SOURCE="$file"
-        fi
-
-        value="$(extract_script1_field "$file" "Discrete GPU VRAM" "DISCRETE_GPU_VRAM")"
-        if [ -n "$value" ] && [ "$value" != "unknown" ]; then
-            SCRIPT1_DISCRETE_GPU_VRAM="$value"
-            [ -z "$SCRIPT1_GPU_SOURCE" ] && SCRIPT1_GPU_SOURCE="$file"
-        fi
-
-        value="$(extract_script1_field "$file" "Discrete GPU" "DISCRETE_GPU")"
-        if [ -n "$value" ] && [ "$value" != "unknown" ]; then
-            SCRIPT1_DISCRETE_GPU="$value"
-            [ -z "$SCRIPT1_GPU_SOURCE" ] && SCRIPT1_GPU_SOURCE="$file"
-        fi
-
-        value="$(extract_script1_field "$file" "dGPU driver" "DGPU_DRIVER")"
-        if [ -n "$value" ] && [ "$value" != "unknown" ]; then
-            SCRIPT1_DGPU_DRIVER="$value"
-            [ -z "$SCRIPT1_GPU_SOURCE" ] && SCRIPT1_GPU_SOURCE="$file"
-        fi
-
-        value="$(extract_script1_field "$file" "VFIO idle D3 disabled" "VFIO_IDLE_D3_DISABLED")"
-        if [ -n "$value" ] && [ "$value" != "unknown" ]; then
-            SCRIPT1_VFIO_IDLE_D3="$value"
-            [ -z "$SCRIPT1_GPU_SOURCE" ] && SCRIPT1_GPU_SOURCE="$file"
-        fi
-
-        value="$(extract_script1_field "$file" "VFIO not-ready warning" "VFIO_NOT_READY_WARNING")"
-        if [ -n "$value" ] && [ "$value" != "unknown" ]; then
-            SCRIPT1_VFIO_WARNING="$value"
-            [ -z "$SCRIPT1_GPU_SOURCE" ] && SCRIPT1_GPU_SOURCE="$file"
-        fi
-    done
-
-    if [ "$SCRIPT1_INTEGRATED_GPU" == "unknown" ] && [ -n "$IGPU_LINES" ]; then
-        SCRIPT1_INTEGRATED_GPU="$(echo "$IGPU_LINES" | awk 'NF {print; exit}')"
-    fi
-    if [ "$SCRIPT1_DISCRETE_GPU" == "unknown" ] && [ -n "$DGPU_BDFS" ]; then
-        SCRIPT1_DISCRETE_GPU="$(gpu_display_name_for_bdf "$(echo "$DGPU_BDFS" | awk '{print $1}')")"
-    fi
-}
-
-function first_discrete_gpu_bdf() {
-    echo "$DGPU_BDFS" | awk '{print $1}'
-}
-
-function discrete_gpu_display_name() {
-    local gpu_pci_id=""
-
-    if [ "$SCRIPT1_DISCRETE_GPU" != "unknown" ]; then
-        echo "$SCRIPT1_DISCRETE_GPU"
-        return 0
-    fi
-
-    gpu_pci_id="$(first_discrete_gpu_bdf)"
-    if [ -n "$gpu_pci_id" ]; then
-        gpu_display_name_for_bdf "$gpu_pci_id"
-    else
-        echo "unknown"
-    fi
-}
-
-function print_gpu_vfio_summary() {
-    echo -e "${YW}GPU / VFIO:${CL}"
-    echo -e "  ${BL}Integrated GPU:${CL} ${GN}${SCRIPT1_INTEGRATED_GPU}${CL}"
-    echo -e "  ${BL}Discrete GPU:${CL} ${GN}${SCRIPT1_DISCRETE_GPU}${CL}"
-    echo -e "  ${BL}Discrete GPU VRAM:${CL} ${GN}${SCRIPT1_DISCRETE_GPU_VRAM}${CL}"
-    echo -e "  ${BL}dGPU driver:${CL} ${GN}${SCRIPT1_DGPU_DRIVER}${CL}"
-    echo -e "  ${BL}VFIO idle D3 disabled:${CL} ${GN}${SCRIPT1_VFIO_IDLE_D3}${CL}"
-    echo -e "  ${BL}VFIO not-ready warning:${CL} ${GN}${SCRIPT1_VFIO_WARNING}${CL}"
-}
-
 # --- 30. SAME-SLOT GPU FUNCTION HELPER ---
 # Returns every PCI function in the same slot as the selected GPU.
 # Example: 0000:01:00.0 -> 0000:01:00.0 0000:01:00.1 ...
@@ -1740,7 +1607,6 @@ function audit_system_resources() {
 function audit_gpu_hardware() {
     detect_gpus_sysfs
     GPU_SUMMARY="$(build_gpu_summary)"
-    load_script1_gpu_summary
 
     if [ -n "$GPU_ALL" ]; then
         GPU_DETECTION_STATUS="ok"
@@ -1789,7 +1655,10 @@ function show_system_audit() {
     echo -e "  ${BL}System RAM:${CL} ${GN}${TOTAL_RAM_GB}GB${CL}"
 
     echo ""
-    print_gpu_vfio_summary
+    echo -e "${YW}GPU:${CL}"
+    print_gpu_group "Integrated" "$IGPU_LINES" "host/laptop display"
+    echo ""
+    print_gpu_group "Discrete" "$DGPU_LINES" "VM passthrough candidate"
 
     echo ""
     echo -e "${YW}Storage availability:${CL}"
@@ -2090,27 +1959,36 @@ function collect_gpu_passthrough_option() {
     local gpu_yn=""
     local gpu_pci_id=""
     local gpu_display_name=""
+    local gpu_func=""
+    local gpu_function_count="0"
 
-    section "GPU PASSTHROUGH"
+    section "GPU OPTION"
 
     if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
-        gpu_pci_id="$(first_discrete_gpu_bdf)"
-        gpu_display_name="$(discrete_gpu_display_name)"
+        gpu_pci_id="$(echo "$DGPU_BDFS" | awk '{print $1}')"
+        gpu_display_name="$(gpu_display_name_for_bdf "$gpu_pci_id")"
         GPU_SAME_SLOT_BDFS="$(get_same_slot_functions_for_bdf "$gpu_pci_id")"
         [ -z "$GPU_SAME_SLOT_BDFS" ] && GPU_SAME_SLOT_BDFS="$gpu_pci_id"
 
-        echo -e "${YW}Candidate:${CL}"
-        echo -e "  ${BL}GPU:${CL} ${GN}${gpu_display_name}${CL}"
-        echo -e "  ${BL}VRAM:${CL} ${GN}${SCRIPT1_DISCRETE_GPU_VRAM}${CL}"
-        echo -e "  ${BL}PCI:${CL} ${GN}${gpu_pci_id}${CL}"
-        echo -e "  ${BL}Driver:${CL} ${GN}${SCRIPT1_DGPU_DRIVER}${CL}"
-        echo ""
-        echo -e "${YW}Recommendation:${CL}"
-        echo -e "  ${YW}Optional. Leave disabled for initial Ubuntu install.${CL}"
-        echo -e "  ${YW}Enable later after VM base install/snapshot if needed.${CL}"
+        gpu_function_count="$(wc -w <<< "$GPU_SAME_SLOT_BDFS" | xargs)"
+
+        echo -e "${YW}Discrete GPU:${CL}"
+        echo -e "  ${BL}name:${CL} ${GN}${gpu_display_name}${CL}"
+        echo -e "  ${BL}passthrough role:${CL} ${YW}optional / not required initially${CL}"
+
+        if [ "$gpu_function_count" -le 1 ]; then
+            echo -e "  ${BL}passthrough device:${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
+        else
+            echo ""
+            echo -e "${BL}Related same-card functions:${CL}"
+            for gpu_func in $GPU_SAME_SLOT_BDFS; do
+                echo -e "  - ${GN}${gpu_func}${CL}"
+            done
+            echo -e "${YW}Note: these functions belong to the same physical GPU/card and may need to be passed together.${CL}"
+        fi
         echo ""
 
-        gpu_yn="$(timed_yes_no "Add discrete GPU to VM?" "n")"
+        gpu_yn="$(timed_yes_no "Add DISCRETE GPU to VM?" "n")"
 
         if [[ "$gpu_yn" =~ ^[Yy] ]]; then
             ENABLE_GPU="y"
@@ -2119,11 +1997,7 @@ function collect_gpu_passthrough_option() {
         fi
     else
         ENABLE_GPU="n"
-        echo -e "${YW}Candidate:${CL}"
-        echo -e "  ${BL}none detected${CL}"
-        echo ""
-        echo -e "${YW}Result:${CL}"
-        echo -e "  ${GN}GPU passthrough will be skipped.${CL}"
+        msg_ok "NO DISCRETE GPU PASSTHROUGH TARGET FOUND"
     fi
 
     return 0
@@ -2739,14 +2613,20 @@ function show_final_summary() {
         echo ""
     fi
 
-    echo -e "${YW}GPU:${CL}"
-    echo -e "  ${BL}Passthrough:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
+    echo -e "${YW}GPU SUMMARY:${CL}"
+    echo -e "  ${BL}GPU PASSTHROUGH:${CL} ${ANS}$(yes_no_label "$ENABLE_GPU")${CL}"
     if [ "$ENABLE_GPU" == "y" ] && [ -n "$GPU_FUNCTIONS_ATTACHED" ]; then
-        echo -e "  ${BL}Device:${CL} ${GN}$(discrete_gpu_display_name)${CL}"
-        echo -e "  ${BL}VRAM:${CL} ${GN}${SCRIPT1_DISCRETE_GPU_VRAM}${CL}"
-        echo -e "  ${BL}PCI:${CL} ${GN}${GPU_FUNCTIONS_ATTACHED}${CL}"
+        gpu_function_count="$(wc -w <<< "$GPU_FUNCTIONS_ATTACHED" | xargs)"
+        if [ "$gpu_function_count" -le 1 ]; then
+            echo -e "  ${BL}GPU DEVICE:${CL} ${GN}${GPU_FUNCTIONS_ATTACHED}${CL}"
+        else
+            echo -e "  ${BL}GPU DEVICES:${CL}"
+            for gpu_func in $GPU_FUNCTIONS_ATTACHED; do
+                echo -e "    - ${GN}${gpu_func}${CL}"
+            done
+        fi
     else
-        echo -e "  ${BL}Device:${CL} ${ANS}not attached${CL}"
+        echo -e "  ${BL}GPU DEVICES:${CL} ${ANS}not attached${CL}"
     fi
     echo ""
 
