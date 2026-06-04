@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.5.3"
+SCRIPT_VERSION="v1.5.4"
 SCRIPT_UPDATED="2026-06-04"
-SCRIPT_BUILD="verified-sizing-monitor-fix"
+SCRIPT_BUILD="scenario-aware-final-warning"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -1457,8 +1457,8 @@ function choose_selected_disk_action() {
     case "$SELECTED_DISK_STATUS" in
         fresh)
             echo -e "${YW}Status:${CL}"
-            echo -e "  ${BL}State:${CL} ${GN}fresh disk${CL}"
-            echo -e "  ${BL}Risk:${CL} ${GN}none detected${CL}"
+            echo -e "  ${BL}State:${CL} ${GN}Fresh Disk${CL}"
+            echo -e "  ${BL}Risk:${CL} ${GN}None Detected${CL}"
             echo ""
             echo -e "${YW}Action:${CL}"
             echo -e "  ${BL}1)${CL} ${GN}LVM-thin VM storage, snapshot-ready recommended${CL}"
@@ -1473,8 +1473,8 @@ function choose_selected_disk_action() {
             ;;
         data-detected)
             echo -e "${YW}Status:${CL}"
-            echo -e "  ${BL}State:${CL} ${YW}data detected${CL}"
-            echo -e "  ${BL}Risk:${CL} ${RD}Destructive Reuse / existing data${CL}"
+            echo -e "  ${BL}State:${CL} ${YW}Data Detected${CL}"
+            echo -e "  ${BL}Risk:${CL} ${RD}Destructive Reuse / Existing Data${CL}"
             echo ""
             print_selected_data_risk_report "$DATA_RISK_REPORT"
             if [ -n "$EXISTING_VGS_ON_SELECTED_DISK" ]; then
@@ -1735,8 +1735,8 @@ function show_disk_lists() {
             echo -e "       ${BL}MODE:${CL} ${RD}DESTRUCTIVE REUSE${CL}"
             echo -e "       ${YW}DATA RISK:${CL} ${YL}Existing Metadata Detected${CL}"
         else
-            echo -e "       ${BL}MODE:${CL} ${GN}clean storage candidate${CL}"
-            echo -e "       ${BL}DATA RISK:${CL} ${GN}none detected${CL}"
+            echo -e "       ${BL}MODE:${CL} ${GN}Clean Storage Candidate${CL}"
+            echo -e "       ${BL}DATA RISK:${CL} ${GN}None Detected${CL}"
         fi
     done
 
@@ -2278,8 +2278,30 @@ function validate_secondary_storage_plan() {
     fi
 }
 
+function final_confirmation_prompt() {
+    if [ "$SELECTED_DISK_ACTION" == "create" ] && [ "$HAS_DATA" == "no" ]; then
+        echo "Proceed with storage creation?"
+    else
+        echo "Proceed with disk wipe and storage creation?"
+    fi
+}
+
+function print_final_storage_notice() {
+    if [ "$SELECTED_DISK_ACTION" == "create" ] && [ "$HAS_DATA" == "no" ]; then
+        echo -e "${YW}Final notice:${CL}"
+        echo -e "  ${ANS}${SELECTED_DISK}${CL} ${GN}will be initialized as new Proxmox LVM-thin storage.${CL}"
+        echo -e "  ${GN}No existing data/signatures were detected.${CL}"
+    elif [ "$SELECTED_DISK_ACTION" == "recreate" ] && [ "$SELECTED_DISK_STATUS" == "previous-script2" ]; then
+        echo -e "${YW}Final warning:${CL}"
+        echo -e "  ${YW}Existing matching Proxmox storage on ${ANS}${SELECTED_DISK}${CL}${YW} will be replaced.${CL}"
+        echo -e "  ${RD}Old LVM metadata on this disk will be destroyed.${CL}"
+    else
+        echo -e "${YW}Final warning:${CL}"
+        echo -e "  ${RD}All detected data/signatures on ${ANS}${SELECTED_DISK}${CL}${RD} will be destroyed.${CL}"
+    fi
+}
+
 function display_storage_plan() {
-    echo ""
     section "STORAGE CONFIG / PLAN"
 
     echo -e "${YW}Disk:${CL}"
@@ -2310,11 +2332,7 @@ function display_storage_plan() {
     echo -e "  ${BL}Max thinpool data:${CL} ${GN}${THINPOOL_MAX_DATA_GB} GB${CL}"
     echo ""
 
-    echo -e "${YW}Final warning:${CL}"
-    echo -e "  ${RD}All data on ${SELECTED_DISK} will be destroyed.${CL}"
-    if [ "$SELECTED_DISK_ACTION" == "recreate" ]; then
-        echo -e "  ${RD}Existing matching Proxmox storage on this disk will be replaced.${CL}"
-    fi
+    print_final_storage_notice
 }
 
 function collect_thinpool_sizing() {
@@ -2351,9 +2369,12 @@ function collect_content_types() {
 # Final destructive confirmation before wiping disk.
 function final_destructive_confirmation() {
     local final_yn=""
+    local prompt=""
+
+    prompt="$(final_confirmation_prompt)"
 
     echo ""
-    final_yn="$(timed_yes_no "Proceed with disk wipe and storage creation?" "n")"
+    final_yn="$(timed_yes_no "$prompt" "n")"
     if [[ "$final_yn" =~ ^[Nn] ]]; then
         msg_error "Aborted by user."
     fi
