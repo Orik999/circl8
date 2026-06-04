@@ -1995,6 +1995,7 @@ function storage_config_read_number() {
 
 function show_storage_config_collection_header_once() {
     if [ "$STORAGE_CONFIG_COLLECTION_SHOWN" != "yes" ]; then
+        echo ""
         echo -e "${BORDER}"
         echo -e "${BL}STORAGE CONFIG / PLAN${CL}"
         echo -e "${BORDER}"
@@ -3263,7 +3264,6 @@ function show_iso_next_step_reminder() {
     section "Next Step"
 
     echo -e "${YW}Upload Ubuntu Server ISO:${CL}"
-    echo ""
     echo -e "  ${BL}Proxmox Web UI:${CL}"
     echo -e "    ${GN}https://${proxmox_ip}:8006${CL}${DGN} > ${proxmox_node} > local > ISO Images > Upload${CL}"
     echo ""
@@ -3462,7 +3462,6 @@ function show_final_summary() {
         echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
     fi
     show_verify_issue_previews
-    echo ""
     echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_FILE}${CL}"
 
     show_iso_next_step_reminder
