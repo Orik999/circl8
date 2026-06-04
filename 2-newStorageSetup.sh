@@ -1731,7 +1731,7 @@ function show_disk_lists() {
 
         if [ "$entry_type" == "destructive-reuse" ]; then
             echo -e "       ${BL}MODE:${CL} ${RD}DESTRUCTIVE REUSE${CL}"
-            echo -e "       ${YW}DATA RISK: ${YW}Existing Metadata Detected${CL}"
+            echo -e "       ${YW}DATA RISK: ${BL}${YW}Existing Metadata Detected${CL}"
         else
             echo -e "       ${BL}MODE:${CL} ${GN}clean storage candidate${CL}"
             echo -e "       ${BL}DATA RISK:${CL} ${GN}none detected${CL}"
