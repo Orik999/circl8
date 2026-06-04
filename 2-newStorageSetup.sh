@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="2-newStorageSetup.sh"
-SCRIPT_VERSION="v1.4.7"
+SCRIPT_VERSION="v1.4.8"
 SCRIPT_UPDATED="2026-06-03"
-SCRIPT_BUILD="storage-config-loop-removal"
+SCRIPT_BUILD="single-storage-config-plan-flow"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
@@ -124,7 +124,7 @@ function header_info {
     echo -e "${DGN}  ███████║    ██║    ╚██████╔╝ ██║  ██║ ██║  ██║ ╚██████╔╝ ███████╗${CL}"
     echo -e "${DGN}  ╚══════╝    ╚═╝     ╚═════╝  ╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝  ╚══════╝${CL}"
     echo -e "${YW}${CLF}                             Storage Setup                    ${CL}"
-    echo -e "${BL}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+    echo -e "${BL}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 }
 # --- 4. MESSAGE HELPER FUNCTIONS ---
 # Provides consistent status messages for display -> apply -> success flow.
@@ -1731,7 +1731,7 @@ function show_disk_lists() {
 
         if [ "$entry_type" == "destructive-reuse" ]; then
             echo -e "       ${BL}MODE:${CL} ${RD}DESTRUCTIVE REUSE${CL}"
-            echo -e "       ${YW}DATA RISK: ${BL}${YW}Existing Metadata Detected${CL}"
+            echo -e "       ${YW}DATA RISK:${CL} ${BL}${YW}Existing Metadata Detected${CL}"
         else
             echo -e "       ${BL}MODE:${CL} ${GN}clean storage candidate${CL}"
             echo -e "       ${BL}DATA RISK:${CL} ${GN}none detected${CL}"
@@ -1902,8 +1902,6 @@ function clear_storage_config_collection_block() {
 # --- 40. STORAGE NAME INPUTS ---
 # Collects VG, thinpool and Proxmox storage ID with validation.
 function collect_storage_names() {
-    begin_storage_config_collection_once
-
     set_adaptive_storage_defaults
 
     VG_NAME="$(timed_text_input "Enter VG name" "$VG_NAME_DEFAULT" "quiet")"
@@ -2138,8 +2136,6 @@ function display_storage_plan() {
 function collect_thinpool_sizing() {
     local reserve_default=""
 
-    begin_storage_config_collection_once
-
     reserve_default="$(default_vg_reserve_gb)"
     THINPOOL_METADATA_GB="$(timed_number_input "Set thinpool metadata size in GB" "1" "1" "" "quiet")"
     VG_RESERVE_GB="$(timed_number_input "Reserve free VG space in GB" "$reserve_default" "0" "" "quiet")"
@@ -2152,9 +2148,6 @@ function collect_thinpool_sizing() {
     THINPOOL_DATA_GB="$(timed_number_input "Set thinpool data size in GB" "$THINPOOL_MAX_DATA_GB" "1" "$THINPOOL_MAX_DATA_GB" "quiet")"
     calculate_secondary_storage_plan "$DISK_SIZE_GB"
     validate_secondary_storage_plan "$DISK_SIZE_GB"
-
-    clear_storage_config_collection_block
-    display_storage_plan
 }
 
 function collect_thinpool_allocation() {
@@ -2164,8 +2157,6 @@ function collect_thinpool_allocation() {
 # --- 43. CONTENT TYPE SELECTION ---
 # Sets storage content types. Defaults support VM images, containers and backups.
 function collect_content_types() {
-    begin_storage_config_collection_once
-
     CONTENT_TYPES="$(timed_text_input "Enter Proxmox content types" "$CONTENT_TYPES" "quiet")"
     CONTENT_TYPES="$(echo "$CONTENT_TYPES" | tr -d ' ' | sed 's/,,*/,/g; s/^,//; s/,$//')"
 
@@ -2184,6 +2175,21 @@ function final_destructive_confirmation() {
     fi
 
     return 0
+}
+
+# --- SINGLE STORAGE CONFIG / PLAN FLOW ---
+# Owns all storage config collection, final plan redraw and final destructive confirmation.
+function collect_storage_config_and_show_final_plan() {
+    begin_storage_config_collection_once
+
+    collect_storage_names
+    collect_content_types
+    check_storage_conflicts
+    collect_thinpool_sizing
+
+    clear_storage_config_collection_block
+    display_storage_plan
+    final_destructive_confirmation
 }
 
 # --- MATCHING STORAGE REGISTRATION REMOVAL FOR RECREATE ---
@@ -3128,11 +3134,7 @@ function main() {
         run_existing_storage_validate_register_path
     fi
 
-    collect_storage_names
-    check_storage_conflicts
-    collect_content_types
-    collect_thinpool_sizing
-    final_destructive_confirmation
+    collect_storage_config_and_show_final_plan
 
     remove_matching_proxmox_storage_for_recreate
     destroy_existing_lvm_on_selected_disk
