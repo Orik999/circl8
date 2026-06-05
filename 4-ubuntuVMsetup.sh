@@ -24,6 +24,7 @@ BL="$(printf '\033[36m')"
 RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
 GN="$(printf '\033[1;92m')"
+ANS="$(printf '\033[1;95m')"
 DGN="$(printf '\033[32m')"
 CL="$(printf '\033[m')"
 CLF="$(printf '\033[5m')"
@@ -36,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.2"
-SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="script4-host-guard-ssh-hint"
+SCRIPT_VERSION="v2.1.4"
+SCRIPT_UPDATED="2026-06-05"
+SCRIPT_BUILD="previous-marker-ui-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -47,6 +48,14 @@ REBOOT_T=30
 LOG_FILE="/var/log/ubuntu-vm-setup.log"
 RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/ubuntu-vm-setup-verify.log"
+VERIFY_STATUS="not-run"
+VERIFY_PASS_COUNT="0"
+VERIFY_WARN_COUNT="0"
+VERIFY_FAIL_COUNT="0"
+VERIFY_FIRST_ISSUE_TYPE=""
+VERIFY_FIRST_ISSUE_CHECK=""
+VERIFY_FIRST_ISSUE_REASON=""
+VERIFY_FIRST_ISSUE_FIX=""
 COMPLETED_MARKER="/root/.ubuntu-vm-setup-completed"
 
 DEFAULT_USERNAME="${DEFAULT_USERNAME:-orik}"
@@ -99,6 +108,10 @@ ROOT_SOURCE=""
 ROOT_LV_PATH=""
 VG_NAME=""
 VG_FREE_BYTES="0"
+ROOT_FS_BEFORE_GB="unknown"
+ROOT_FS_AFTER_GB="unknown"
+APPLY_CHANGES_SECTION_SHOWN="no"
+APPLY_CURRENT_GROUP=""
 
 # =========================================================
 #  OUTPUT / LOGGING FUNCTIONS
@@ -120,7 +133,7 @@ ${CL}"
 function msg_info() { local text="${1:-}"; echo -ne " ${HOLD} ${YW}${text}...${CL}"; }
 function msg_ok() { local text="${1:-}"; echo -e "${BFR} ${CM} ${GN}${text}${CL}"; }
 function msg_warn() { local text="${1:-}"; echo -e "${BFR} ${WARN} ${YW}${text}${CL}"; }
-function msg_skip() { local text="${1:-}"; echo -e "${BFR} ${WARN} ${YW}${text}${CL}"; }
+function msg_skip() { local text="${1:-}"; echo -e "${BFR} - ${BL}INFO${CL} - ${YW}${text}${CL}"; }
 function msg_error() { local text="${1:-Unknown error}"; echo -e "${BFR} ${CROSS} ${RD}${text}${CL}"; exit 1; }
 
 # --- SCRIPT VERSION DISPLAY ---
@@ -144,6 +157,49 @@ function section_flash_success() {
     echo -e "${BORDER}"
     echo -e "${GN}${CLF}$1${CL}"
     echo -e "${BORDER}"
+}
+
+function begin_apply_changes_once() {
+    if [ "$APPLY_CHANGES_SECTION_SHOWN" != "yes" ]; then
+        section "APPLY CHANGES"
+        APPLY_CHANGES_SECTION_SHOWN="yes"
+    fi
+}
+
+function apply_group_header() {
+    local title="${1:-}"
+
+    begin_apply_changes_once
+
+    if [ "${APPLY_CURRENT_GROUP:-}" == "$title" ]; then
+        return 0
+    fi
+
+    APPLY_CURRENT_GROUP="$title"
+    echo ""
+    echo -e "${YW}${title}:${CL}"
+}
+
+function bytes_to_gb_display() {
+    local bytes="${1:-0}"
+
+    if ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        echo "unknown"
+        return 0
+    fi
+
+    awk -v b="$bytes" 'BEGIN { printf "%.2f GB", b / 1024 / 1024 / 1024 }'
+}
+
+function get_root_filesystem_size_gb() {
+    local size_kb=""
+
+    size_kb="$(df -k / 2>/dev/null | awk 'NR==2 {print $2; exit}' || true)"
+    if [[ "$size_kb" =~ ^[0-9]+$ ]]; then
+        awk -v kb="$size_kb" 'BEGIN { printf "%.2f GB", kb / 1024 / 1024 }'
+    else
+        echo "unknown"
+    fi
 }
 
 # --- 5B. DETAIL LINE HELPER ---
@@ -671,6 +727,54 @@ function marker_value() {
     awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }' "$file" 2>/dev/null | xargs || true
 }
 
+function marker_value_or_unknown_for_display() {
+    local label="$1"
+    local file="$2"
+    local value=""
+
+    if root_file_exists "$file"; then
+        value="$(root_cat_file "$file" 2>/dev/null | awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }' | xargs || true)"
+    fi
+
+    [ -n "$value" ] || value="unknown"
+    echo "$value"
+}
+
+function show_previous_marker_compact_summary() {
+    local marker_file="$1"
+    local completed=""
+    local username=""
+    local virt_type=""
+    local is_container=""
+    local is_vm=""
+    local environment="unknown"
+
+    completed="$(marker_value_or_unknown_for_display "Ubuntu VM Setup completed on" "$marker_file")"
+    username="$(marker_value_or_unknown_for_display "Username" "$marker_file")"
+    virt_type="$(marker_value_or_unknown_for_display "Virt Type" "$marker_file")"
+    is_container="$(marker_value_or_unknown_for_display "Container" "$marker_file")"
+    is_vm="$(marker_value_or_unknown_for_display "VM" "$marker_file")"
+
+    if [ "$is_container" == "yes" ]; then
+        environment="Container (${virt_type})"
+    elif [ "$is_vm" == "yes" ]; then
+        environment="VM (${virt_type})"
+    elif [ "$virt_type" != "unknown" ]; then
+        environment="$virt_type"
+    fi
+
+    echo -e "${YW}Existing setup:${CL}"
+    echo -e "  ${BL}Completed:${CL} ${GN}${completed}${CL}"
+    echo -e "  ${BL}Username:${CL} ${GN}${username}${CL}"
+    echo -e "  ${BL}Environment:${CL} ${GN}${environment}${CL}"
+    echo -e "  ${BL}SSH keys:${CL} ${GN}$(marker_value_or_unknown_for_display "SSH Keys Configured" "$marker_file")${CL}"
+    echo -e "  ${BL}SSH hardened:${CL} ${GN}$(marker_value_or_unknown_for_display "SSH Hardened" "$marker_file")${CL}"
+    echo -e "  ${BL}Root expanded:${CL} ${GN}$(marker_value_or_unknown_for_display "Root Expanded" "$marker_file")${CL}"
+    echo -e "  ${BL}UFW firewall:${CL} ${GN}$(marker_value_or_unknown_for_display "UFW" "$marker_file")${CL}"
+    echo -e "  ${BL}QEMU guest agent:${CL} ${GN}$(marker_value_or_unknown_for_display "QEMU Agent" "$marker_file")${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}$(marker_value_or_unknown_for_display "Verify Log" "$marker_file")${CL}"
+}
+
 function build_ssh_hint_from_marker() {
     local marker="/root/.ubuntu-autoinstall-seed-completed"
     local marker_text=""
@@ -795,14 +899,15 @@ function check_previous_marker() {
     if root_file_exists "$COMPLETED_MARKER"; then
         section "PREVIOUS UBUNTU VM SETUP MARKER DETECTED"
 
-        echo -e "${YW}A previous Ubuntu VM Setup marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
+        show_previous_marker_compact_summary "$COMPLETED_MARKER"
         echo ""
-        root_cat_file "$COMPLETED_MARKER" 2>/dev/null || true
-        echo ""
+        echo -e "${YW}Action:${CL}"
 
         continue_yn="$(timed_yes_no "Continue anyway?" "n")"
         [[ "$continue_yn" =~ ^[Nn] ]] && exit 0
     fi
+
+    return 0
 }
 
 # =========================================================
@@ -861,13 +966,11 @@ function start_confirmation() {
 
     section "START"
 
-    echo -e "${YW}This script collects all answers first, then applies Ubuntu VM changes in one controlled run.${CL}"
-    echo -e "${YW}Ubuntu Pro attachment is handled before the main package upgrade so Pro/ESM repositories can be used.${CL}"
+    echo -e "${YW}Ubuntu VM setup can configure SSH keys, QEMU guest agent,${CL}"
+    echo -e "${YW}root disk expansion, UFW, SSH hardening, and optional Ubuntu Pro.${CL}"
 
     if [ "$IS_CONTAINER" == "yes" ]; then
-        echo -e "${YW}Container mode detected: QEMU Guest Agent and LVM root expansion will be skipped.${CL}"
-    else
-        echo -e "${YW}VM mode detected: QEMU Guest Agent, LVM root expansion, UFW and SSH hardening can be configured.${CL}"
+        echo -e "${YW}Container mode detected: QEMU Guest Agent and root LVM expansion will be skipped.${CL}"
     fi
 
     echo ""
@@ -876,13 +979,11 @@ function start_confirmation() {
     [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
     return 0
-
-    return 0
 }
 
 # --- 30. USERNAME INPUT ---
 function collect_username() {
-    section "COLLECT INPUTS - USER"
+    section "SETUP OPTIONS"
 
     while true; do
         USERNAME="$(timed_text_input "Enter username" "$DEFAULT_USERNAME")"
@@ -918,7 +1019,8 @@ function collect_username() {
 
 # --- 31. UBUNTU PRO INPUTS ---
 function collect_ubuntu_pro_inputs() {
-    section "COLLECT INPUTS - UBUNTU PRO"
+    echo ""
+    echo -e "${YW}Ubuntu Pro:${CL}"
 
     echo -e "${YW}Ubuntu Pro is optional. If enabled, this script attaches Pro before the main system upgrade.${CL}"
     echo -e "${YW}Token input is not logged and is never written to disk by this script.${CL}"
@@ -963,7 +1065,8 @@ function collect_ubuntu_pro_inputs() {
 
 # --- 32. SYSTEM ACTION INPUTS ---
 function collect_system_action_inputs() {
-    section "COLLECT INPUTS - SYSTEM ACTIONS"
+    echo ""
+    echo -e "${YW}System:${CL}"
 
     RUN_SYSTEM_UPDATE="$(timed_yes_no "Run apt update and full upgrade?" "y")"
 
@@ -987,45 +1090,44 @@ function collect_system_action_inputs() {
 function show_ready_summary_and_confirm() {
     local apply_yn=""
 
-    section "READY TO APPLY"
+    section "SETUP PLAN"
 
-    echo -e "${YW}All questions have been collected. No system-changing setup actions have been applied yet.${CL}"
-    echo ""
-
-    detail_line "Username" "$USERNAME"
-    detail_line "Existing user" "$EXISTING_USER"
-    detail_line "SSH key source" "${SOURCE_KEYS:-none detected}"
-    detail_line "Lock user password" "$(yes_no_label "$LOCK_USER_PASSWORD")"
-    detail_line "SSH hardening" "$(yes_no_label "$APPLY_SSH_HARDENING")"
-
+    echo -e "${YW}User / SSH:${CL}"
+    echo -e "  ${BL}Username:${CL} ${GN}${USERNAME}${CL}"
+    echo -e "  ${BL}Existing user:${CL} ${GN}${EXISTING_USER}${CL}"
+    echo -e "  ${BL}SSH key source:${CL} ${GN}${SOURCE_KEYS:-none detected}${CL}"
+    echo -e "  ${BL}Lock password login:${CL} ${GN}$(yes_no_label "$LOCK_USER_PASSWORD")${CL}"
+    echo -e "  ${BL}SSH hardening:${CL} ${GN}$(yes_no_label "$APPLY_SSH_HARDENING")${CL}"
     if [ "$IS_CONTAINER" == "yes" ]; then
-        detail_line "Environment" "Container/LXC (${VIRT_TYPE})"
+        echo -e "  ${BL}Environment:${CL} ${GN}Container/LXC (${VIRT_TYPE})${CL}"
     else
-        detail_line "Environment" "VM (${VIRT_TYPE})"
+        echo -e "  ${BL}Environment:${CL} ${GN}VM (${VIRT_TYPE})${CL}"
     fi
 
-    detail_line "Attach Ubuntu Pro" "$(yes_no_label "$ATTACH_UBUNTU_PRO")"
+    echo ""
+    echo -e "${YW}Ubuntu Pro:${CL}"
+    echo -e "  ${BL}Attach:${CL} ${GN}$(yes_no_label "$ATTACH_UBUNTU_PRO")${CL}"
     if [[ "$ATTACH_UBUNTU_PRO" =~ ^[Yy] ]]; then
-        detail_line "Enable ESM Apps" "$(yes_no_label "$ENABLE_ESM_APPS")"
-        detail_line "Enable ESM Infra" "$(yes_no_label "$ENABLE_ESM_INFRA")"
-        detail_line "Enable Livepatch" "$(yes_no_label "$ENABLE_LIVEPATCH")"
+        echo -e "  ${BL}ESM Apps:${CL} ${GN}$(yes_no_label "$ENABLE_ESM_APPS")${CL}"
+        echo -e "  ${BL}ESM Infra:${CL} ${GN}$(yes_no_label "$ENABLE_ESM_INFRA")${CL}"
+        echo -e "  ${BL}Livepatch:${CL} ${GN}$(yes_no_label "$ENABLE_LIVEPATCH")${CL}"
     fi
 
-    detail_line "System update" "$(yes_no_label "$RUN_SYSTEM_UPDATE")"
-    detail_line "QEMU Guest Agent" "$(yes_no_label "$INSTALL_QEMU_AGENT")"
-    detail_line "Root LVM expansion" "$(yes_no_label "$EXPAND_ROOT_LVM")"
-    detail_line "UFW firewall" "$(yes_no_label "$CONFIGURE_UFW")"
-    detail_line "System cleanup" "$(yes_no_label "$RUN_SYSTEM_CLEANUP")"
-    detail_line "Auto reboot" "$(yes_no_label "$REBOOT_AFTER_FINISH")"
+    echo ""
+    echo -e "${YW}System:${CL}"
+    echo -e "  ${BL}Upgrade:${CL} ${GN}$(yes_no_label "$RUN_SYSTEM_UPDATE")${CL}"
+    echo -e "  ${BL}QEMU guest agent:${CL} ${GN}$(yes_no_label "$INSTALL_QEMU_AGENT")${CL}"
+    echo -e "  ${BL}Root expansion:${CL} ${GN}$(yes_no_label "$EXPAND_ROOT_LVM")${CL}"
+    echo -e "  ${BL}UFW firewall:${CL} ${GN}$(yes_no_label "$CONFIGURE_UFW")${CL}"
+    echo -e "  ${BL}Cleanup:${CL} ${GN}$(yes_no_label "$RUN_SYSTEM_CLEANUP")${CL}"
+    echo -e "  ${BL}Reboot:${CL} ${GN}$(yes_no_label "$REBOOT_AFTER_FINISH")${CL}"
 
     echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will begin making system changes.${CL}"
+    echo -e "${YW}After confirmation, Ubuntu VM setup changes will be applied.${CL}"
     echo ""
 
-    apply_yn="$(timed_yes_no "Apply this Ubuntu VM setup plan now?" "y")"
+    apply_yn="$(timed_yes_no "Apply this Ubuntu VM setup plan?" "y")"
     [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
-
-    return 0
 
     return 0
 }
@@ -1036,7 +1138,7 @@ function show_ready_summary_and_confirm() {
 
 # --- 34. USER CREATION / REUSE ---
 function apply_user_setup() {
-    section "APPLY - USER / SSH KEYS"
+    apply_group_header "User / SSH"
 
     if [ "$EXISTING_USER" == "no" ]; then
         msg_info "Creating user ${USERNAME}"
@@ -1127,7 +1229,7 @@ function run_pro_enable_service() {
 
 # --- 36. UBUNTU PRO APPLY ---
 function apply_ubuntu_pro() {
-    section "APPLY - UBUNTU PRO"
+    apply_group_header "System"
 
     if [[ ! "$ATTACH_UBUNTU_PRO" =~ ^[Yy] ]]; then
         UBUNTU_PRO_ATTACHED="no"
@@ -1198,7 +1300,7 @@ function apply_ubuntu_pro() {
 
 # --- 37. SYSTEM UPDATE ---
 function update_system_packages() {
-    section "APPLY - SYSTEM UPDATE"
+    apply_group_header "System"
 
     if [[ ! "$RUN_SYSTEM_UPDATE" =~ ^[Yy] ]]; then
         SYSTEM_UPDATED="skipped"
@@ -1222,7 +1324,7 @@ function update_system_packages() {
 
 # --- 38. QEMU GUEST AGENT INSTALL ---
 function install_qemu_guest_agent() {
-    section "APPLY - QEMU GUEST AGENT"
+    apply_group_header "System"
 
     if [ "$IS_CONTAINER" == "yes" ] || [[ ! "$INSTALL_QEMU_AGENT" =~ ^[Yy] ]]; then
         QEMU_AGENT_INSTALLED="skipped"
@@ -1249,7 +1351,7 @@ function install_qemu_guest_agent() {
 
 # --- 39. ROOT FILESYSTEM LVM EXPANSION ---
 function expand_root_lvm_if_possible() {
-    section "APPLY - ROOT DISK EXPANSION"
+    apply_group_header "Root disk expansion"
 
     local root_source=""
     local root_candidate=""
@@ -1265,18 +1367,23 @@ function expand_root_lvm_if_possible() {
     local min_expand_bytes="1073741824"
 
     if [ "$IS_CONTAINER" == "yes" ] || [[ ! "$EXPAND_ROOT_LVM" =~ ^[Yy] ]]; then
+        ROOT_FS_BEFORE_GB="$(get_root_filesystem_size_gb)"
+        ROOT_FS_AFTER_GB="$ROOT_FS_BEFORE_GB"
         ROOT_EXPANDED="skipped"
         msg_skip "ROOT LVM EXPANSION SKIPPED"
         return 0
     fi
 
     if ! command -v lvs >/dev/null 2>&1 || ! command -v vgs >/dev/null 2>&1 || ! command -v lvextend >/dev/null 2>&1; then
+        ROOT_FS_BEFORE_GB="$(get_root_filesystem_size_gb)"
+        ROOT_FS_AFTER_GB="$ROOT_FS_BEFORE_GB"
         ROOT_EXPANDED="not-needed"
         msg_ok "LVM TOOLS NOT FOUND; ROOT LVM EXPANSION NOT NEEDED"
         return 0
     fi
 
     msg_info "Checking root filesystem free space"
+    ROOT_FS_BEFORE_GB="$(get_root_filesystem_size_gb)"
 
     root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
     ROOT_SOURCE="$root_source"
@@ -1314,6 +1421,7 @@ function expand_root_lvm_if_possible() {
 
     if [ -z "$ROOT_LV_PATH" ] || [ -z "$VG_NAME" ]; then
         ROOT_EXPANDED="not-needed"
+        ROOT_FS_AFTER_GB="$ROOT_FS_BEFORE_GB"
         msg_ok "ROOT FILESYSTEM LVM EXPANSION NOT NEEDED"
         detail_line "Root source" "${ROOT_SOURCE:-unknown}"
         detail_line "Resolved root source" "${root_candidate:-unknown}"
@@ -1331,10 +1439,10 @@ function expand_root_lvm_if_possible() {
     [ -z "$vg_free_int" ] && vg_free_int="0"
     VG_FREE_BYTES="$vg_free_int"
 
-    detail_line "Root source" "$ROOT_SOURCE"
-    detail_line "Root LV path" "$ROOT_LV_PATH"
-    detail_line "Volume group" "$VG_NAME"
-    detail_line "Free LVM bytes" "$VG_FREE_BYTES"
+    echo -e "${YW}Root disk expansion:${CL}"
+    echo -e "  ${BL}Root LV:${CL} ${GN}${ROOT_LV_PATH}${CL}"
+    echo -e "  ${BL}Volume group:${CL} ${GN}${VG_NAME}${CL}"
+    echo -e "  ${BL}Free LVM space:${CL} ${GN}$(bytes_to_gb_display "$VG_FREE_BYTES")${CL}"
 
     if [[ "$VG_FREE_BYTES" =~ ^[0-9]+$ ]] && [ "$VG_FREE_BYTES" -gt "$min_expand_bytes" ]; then
         msg_ok "FOUND EMPTY LVM SPACE"
@@ -1342,16 +1450,20 @@ function expand_root_lvm_if_possible() {
         msg_info "Expanding Ubuntu root filesystem"
         run_cmd "expanding Ubuntu root filesystem" lvextend -r -l +100%FREE "$ROOT_LV_PATH"
         ROOT_EXPANDED="yes"
+        ROOT_FS_AFTER_GB="$(get_root_filesystem_size_gb)"
         msg_ok "UBUNTU ROOT FILESYSTEM EXPANDED"
+        echo -e "  ${BL}Result:${CL} ${GN}expanded${CL}"
     else
         ROOT_EXPANDED="not-needed"
+        ROOT_FS_AFTER_GB="$(get_root_filesystem_size_gb)"
         msg_ok "NO EMPTY LVM SPACE FOUND"
+        echo -e "  ${BL}Result:${CL} ${GN}not needed${CL}"
     fi
 }
 
 # --- 40. UFW FIREWALL SETUP ---
 function configure_ufw_firewall() {
-    section "APPLY - FIREWALL"
+    apply_group_header "Firewall"
 
     if [[ ! "$CONFIGURE_UFW" =~ ^[Yy] ]]; then
         UFW_ENABLED="skipped"
@@ -1401,7 +1513,7 @@ function harden_ssh() {
     local effective_permit_root=""
     local effective_kbd_auth=""
 
-    section "APPLY - SSH HARDENING"
+    apply_group_header "SSH hardening"
 
     if [[ ! "$APPLY_SSH_HARDENING" =~ ^[Yy] ]]; then
         SSH_HARDENING_APPLIED="skipped"
@@ -1481,7 +1593,7 @@ function harden_ssh() {
 
 # --- 42. SYSTEM CLEANUP ---
 function clean_system() {
-    section "APPLY - SYSTEM CLEANUP"
+    apply_group_header "System"
 
     if [[ ! "$RUN_SYSTEM_CLEANUP" =~ ^[Yy] ]]; then
         SYSTEM_CLEANED="skipped"
@@ -1502,7 +1614,7 @@ function clean_system() {
 
 # --- 43. COMPLETION MARKER ---
 function write_completion_marker() {
-    section "COMPLETION MARKER"
+    apply_group_header "Marker / verification"
 
     msg_info "Writing completion marker"
 
@@ -1561,9 +1673,170 @@ EOF_MARKER
 
 # --- 44. VERIFICATION REPORT ---
 function create_verification_report() {
-    section "VERIFICATION"
+    apply_group_header "Marker / verification"
 
     msg_info "Creating verification report"
+
+    local report_body=""
+    local effective_config=""
+    local ufw_status=""
+    local ufw_service_state=""
+    local ufw_ssh_rules=""
+
+    report_body="$(mktemp)"
+    TEMP_FILES+=("$report_body")
+
+    VERIFY_STATUS="PASS"
+    VERIFY_PASS_COUNT="0"
+    VERIFY_WARN_COUNT="0"
+    VERIFY_FAIL_COUNT="0"
+    VERIFY_FIRST_ISSUE_TYPE=""
+    VERIFY_FIRST_ISSUE_CHECK=""
+    VERIFY_FIRST_ISSUE_REASON=""
+    VERIFY_FIRST_ISSUE_FIX=""
+
+    verify_record_first_issue() {
+        local issue_type="$1"
+        local check="$2"
+        local reason="$3"
+        local fix="$4"
+
+        if [ -z "$VERIFY_FIRST_ISSUE_TYPE" ]; then
+            VERIFY_FIRST_ISSUE_TYPE="$issue_type"
+            VERIFY_FIRST_ISSUE_CHECK="$check"
+            VERIFY_FIRST_ISSUE_REASON="$reason"
+            VERIFY_FIRST_ISSUE_FIX="$fix"
+        fi
+    }
+
+    verify_pass() {
+        VERIFY_PASS_COUNT="$(( VERIFY_PASS_COUNT + 1 ))"
+        echo "✓ PASS - $1" >> "$report_body"
+    }
+
+    verify_warn() {
+        local check="$1"
+        local reason="${2:-warning condition detected}"
+        local fix="${3:-review ${VERIFY_LOG}}"
+
+        VERIFY_WARN_COUNT="$(( VERIFY_WARN_COUNT + 1 ))"
+        verify_record_first_issue "Warning" "$check" "$reason" "$fix"
+        echo "! WARN - ${check}: ${reason}" >> "$report_body"
+    }
+
+    verify_fail() {
+        local check="$1"
+        local reason="${2:-check failed}"
+        local fix="${3:-review ${VERIFY_LOG}}"
+
+        VERIFY_FAIL_COUNT="$(( VERIFY_FAIL_COUNT + 1 ))"
+        verify_record_first_issue "Failure" "$check" "$reason" "$fix"
+        echo "✗ FAIL - ${check}: ${reason}" >> "$report_body"
+    }
+
+    verify_info() {
+        echo "- INFO - $1" >> "$report_body"
+    }
+
+    if id "$USERNAME" >/dev/null 2>&1; then verify_pass "User exists"; else verify_fail "User exists" "user ${USERNAME} is missing" "create the user or rerun Script 4"; fi
+    if id -nG "$USERNAME" 2>/dev/null | grep -qw sudo; then verify_pass "User is in sudo group"; else verify_warn "User sudo group" "sudo group membership not confirmed" "run sudo usermod -aG sudo ${USERNAME}"; fi
+    if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then verify_pass "SSH authorized_keys present"; else verify_warn "SSH authorized_keys" "authorized_keys missing for ${USERNAME}" "copy a valid public key to /home/${USERNAME}/.ssh/authorized_keys"; fi
+
+    if [ -n "$SUDO_CMD" ]; then
+        if sudo -n sshd -t >/dev/null 2>&1; then verify_pass "SSHD configuration valid"; else verify_fail "SSHD configuration" "sshd -t failed" "review /etc/ssh/sshd_config and /etc/ssh/sshd_config.d/*.conf, then run sudo -n sshd -t"; fi
+        effective_config="$(sudo -n sshd -T -C user="${USERNAME:-root}",host=localhost,addr=127.0.0.1 2>/dev/null || true)"
+    else
+        if sshd -t >/dev/null 2>&1; then verify_pass "SSHD configuration valid"; else verify_fail "SSHD configuration" "sshd -t failed" "review /etc/ssh/sshd_config and /etc/ssh/sshd_config.d/*.conf, then run sshd -t"; fi
+        effective_config="$(sshd -T -C user="${USERNAME:-root}",host=localhost,addr=127.0.0.1 2>/dev/null || true)"
+    fi
+
+    if [ "$SSH_HARDENING_APPLIED" == "yes" ]; then
+        if grep -q "^passwordauthentication no" <<< "$effective_config"; then verify_pass "SSH password authentication disabled"; else verify_fail "SSH password authentication" "expected passwordauthentication no" "set PasswordAuthentication no and validate with sudo -n sshd -T"; fi
+        if grep -q "^pubkeyauthentication yes" <<< "$effective_config"; then verify_pass "SSH public key authentication enabled"; else verify_fail "SSH public key authentication" "expected pubkeyauthentication yes" "set PubkeyAuthentication yes and validate with sudo -n sshd -T"; fi
+        if grep -q "^permitrootlogin no" <<< "$effective_config"; then verify_pass "Root SSH login disabled"; else verify_fail "Root SSH login" "expected permitrootlogin no" "set PermitRootLogin no and validate with sudo -n sshd -T"; fi
+        if grep -q "^kbdinteractiveauthentication no" <<< "$effective_config"; then verify_pass "SSH keyboard-interactive auth disabled"; else verify_fail "SSH keyboard-interactive auth" "expected kbdinteractiveauthentication no" "set KbdInteractiveAuthentication no and validate with sudo -n sshd -T"; fi
+    else
+        verify_info "SSH hardening state: $SSH_HARDENING_APPLIED"
+    fi
+
+    if command -v ip >/dev/null 2>&1 && ip -4 addr show | grep -q "inet "; then verify_pass "IPv4 address detected"; else verify_warn "IPv4 address" "IPv4 address not detected" "check DHCP/network configuration"; fi
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        verify_info "QEMU Guest Agent skipped for container"
+        verify_info "Root LVM expansion skipped for container"
+    else
+        if [[ "$INSTALL_QEMU_AGENT" =~ ^[Yy] ]]; then
+            if systemctl is-enabled --quiet qemu-guest-agent 2>/dev/null; then verify_pass "QEMU guest agent enabled"; else verify_warn "QEMU guest agent enabled" "service is not enabled" "run sudo systemctl enable --now qemu-guest-agent"; fi
+            if systemctl is-active --quiet qemu-guest-agent 2>/dev/null; then verify_pass "QEMU guest agent active"; else verify_warn "QEMU guest agent active" "service is not active" "run sudo systemctl status qemu-guest-agent"; fi
+        else
+            verify_info "QEMU Guest Agent skipped by user choice"
+        fi
+    fi
+
+    if [[ "$ATTACH_UBUNTU_PRO" =~ ^[Yy] ]]; then
+        if [ "$UBUNTU_PRO_ATTACHED" == "yes" ] || [ "$UBUNTU_PRO_ATTACHED" == "already-attached" ]; then verify_pass "Ubuntu Pro attached"; else verify_warn "Ubuntu Pro attachment" "state is ${UBUNTU_PRO_ATTACHED}" "run pro status and attach manually if needed"; fi
+    else
+        verify_info "Ubuntu Pro attachment skipped by user choice"
+    fi
+
+    if [[ "$RUN_SYSTEM_UPDATE" =~ ^[Yy] ]]; then
+        if [ "$SYSTEM_UPDATED" == "yes" ]; then verify_pass "System update completed"; else verify_warn "System update" "state is ${SYSTEM_UPDATED}" "review apt logs and rerun update if needed"; fi
+    else
+        verify_info "System update skipped by user choice"
+    fi
+
+    if [ "$UFW_ENABLED" == "yes" ]; then
+        if [ -n "$SUDO_CMD" ]; then
+            ufw_status="$(sudo -n ufw status verbose 2>/dev/null || true)"
+        else
+            ufw_status="$(ufw status verbose 2>/dev/null || true)"
+        fi
+        ufw_service_state="$(systemctl is-active ufw 2>/dev/null || true)"
+
+        if grep -qi "Status:[[:space:]]*active" <<< "$ufw_status" || [ "$ufw_service_state" == "active" ]; then
+            verify_pass "UFW firewall active"
+        else
+            verify_warn "UFW firewall active" "ufw status/systemctl did not confirm active" "run sudo -n ufw status verbose and sudo systemctl status ufw"
+        fi
+
+        if [ -n "$SUDO_CMD" ]; then
+            ufw_ssh_rules="$(sudo -n ufw status 2>/dev/null | grep -E '22/tcp|OpenSSH' || true)"
+        else
+            ufw_ssh_rules="$(ufw status 2>/dev/null | grep -E '22/tcp|OpenSSH' || true)"
+        fi
+
+        if [ -n "$ufw_ssh_rules" ]; then verify_pass "UFW SSH rule present"; else verify_warn "UFW SSH rule" "OpenSSH/22 rule not confirmed" "run sudo -n ufw allow OpenSSH before enabling strict firewall rules"; fi
+    elif [[ "$CONFIGURE_UFW" =~ ^[Yy] ]]; then
+        verify_warn "UFW firewall" "state is ${UFW_ENABLED}" "run sudo -n ufw status verbose and inspect firewall setup"
+    else
+        verify_info "UFW setup skipped by user choice"
+    fi
+
+    if [[ "$RUN_SYSTEM_CLEANUP" =~ ^[Yy] ]]; then
+        if [ "$SYSTEM_CLEANED" == "yes" ]; then verify_pass "System cleanup completed"; else verify_warn "System cleanup" "state is ${SYSTEM_CLEANED}" "review apt autoremove/clean output"; fi
+    else
+        verify_info "System cleanup skipped by user choice"
+    fi
+
+    if [ -n "$SUDO_CMD" ]; then
+        if sudo -n test -f /root/.ubuntu-vm-setup-completed; then verify_pass "Completion marker exists"; else verify_warn "Completion marker" "${COMPLETED_MARKER} missing" "rerun marker write step or inspect permissions"; fi
+    else
+        if test -f /root/.ubuntu-vm-setup-completed; then verify_pass "Completion marker exists"; else verify_warn "Completion marker" "${COMPLETED_MARKER} missing" "rerun marker write step or inspect permissions"; fi
+    fi
+
+    if [[ "$REBOOT_AFTER_FINISH" =~ ^[Yy] ]]; then
+        verify_info "Auto reboot selected by user choice"
+    else
+        verify_info "Auto reboot skipped by user choice"
+    fi
+
+    if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="FAIL"
+    elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="PASS_WITH_WARNINGS"
+    else
+        VERIFY_STATUS="PASS"
+    fi
 
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" bash -c "cat > '$VERIFY_LOG'" <<EOF_VERIFY
@@ -1574,8 +1847,13 @@ Virt Type: $VIRT_TYPE
 Container: $IS_CONTAINER
 LXC: $IS_LXC
 VM: $IS_VM
+VERIFY_STATUS=$VERIFY_STATUS
+VERIFY_PASS_COUNT=$VERIFY_PASS_COUNT
+VERIFY_WARN_COUNT=$VERIFY_WARN_COUNT
+VERIFY_FAIL_COUNT=$VERIFY_FAIL_COUNT
 
 Results:
+$(cat "$report_body")
 EOF_VERIFY
     else
         cat > "$VERIFY_LOG" <<EOF_VERIFY
@@ -1586,55 +1864,17 @@ Virt Type: $VIRT_TYPE
 Container: $IS_CONTAINER
 LXC: $IS_LXC
 VM: $IS_VM
+VERIFY_STATUS=$VERIFY_STATUS
+VERIFY_PASS_COUNT=$VERIFY_PASS_COUNT
+VERIFY_WARN_COUNT=$VERIFY_WARN_COUNT
+VERIFY_FAIL_COUNT=$VERIFY_FAIL_COUNT
 
 Results:
+$(cat "$report_body")
 EOF_VERIFY
     fi
 
-    {
-        if id "$USERNAME" >/dev/null 2>&1; then echo "✓ PASS - User exists"; else echo "✗ FAIL - User missing"; fi
-        if id -nG "$USERNAME" 2>/dev/null | grep -qw sudo; then echo "✓ PASS - User is in sudo group"; else echo "! WARN - User sudo group not confirmed"; fi
-        if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then echo "✓ PASS - SSH authorized_keys present"; else echo "! WARN - SSH authorized_keys missing"; fi
-        if sshd -t >/dev/null 2>&1; then echo "✓ PASS - sshd configuration valid"; else echo "✗ FAIL - sshd configuration invalid"; fi
-
-        effective_config="$(get_effective_sshd_config)"
-
-        if [ "$SSH_HARDENING_APPLIED" == "yes" ]; then
-            if grep -q "^passwordauthentication no" <<< "$effective_config"; then echo "✓ PASS - SSH password authentication disabled"; else echo "✗ FAIL - SSH password authentication still enabled"; fi
-            if grep -q "^pubkeyauthentication yes" <<< "$effective_config"; then echo "✓ PASS - SSH public key authentication enabled"; else echo "✗ FAIL - SSH public key authentication not confirmed"; fi
-            if grep -Eq "^permitrootlogin (no|prohibit-password|without-password)" <<< "$effective_config"; then echo "✓ PASS - Root SSH login disabled or passwordless-only"; else echo "! WARN - Root SSH login not confirmed secure"; fi
-            if grep -q "^kbdinteractiveauthentication no" <<< "$effective_config"; then echo "✓ PASS - SSH keyboard-interactive auth disabled"; else echo "! WARN - SSH keyboard-interactive auth not confirmed disabled"; fi
-        else
-            echo "! INFO - SSH hardening state: $SSH_HARDENING_APPLIED"
-        fi
-
-        if command -v ip >/dev/null 2>&1 && ip -4 addr show | grep -q "inet "; then echo "✓ PASS - IPv4 address detected"; else echo "! WARN - IPv4 address not detected"; fi
-
-        if [ "$IS_CONTAINER" == "yes" ]; then
-            echo "! INFO - QEMU Guest Agent skipped for container"
-            echo "! INFO - Root LVM expansion skipped for container"
-        else
-            if systemctl is-enabled --quiet qemu-guest-agent 2>/dev/null; then echo "✓ PASS - QEMU guest agent enabled"; else echo "! WARN - QEMU guest agent not enabled"; fi
-            if systemctl is-active --quiet qemu-guest-agent 2>/dev/null; then echo "✓ PASS - QEMU guest agent active"; else echo "! WARN - QEMU guest agent not active"; fi
-            df -h / 2>/dev/null || true
-        fi
-
-        if [ "$UFW_ENABLED" == "yes" ]; then
-            if ufw status 2>/dev/null | grep -qi "Status: active"; then echo "✓ PASS - UFW active"; else echo "! WARN - UFW expected active but not confirmed"; fi
-            ufw status numbered 2>/dev/null || true
-        else
-            echo "! INFO - UFW state: $UFW_ENABLED"
-        fi
-
-        if command -v pro >/dev/null 2>&1; then
-            pro status 2>/dev/null | head -n 20 || true
-        else
-            echo "! INFO - Ubuntu Pro client not available"
-        fi
-
-        if [ -f "$COMPLETED_MARKER" ]; then echo "✓ PASS - Completion marker exists"; else echo "! WARN - Completion marker missing"; fi
-    } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee -a "$VERIFY_LOG" >/dev/null; else tee -a "$VERIFY_LOG" >/dev/null; fi
-
+    rm -f "$report_body"
     msg_ok "VERIFICATION REPORT CREATED"
 }
 
@@ -1664,14 +1904,49 @@ function show_final_summary() {
     detail_line "UFW FIREWALL" "$UFW_ENABLED"
     detail_line "SSH HARDENING" "$SSH_HARDENING_APPLIED"
     detail_line "SYSTEM CLEANED" "$SYSTEM_CLEANED"
-    detail_line "LOG FILE" "$LOG_FILE"
-    detail_line "VERIFY LOG" "$VERIFY_LOG"
+
+    echo ""
+    echo -e "${YW}Storage:${CL}"
+    echo -e "  ${BL}Root filesystem before:${CL} ${GN}${ROOT_FS_BEFORE_GB}${CL}"
+    echo -e "  ${BL}Root filesystem after:${CL} ${GN}${ROOT_FS_AFTER_GB}${CL}"
+    echo -e "  ${BL}Root expansion:${CL} ${GN}${ROOT_EXPANDED}${CL}"
+
+    echo ""
+    echo -e "${YW}Verification:${CL}"
+    case "$VERIFY_STATUS" in
+        PASS) echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}" ;;
+        PASS_WITH_WARNINGS) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}" ;;
+        FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
+        *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
+    esac
+    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+    echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+    echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+    echo -e "  ${BL}Setup log:${CL} ${GN}${LOG_FILE}${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+
+    if [ -n "$VERIFY_FIRST_ISSUE_TYPE" ]; then
+        echo ""
+        echo -e "${YW}${VERIFY_FIRST_ISSUE_TYPE} 1:${CL}"
+        echo -e "  ${BL}Check:${CL} ${GN}${VERIFY_FIRST_ISSUE_CHECK}${CL}"
+        echo -e "  ${BL}Reason:${CL} ${YW}${VERIFY_FIRST_ISSUE_REASON}${CL}"
+        echo -e "  ${BL}Fix:${CL} ${GN}${VERIFY_FIRST_ISSUE_FIX}${CL}"
+    fi
 
     echo ""
     echo -e "${GN}Ubuntu setup completed successfully.${CL}"
     echo ""
-    echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}After reboot and SSH reconnect, run script 5-dockerSetup.sh.${CL}"
+    echo -e "${BL}Next Step${CL}"
+    echo ""
+    if [[ "$REBOOT_AFTER_FINISH" =~ ^[Yy] ]]; then
+        echo -e "${YW}Reboot the VM, SSH back in, then run ${ANS}Script 5${YW}.${CL}"
+    else
+        echo -e "${YW}Option A - ${GN}reboot first:${CL}"
+        echo -e "  ${YW}Reboot the VM manually, SSH back in, then run ${ANS}Script 5${YW}.${CL}"
+        echo ""
+        echo -e "${YW}Option B - ${GN}continue now:${CL}"
+        echo -e "  ${YW}Run ${ANS}Script 5${YW} when you are ready.${CL}"
+    fi
     echo ""
 }
 
