@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.4"
+SCRIPT_VERSION="v2.1.5"
 SCRIPT_UPDATED="2026-06-05"
-SCRIPT_BUILD="previous-marker-ui-fix"
+SCRIPT_BUILD="answer-color-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -120,12 +120,12 @@ APPLY_CURRENT_GROUP=""
 # --- 3. HEADER FUNCTION ---
 function header_info {
 echo -e "${BL}
-██╗   ██╗██████╗ ██╗   ██╗███╗   ██╗████████╗██╗   ██╗    ██╗   ██╗███╗   ███╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
-██║   ██║██╔══██╗██║   ██║████╗  ██║╚══██╔══╝██║   ██║    ██║   ██║████╗ ████║    ██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
-██║   ██║██████╔╝██║   ██║██╔██╗ ██║   ██║   ██║   ██║    ██║   ██║██╔████╔██║    ███████╗█████╗     ██║   ██║   ██║██████╔╝
-██║   ██║██╔══██╗██║   ██║██║╚██╗██║   ██║   ██║   ██║    ╚██╗ ██╔╝██║╚██╔╝██║    ╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝ 
-╚██████╔╝██████╔╝╚██████╔╝██║ ╚████║   ██║   ╚██████╔╝     ╚████╔╝ ██║ ╚═╝ ██║    ███████║███████╗   ██║   ╚██████╔╝██║     
- ╚═════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝   ╚═╝    ╚═════╝       ╚═══╝  ╚═╝     ╚═╝    ╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝     
+  ██╗   ██╗ ███╗   ███╗    ███████╗ ███████╗ ████████╗ ██╗   ██╗ ██████╗
+  ██║   ██║ ████╗ ████║    ██╔════╝ ██╔════╝ ╚══██╔══╝ ██║   ██║ ██╔══██╗
+  ██║   ██║ ██╔████╔██║    ███████╗ █████╗      ██║    ██║   ██║ ██████╔╝
+  ╚██╗ ██╔╝ ██║╚██╔╝██║    ╚════██║ ██╔══╝      ██║    ██║   ██║ ██╔═══╝
+   ╚████╔╝  ██║ ╚═╝ ██║    ███████║ ███████╗    ██║    ╚██████╔╝ ██║
+    ╚═══╝   ╚═╝     ╚═╝    ╚══════╝ ╚══════╝    ╚═╝     ╚═════╝  ╚═╝
 ${CL}"
 }
 
@@ -206,7 +206,7 @@ function get_root_filesystem_size_gb() {
 function detail_line() {
     local label="${1:-}"
     local value="${2:-}"
-    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} ${label}: ${ANS}${value}${CL}"
 }
 
 # --- 6. TTY PRINT HELPERS ---
@@ -468,7 +468,7 @@ function timed_yes_no() {
     final_label="$(yes_no_label "$answer")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${final_label}${CL}"
     flush_input_buffer
 
     echo "$answer"
@@ -522,7 +522,7 @@ function timed_text_input() {
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
     flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
@@ -764,15 +764,15 @@ function show_previous_marker_compact_summary() {
     fi
 
     echo -e "${YW}Existing setup:${CL}"
-    echo -e "  ${BL}Completed:${CL} ${GN}${completed}${CL}"
-    echo -e "  ${BL}Username:${CL} ${GN}${username}${CL}"
-    echo -e "  ${BL}Environment:${CL} ${GN}${environment}${CL}"
-    echo -e "  ${BL}SSH keys:${CL} ${GN}$(marker_value_or_unknown_for_display "SSH Keys Configured" "$marker_file")${CL}"
-    echo -e "  ${BL}SSH hardened:${CL} ${GN}$(marker_value_or_unknown_for_display "SSH Hardened" "$marker_file")${CL}"
-    echo -e "  ${BL}Root expanded:${CL} ${GN}$(marker_value_or_unknown_for_display "Root Expanded" "$marker_file")${CL}"
-    echo -e "  ${BL}UFW firewall:${CL} ${GN}$(marker_value_or_unknown_for_display "UFW" "$marker_file")${CL}"
-    echo -e "  ${BL}QEMU guest agent:${CL} ${GN}$(marker_value_or_unknown_for_display "QEMU Agent" "$marker_file")${CL}"
-    echo -e "  ${BL}Verify log:${CL} ${GN}$(marker_value_or_unknown_for_display "Verify Log" "$marker_file")${CL}"
+    echo -e "  ${BL}Completed:${CL} ${ANS}${completed}${CL}"
+    echo -e "  ${BL}Username:${CL} ${ANS}${username}${CL}"
+    echo -e "  ${BL}Environment:${CL} ${ANS}${environment}${CL}"
+    echo -e "  ${BL}SSH keys:${CL} ${ANS}$(marker_value_or_unknown_for_display "SSH Keys Configured" "$marker_file")${CL}"
+    echo -e "  ${BL}SSH hardened:${CL} ${ANS}$(marker_value_or_unknown_for_display "SSH Hardened" "$marker_file")${CL}"
+    echo -e "  ${BL}Root expanded:${CL} ${ANS}$(marker_value_or_unknown_for_display "Root Expanded" "$marker_file")${CL}"
+    echo -e "  ${BL}UFW firewall:${CL} ${ANS}$(marker_value_or_unknown_for_display "UFW" "$marker_file")${CL}"
+    echo -e "  ${BL}QEMU guest agent:${CL} ${ANS}$(marker_value_or_unknown_for_display "QEMU Agent" "$marker_file")${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${ANS}$(marker_value_or_unknown_for_display "Verify Log" "$marker_file")${CL}"
 }
 
 function build_ssh_hint_from_marker() {
@@ -1022,8 +1022,8 @@ function collect_ubuntu_pro_inputs() {
     echo ""
     echo -e "${YW}Ubuntu Pro:${CL}"
 
-    echo -e "${YW}Ubuntu Pro is optional. If enabled, this script attaches Pro before the main system upgrade.${CL}"
-    echo -e "${YW}Token input is not logged and is never written to disk by this script.${CL}"
+    echo -e "${BL}Ubuntu Pro is optional. If enabled, this script attaches Pro before the main system upgrade.${CL}"
+    echo -e "${BL}Token input is not logged and is never written to disk by this script.${CL}"
     echo ""
 
     ATTACH_UBUNTU_PRO="$(timed_yes_no "Attach Ubuntu Pro token?" "n")"
@@ -1093,34 +1093,34 @@ function show_ready_summary_and_confirm() {
     section "SETUP PLAN"
 
     echo -e "${YW}User / SSH:${CL}"
-    echo -e "  ${BL}Username:${CL} ${GN}${USERNAME}${CL}"
-    echo -e "  ${BL}Existing user:${CL} ${GN}${EXISTING_USER}${CL}"
-    echo -e "  ${BL}SSH key source:${CL} ${GN}${SOURCE_KEYS:-none detected}${CL}"
-    echo -e "  ${BL}Lock password login:${CL} ${GN}$(yes_no_label "$LOCK_USER_PASSWORD")${CL}"
-    echo -e "  ${BL}SSH hardening:${CL} ${GN}$(yes_no_label "$APPLY_SSH_HARDENING")${CL}"
+    echo -e "  ${BL}Username:${CL} ${ANS}${USERNAME}${CL}"
+    echo -e "  ${BL}Existing user:${CL} ${ANS}${EXISTING_USER}${CL}"
+    echo -e "  ${BL}SSH key source:${CL} ${ANS}${SOURCE_KEYS:-none detected}${CL}"
+    echo -e "  ${BL}Lock password login:${CL} ${ANS}$(yes_no_label "$LOCK_USER_PASSWORD")${CL}"
+    echo -e "  ${BL}SSH hardening:${CL} ${ANS}$(yes_no_label "$APPLY_SSH_HARDENING")${CL}"
     if [ "$IS_CONTAINER" == "yes" ]; then
-        echo -e "  ${BL}Environment:${CL} ${GN}Container/LXC (${VIRT_TYPE})${CL}"
+        echo -e "  ${BL}Environment:${CL} ${ANS}Container/LXC (${VIRT_TYPE})${CL}"
     else
-        echo -e "  ${BL}Environment:${CL} ${GN}VM (${VIRT_TYPE})${CL}"
+        echo -e "  ${BL}Environment:${CL} ${ANS}VM (${VIRT_TYPE})${CL}"
     fi
 
     echo ""
     echo -e "${YW}Ubuntu Pro:${CL}"
-    echo -e "  ${BL}Attach:${CL} ${GN}$(yes_no_label "$ATTACH_UBUNTU_PRO")${CL}"
+    echo -e "  ${BL}Attach:${CL} ${ANS}$(yes_no_label "$ATTACH_UBUNTU_PRO")${CL}"
     if [[ "$ATTACH_UBUNTU_PRO" =~ ^[Yy] ]]; then
-        echo -e "  ${BL}ESM Apps:${CL} ${GN}$(yes_no_label "$ENABLE_ESM_APPS")${CL}"
-        echo -e "  ${BL}ESM Infra:${CL} ${GN}$(yes_no_label "$ENABLE_ESM_INFRA")${CL}"
-        echo -e "  ${BL}Livepatch:${CL} ${GN}$(yes_no_label "$ENABLE_LIVEPATCH")${CL}"
+        echo -e "  ${BL}ESM Apps:${CL} ${ANS}$(yes_no_label "$ENABLE_ESM_APPS")${CL}"
+        echo -e "  ${BL}ESM Infra:${CL} ${ANS}$(yes_no_label "$ENABLE_ESM_INFRA")${CL}"
+        echo -e "  ${BL}Livepatch:${CL} ${ANS}$(yes_no_label "$ENABLE_LIVEPATCH")${CL}"
     fi
 
     echo ""
     echo -e "${YW}System:${CL}"
-    echo -e "  ${BL}Upgrade:${CL} ${GN}$(yes_no_label "$RUN_SYSTEM_UPDATE")${CL}"
-    echo -e "  ${BL}QEMU guest agent:${CL} ${GN}$(yes_no_label "$INSTALL_QEMU_AGENT")${CL}"
-    echo -e "  ${BL}Root expansion:${CL} ${GN}$(yes_no_label "$EXPAND_ROOT_LVM")${CL}"
-    echo -e "  ${BL}UFW firewall:${CL} ${GN}$(yes_no_label "$CONFIGURE_UFW")${CL}"
-    echo -e "  ${BL}Cleanup:${CL} ${GN}$(yes_no_label "$RUN_SYSTEM_CLEANUP")${CL}"
-    echo -e "  ${BL}Reboot:${CL} ${GN}$(yes_no_label "$REBOOT_AFTER_FINISH")${CL}"
+    echo -e "  ${BL}Upgrade:${CL} ${ANS}$(yes_no_label "$RUN_SYSTEM_UPDATE")${CL}"
+    echo -e "  ${BL}QEMU guest agent:${CL} ${ANS}$(yes_no_label "$INSTALL_QEMU_AGENT")${CL}"
+    echo -e "  ${BL}Root expansion:${CL} ${ANS}$(yes_no_label "$EXPAND_ROOT_LVM")${CL}"
+    echo -e "  ${BL}UFW firewall:${CL} ${ANS}$(yes_no_label "$CONFIGURE_UFW")${CL}"
+    echo -e "  ${BL}Cleanup:${CL} ${ANS}$(yes_no_label "$RUN_SYSTEM_CLEANUP")${CL}"
+    echo -e "  ${BL}Reboot:${CL} ${ANS}$(yes_no_label "$REBOOT_AFTER_FINISH")${CL}"
 
     echo ""
     echo -e "${YW}After confirmation, Ubuntu VM setup changes will be applied.${CL}"
@@ -1440,9 +1440,9 @@ function expand_root_lvm_if_possible() {
     VG_FREE_BYTES="$vg_free_int"
 
     echo -e "${YW}Root disk expansion:${CL}"
-    echo -e "  ${BL}Root LV:${CL} ${GN}${ROOT_LV_PATH}${CL}"
-    echo -e "  ${BL}Volume group:${CL} ${GN}${VG_NAME}${CL}"
-    echo -e "  ${BL}Free LVM space:${CL} ${GN}$(bytes_to_gb_display "$VG_FREE_BYTES")${CL}"
+    echo -e "  ${BL}Root LV:${CL} ${ANS}${ROOT_LV_PATH}${CL}"
+    echo -e "  ${BL}Volume group:${CL} ${ANS}${VG_NAME}${CL}"
+    echo -e "  ${BL}Free LVM space:${CL} ${ANS}$(bytes_to_gb_display "$VG_FREE_BYTES")${CL}"
 
     if [[ "$VG_FREE_BYTES" =~ ^[0-9]+$ ]] && [ "$VG_FREE_BYTES" -gt "$min_expand_bytes" ]; then
         msg_ok "FOUND EMPTY LVM SPACE"
@@ -1452,12 +1452,12 @@ function expand_root_lvm_if_possible() {
         ROOT_EXPANDED="yes"
         ROOT_FS_AFTER_GB="$(get_root_filesystem_size_gb)"
         msg_ok "UBUNTU ROOT FILESYSTEM EXPANDED"
-        echo -e "  ${BL}Result:${CL} ${GN}expanded${CL}"
+        echo -e "  ${BL}Result:${CL} ${ANS}expanded${CL}"
     else
         ROOT_EXPANDED="not-needed"
         ROOT_FS_AFTER_GB="$(get_root_filesystem_size_gb)"
         msg_ok "NO EMPTY LVM SPACE FOUND"
-        echo -e "  ${BL}Result:${CL} ${GN}not needed${CL}"
+        echo -e "  ${BL}Result:${CL} ${ANS}not needed${CL}"
     fi
 }
 
@@ -1907,9 +1907,9 @@ function show_final_summary() {
 
     echo ""
     echo -e "${YW}Storage:${CL}"
-    echo -e "  ${BL}Root filesystem before:${CL} ${GN}${ROOT_FS_BEFORE_GB}${CL}"
-    echo -e "  ${BL}Root filesystem after:${CL} ${GN}${ROOT_FS_AFTER_GB}${CL}"
-    echo -e "  ${BL}Root expansion:${CL} ${GN}${ROOT_EXPANDED}${CL}"
+    echo -e "  ${BL}Root filesystem before:${CL} ${ANS}${ROOT_FS_BEFORE_GB}${CL}"
+    echo -e "  ${BL}Root filesystem after:${CL} ${ANS}${ROOT_FS_AFTER_GB}${CL}"
+    echo -e "  ${BL}Root expansion:${CL} ${ANS}${ROOT_EXPANDED}${CL}"
 
     echo ""
     echo -e "${YW}Verification:${CL}"
@@ -1919,18 +1919,18 @@ function show_final_summary() {
         FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
         *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
     esac
-    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
-    echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
-    echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
-    echo -e "  ${BL}Setup log:${CL} ${GN}${LOG_FILE}${CL}"
-    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+    echo -e "  ${BL}Passed checks:${CL} ${ANS}${VERIFY_PASS_COUNT}${CL}"
+    echo -e "  ${BL}Warnings:${CL} ${ANS}${VERIFY_WARN_COUNT}${CL}"
+    echo -e "  ${BL}Failed checks:${CL} ${ANS}${VERIFY_FAIL_COUNT}${CL}"
+    echo -e "  ${BL}Setup log:${CL} ${ANS}${LOG_FILE}${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${ANS}${VERIFY_LOG}${CL}"
 
     if [ -n "$VERIFY_FIRST_ISSUE_TYPE" ]; then
         echo ""
         echo -e "${YW}${VERIFY_FIRST_ISSUE_TYPE} 1:${CL}"
-        echo -e "  ${BL}Check:${CL} ${GN}${VERIFY_FIRST_ISSUE_CHECK}${CL}"
+        echo -e "  ${BL}Check:${CL} ${ANS}${VERIFY_FIRST_ISSUE_CHECK}${CL}"
         echo -e "  ${BL}Reason:${CL} ${YW}${VERIFY_FIRST_ISSUE_REASON}${CL}"
-        echo -e "  ${BL}Fix:${CL} ${GN}${VERIFY_FIRST_ISSUE_FIX}${CL}"
+        echo -e "  ${BL}Fix:${CL} ${ANS}${VERIFY_FIRST_ISSUE_FIX}${CL}"
     fi
 
     echo ""
