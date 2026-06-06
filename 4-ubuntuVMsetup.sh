@@ -2299,7 +2299,6 @@ function show_final_summary() {
         echo -e "${YW}Option B - ${GN}continue now:${CL}"
         echo -e "  ${YW}Run ${ANS}Script 5${YW} when you are ready.${CL}"
     fi
-    echo ""
 }
 
 # --- 46. REBOOT PROMPT ---
