@@ -2261,7 +2261,6 @@ function show_final_summary() {
         echo -e "  ${YW}then run ${ANS}Script 6${YW}:${CL}"
         echo -e "    ${ANS}6-dockerENVsetup-circl8.sh${CL}"
     fi
-    echo ""
 }
 
 # --- 46. REBOOT OPTION ---
