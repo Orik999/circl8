@@ -13,6 +13,7 @@ BL="$(printf '\033[36m')"
 RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
 GN="$(printf '\033[1;92m')"
+ANS="$(printf '\033[1;95m')"
 DGN="$(printf '\033[32m')"
 CL="$(printf '\033[m')"
 CLF="$(printf '\033[5m')"
@@ -25,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="5-dockerSetup.sh"
-SCRIPT_VERSION="v1.2.0"
-SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="audit-reboot-collected-untimed-inputs-stability"
+SCRIPT_VERSION="v1.2.1"
+SCRIPT_UPDATED="2026-06-06"
+SCRIPT_BUILD="standard-ui-verification-reboot"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log paths, user choices, environment state and final status values.
@@ -37,6 +38,19 @@ REBOOT_T=30
 LOG_FILE="/var/log/docker-setup.log"
 RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/docker-setup-verify.log"
+VERIFY_DISPLAY_LOG="/var/log/docker-setup-verify-display.log"
+POST_REBOOT_VERIFY_HOOK="/etc/profile.d/circl8-script5-post-reboot-verify.sh"
+POST_REBOOT_VERIFY_HELPER="/usr/local/sbin/circl8-script5-post-reboot-verify"
+POST_REBOOT_VERIFY_MARKER=""
+VERIFY_ONLY_MODE="no"
+VERIFY_STATUS="not-run"
+VERIFY_PASS_COUNT="0"
+VERIFY_WARN_COUNT="0"
+VERIFY_FAIL_COUNT="0"
+VERIFY_FIRST_ISSUE_TYPE=""
+VERIFY_FIRST_ISSUE_CHECK=""
+VERIFY_FIRST_ISSUE_REASON=""
+VERIFY_FIRST_ISSUE_FIX=""
 COMPLETED_MARKER="/root/.docker-setup-completed"
 
 DEFAULT_TARGET_USER="${SUDO_USER:-orik}"
@@ -79,6 +93,8 @@ UBUNTU_CODENAME=""
 ARCHITECTURE=""
 
 TEMP_FILES=()
+APPLY_CHANGES_SECTION_SHOWN="no"
+APPLY_CURRENT_GROUP=""
 
 # =========================================================
 #  OUTPUT / LOGGING FUNCTIONS
@@ -102,7 +118,7 @@ ${CL}"
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
-function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
+function msg_skip() { echo -e "${BFR} - ${BL}INFO${CL} - ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
 # --- SCRIPT VERSION DISPLAY ---
@@ -128,6 +144,27 @@ function section_flash_success() {
     echo -e "${BORDER}"
     echo -e "${GN}${CLF}$1${CL}"
     echo -e "${BORDER}"
+}
+
+function begin_apply_changes_once() {
+    if [ "$APPLY_CHANGES_SECTION_SHOWN" != "yes" ]; then
+        section "APPLY CHANGES"
+        APPLY_CHANGES_SECTION_SHOWN="yes"
+    fi
+}
+
+function apply_group_header() {
+    local title="${1:-}"
+
+    begin_apply_changes_once
+
+    if [ "${APPLY_CURRENT_GROUP:-}" == "$title" ]; then
+        return 0
+    fi
+
+    APPLY_CURRENT_GROUP="$title"
+    echo ""
+    echo -e "${YW}${title}:${CL}"
 }
 
 # --- 5B. DETAIL LINE HELPER ---
@@ -413,7 +450,7 @@ function timed_yes_no() {
     final_label="$(yes_no_label "$answer")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${final_label}${CL}"
     flush_input_buffer
 
     echo "$answer"
@@ -474,7 +511,7 @@ function timed_text_input() {
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
     flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
@@ -572,6 +609,7 @@ function validate_linux_username() {
 # Validates base commands before system changes.
 function validate_dependencies() {
     local required_commands=(
+        apt-cache
         apt-get
         awk
         cat
@@ -627,6 +665,85 @@ function validate_docker_daemon_json() {
 
     DAEMON_CONFIG_VALID="no"
     return 1
+}
+
+function apt_lock_holders() {
+    local lock=""
+    local output=""
+
+    if ! command -v fuser >/dev/null 2>&1; then
+        return 0
+    fi
+
+    for lock in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
+        if [ -e "$lock" ]; then
+            output="$(fuser -v "$lock" 2>&1 || true)"
+            [ -n "$output" ] && printf '%s\n' "$output"
+        fi
+    done
+}
+
+function wait_for_apt_locks() {
+    local waited="0"
+    local timeout="180"
+    local holders=""
+
+    if ! command -v fuser >/dev/null 2>&1; then
+        return 0
+    fi
+
+    while true; do
+        holders="$(apt_lock_holders || true)"
+        if [ -z "$holders" ]; then
+            return 0
+        fi
+
+        if [ "$waited" -ge "$timeout" ]; then
+            echo ""
+            echo -e "${RD}APT/dpkg lock still held.${CL}"
+            echo -e "${YW}Holder:${CL}"
+            printf '%s\n' "$holders" | sed 's/^/  /'
+            echo ""
+            echo -e "${YW}Fix:${CL}"
+            echo -e "  Wait for apt/unattended-upgrades to finish, then rerun Script 5."
+            exit 1
+        fi
+
+        if [ "$waited" -eq 0 ]; then
+            msg_info "Waiting for apt/dpkg locks"
+        fi
+
+        sleep 5
+        waited="$(( waited + 5 ))"
+    done
+}
+
+function validate_docker_package_availability() {
+    local packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+    local pkg=""
+    local missing=()
+
+    for pkg in "${packages[@]}"; do
+        if ! apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ { if ($2 != "(none)") found=1 } END { exit found ? 0 : 1 }'; then
+            missing+=("$pkg")
+        fi
+    done
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo ""
+        echo -e "${RD}Docker packages are not available for detected Ubuntu codename: ${UBUNTU_CODENAME}.${CL}"
+        echo ""
+        echo -e "${YW}Detected:${CL}"
+        echo -e "  ${BL}Ubuntu codename:${CL} ${GN}${UBUNTU_CODENAME}${CL}"
+        echo -e "  ${BL}Architecture:${CL} ${GN}${ARCHITECTURE}${CL}"
+        echo -e "  ${BL}Missing packages:${CL} ${RD}${missing[*]}${CL}"
+        echo ""
+        echo -e "${YW}Fix:${CL}"
+        echo -e "  Check Docker repository support for this Ubuntu release, or update Script 5 fallback policy."
+        exit 1
+    fi
+
+    msg_ok "DOCKER PACKAGES AVAILABLE"
 }
 
 # =========================================================
@@ -757,25 +874,125 @@ function detect_environment() {
 
 # --- 30. PREVIOUS MARKER CHECK ---
 # Warns if Docker Setup was already completed previously.
+function marker_display_value() {
+    local label="$1"
+    local file="$2"
+    local value=""
+
+    if root_path_exists "$file"; then
+        value="$(root_cat_file "$file" 2>/dev/null | awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }' | xargs || true)"
+    fi
+
+    [ -n "$value" ] || value="unknown"
+    echo "$value"
+}
+
+function marker_key_value() {
+    local key="$1"
+    local file="$2"
+    local value=""
+
+    if root_path_exists "$file"; then
+        value="$(root_cat_file "$file" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | xargs || true)"
+    fi
+
+    echo "$value"
+}
+
+function show_previous_marker_compact_summary() {
+    local marker_file="$1"
+    local virt_type=""
+    local is_container=""
+    local is_vm=""
+    local environment="unknown"
+
+    virt_type="$(marker_display_value "Virt Type" "$marker_file")"
+    is_container="$(marker_display_value "Container" "$marker_file")"
+    is_vm="$(marker_display_value "VM" "$marker_file")"
+
+    if [ "$is_container" == "yes" ]; then
+        environment="Container (${virt_type})"
+    elif [ "$is_vm" == "yes" ]; then
+        environment="VM (${virt_type})"
+    elif [ "$virt_type" != "unknown" ]; then
+        environment="$virt_type"
+    fi
+
+    echo -e "${YW}Existing setup:${CL}"
+    echo -e "  ${BL}Completed:${CL} ${GN}$(marker_display_value "Docker Setup completed on" "$marker_file")${CL}"
+    echo -e "  ${BL}Target user:${CL} ${GN}$(marker_display_value "Target user" "$marker_file")${CL}"
+    echo -e "  ${BL}Environment:${CL} ${GN}${environment}${CL}"
+    echo -e "  ${BL}Docker installed:${CL} ${GN}$(marker_display_value "Docker installed" "$marker_file")${CL}"
+    echo -e "  ${BL}Docker service:${CL} ${GN}$(marker_display_value "Docker service enabled" "$marker_file")${CL}"
+    echo -e "  ${BL}containerd service:${CL} ${GN}$(marker_display_value "containerd service enabled" "$marker_file")${CL}"
+    echo -e "  ${BL}User in docker group:${CL} ${GN}$(marker_display_value "User added to docker group" "$marker_file")${CL}"
+    echo -e "  ${BL}Docker GC timer:${CL} ${GN}$(marker_display_value "Docker GC timer" "$marker_file")${CL}"
+    echo -e "  ${BL}Redis overcommit:${CL} ${GN}$(marker_display_value "Redis overcommit configured" "$marker_file")${CL}"
+    echo -e "  ${BL}UFW firewall:${CL} ${GN}$(marker_display_value "UFW result" "$marker_file")${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}$(marker_display_value "Verify log" "$marker_file")${CL}"
+}
+
+function previous_marker_action_menu() {
+    local action=""
+    local action_label=""
+
+    while true; do
+        tty_println "  ${YW}1)${CL} Verify existing setup"
+        tty_println "  ${YW}2)${CL} Re-run Docker setup"
+        tty_println "  ${YW}3)${CL} Exit"
+        tty_println ""
+        tty_print "${YW}Select action [default: 1]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -r action < /dev/tty || action=""
+        else
+            IFS= read -r action || action=""
+        fi
+
+        action="$(printf '%s' "$action" | tr -d '\r\n' | xargs || true)"
+        [ -z "$action" ] && action="1"
+
+        case "$action" in
+            1) action_label="Verify existing setup" ;;
+            2) action_label="Re-run Docker setup" ;;
+            3) action_label="Exit" ;;
+            *)
+                tty_println "${WARN} ${YW}Invalid action. Choose 1, 2, or 3.${CL}"
+                tty_println ""
+                continue
+                ;;
+        esac
+
+        tty_println "${CM} ${GN}Selected action:${CL} ${ANS}${action_label}${CL}"
+        echo "$action"
+        return 0
+    done
+}
+
+# --- 30. PREVIOUS MARKER CHECK ---
+# Offers verification-only rerun mode when Docker Setup was already completed previously.
 function check_previous_marker() {
-    local continue_yn=""
+    local marker_action=""
 
     if root_path_exists "$COMPLETED_MARKER"; then
         section "PREVIOUS DOCKER SETUP MARKER DETECTED"
 
         DOCKER_MARKER_FOUND="yes"
-
-        echo -e "${YW}A previous Docker Setup marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
+        show_previous_marker_compact_summary "$COMPLETED_MARKER"
         echo ""
-        root_cat_file "$COMPLETED_MARKER" 2>/dev/null || true
-        echo ""
+        echo -e "${YW}Action:${CL}"
 
-        continue_yn="$(timed_yes_no "Continue anyway?" "n")"
+        marker_action="$(previous_marker_action_menu)"
 
-        if [[ "$continue_yn" =~ ^[Nn] ]]; then
-            exit 0
-        fi
+        case "$marker_action" in
+            1) run_verify_only_mode; exit 0 ;;
+            2) return 0 ;;
+            3) exit 0 ;;
+            *) return 0 ;;
+        esac
     fi
+
+    return 0
 }
 
 # --- 31. EXISTING SETUP DETECTION ---
@@ -865,8 +1082,6 @@ function start_confirmation() {
     fi
 
     return 0
-
-    return 0
 }
 
 # =========================================================
@@ -881,7 +1096,7 @@ function collect_user_options() {
     local ufw_yn=""
     local reboot_yn=""
 
-    section "USER OPTIONS"
+    section "SETUP OPTIONS"
 
     while true; do
         TARGET_USER="$(timed_text_input "Enter Linux user to add to docker group" "$TARGET_USER")"
@@ -944,28 +1159,29 @@ function collect_user_options() {
 function show_ready_to_apply() {
     local apply_yn=""
 
-    section "READY TO APPLY"
+    section "SETUP PLAN"
 
-    echo -e "${YW}All questions have been collected. No Docker/system-changing actions have been applied yet.${CL}"
+    echo -e "${YW}Docker:${CL}"
+    echo -e "  ${BL}Target user:${CL} ${ANS}${TARGET_USER}${CL}"
+    echo -e "  ${BL}Existing Docker setup:${CL} ${ANS}${EXISTING_SETUP}${CL}"
+    echo -e "  ${BL}Docker firewall mode:${CL} ${ANS}${DOCKER_FIREWALL_MODE}${CL}"
     echo ""
-    detail_line "Environment" "$VIRT_TYPE"
-    detail_line "Target user" "$TARGET_USER"
-    detail_line "Existing Docker setup" "$EXISTING_SETUP"
-    detail_line "Disable swap" "$DISABLE_SWAP"
-    detail_line "Configure UFW" "$CONFIGURE_UFW"
-    detail_line "Install safe Docker cleanup timer" "$INSTALL_DOCKER_GC"
-    detail_line "Reboot after finish" "$REBOOT_AFTER_FINISH"
-    detail_line "Docker firewall mode" "$DOCKER_FIREWALL_MODE"
+    echo -e "${YW}System:${CL}"
+    echo -e "  ${BL}Disable swap:${CL} ${ANS}$(yes_no_label "$DISABLE_SWAP")${CL}"
+    echo -e "  ${BL}Configure UFW:${CL} ${ANS}$(yes_no_label "$CONFIGURE_UFW")${CL}"
+    echo -e "  ${BL}Redis overcommit:${CL} ${ANS}yes${CL}"
+    echo -e "  ${BL}Docker cleanup timer:${CL} ${ANS}$(yes_no_label "$INSTALL_DOCKER_GC")${CL}"
+    echo -e "  ${BL}Reboot:${CL} ${ANS}$(yes_no_label "$REBOOT_AFTER_FINISH")${CL}"
+    echo ""
+    echo -e "${YW}After confirmation, Docker setup changes will be applied.${CL}"
     echo ""
 
-    apply_yn="$(timed_yes_no "Apply this Docker setup plan now?" "y")"
+    apply_yn="$(timed_yes_no "Apply this Docker setup plan?" "y")"
 
     if [[ "$apply_yn" =~ ^[Nn] ]]; then
         echo -e "${YW}Docker Setup cancelled. No Docker/system-changing actions were applied.${CL}"
         exit 0
     fi
-
-    return 0
 
     return 0
 }
@@ -978,7 +1194,7 @@ function show_ready_to_apply() {
 # Disables swap for Docker/database stability if selected.
 # Backs up /etc/fstab before editing and avoids double-commenting lines.
 function handle_swap() {
-    section "SWAP HANDLING"
+    apply_group_header "System"
 
     if [ "$DISABLE_SWAP" != "y" ]; then
         SWAP_DISABLED="no"
@@ -1010,13 +1226,15 @@ function handle_swap() {
 # --- 35. DOCKER REPOSITORY DEPENDENCIES ---
 # Installs packages needed to add Docker's official Ubuntu repository.
 function install_repository_dependencies() {
-    section "DOCKER REPOSITORY DEPENDENCIES"
+    apply_group_header "Docker repository"
 
     msg_info "Updating APT package lists"
+    wait_for_apt_locks
     run_cmd "updating APT package lists" apt-get update
     msg_ok "APT PACKAGE LISTS UPDATED"
 
     msg_info "Installing Docker repository dependencies"
+    wait_for_apt_locks
     run_cmd "installing Docker repository dependencies" env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg
     msg_ok "DOCKER REPOSITORY DEPENDENCIES INSTALLED"
 }
@@ -1027,7 +1245,7 @@ function configure_docker_repository() {
     local key_tmp=""
     local sources_tmp=""
 
-    section "DOCKER REPOSITORY"
+    apply_group_header "Docker repository"
 
     msg_info "Detecting Ubuntu codename and architecture"
 
@@ -1075,16 +1293,21 @@ EOF
     msg_ok "DOCKER APT SOURCE WRITTEN"
 
     msg_info "Updating APT package lists with Docker repository"
+    wait_for_apt_locks
     run_cmd "updating APT after Docker repository setup" apt-get update
     msg_ok "APT PACKAGE LISTS UPDATED WITH DOCKER REPOSITORY"
+
+    msg_info "Validating Docker package availability"
+    validate_docker_package_availability
 }
 
 # --- 37. DOCKER ENGINE INSTALL ---
 # Installs Docker CE, Docker CLI, containerd, Buildx plugin and Compose plugin.
 function install_docker_engine() {
-    section "DOCKER INSTALL"
+    apply_group_header "Docker"
 
     msg_info "Installing Docker Engine and plugins"
+    wait_for_apt_locks
     run_cmd "installing Docker Engine and plugins" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
         docker-ce \
         docker-ce-cli \
@@ -1128,7 +1351,7 @@ function install_docker_engine() {
 # --- 38. DOCKER GROUP CONFIGURATION ---
 # Ensures docker group exists and adds selected user to it.
 function configure_docker_group() {
-    section "DOCKER GROUP"
+    apply_group_header "Docker"
 
     msg_info "Checking docker group"
 
@@ -1148,7 +1371,7 @@ function configure_docker_group() {
 # --- 39. DOCKER DAEMON CONFIGURATION ---
 # Writes Docker daemon.json with iptables enabled, log rotation and live-restore.
 function configure_docker_daemon() {
-    section "DAEMON CONFIG"
+    apply_group_header "Docker"
 
     msg_info "Creating /etc/docker directory"
     run_cmd "creating /etc/docker directory" mkdir -p /etc/docker
@@ -1193,7 +1416,7 @@ EOF
 # Allows SSH, HTTP and HTTPS on the Ubuntu VM.
 # Warns clearly that Docker-published ports can bypass UFW through Docker-managed iptables.
 function configure_ufw_firewall() {
-    section "FIREWALL"
+    apply_group_header "Firewall"
 
     echo -e "${YW}Docker manages its own firewall/NAT rules.${CL}"
     echo -e "${YW}UFW protects the host, but Docker-published container ports may still be reachable unless controlled later with DOCKER-USER rules.${CL}"
@@ -1211,6 +1434,7 @@ function configure_ufw_firewall() {
     fi
 
     msg_info "Installing UFW"
+    wait_for_apt_locks
     run_cmd "installing UFW" env DEBIAN_FRONTEND=noninteractive apt-get install -y ufw
     msg_ok "UFW INSTALLED"
 
@@ -1252,7 +1476,7 @@ function configure_ufw_firewall() {
 # Persists and applies vm.overcommit_memory=1 for Redis stability.
 # Redis warns when this is not enabled because background save/replication can fail under memory pressure.
 function configure_redis_host_tuning() {
-    section "REDIS HOST TUNING"
+    apply_group_header "System"
 
     if [ "$IS_CONTAINER" == "yes" ]; then
         msg_warn "Container mode detected. sysctl may be controlled by the host. Attempting safe configuration anyway."
@@ -1302,7 +1526,7 @@ EOF
 # Creates a safe host-side Docker cleanup helper and optional weekly systemd timer.
 # This intentionally avoids any Docker socket-proxy permission expansion and never prunes volumes.
 function install_docker_gc_helper() {
-    section "DOCKER CLEANUP HELPER"
+    apply_group_header "Cleanup"
 
     if [ "$INSTALL_DOCKER_GC" != "y" ]; then
         DOCKER_GC_INSTALLED="no"
@@ -1449,7 +1673,7 @@ EOF
 # --- 42. DOCKER VERIFICATION ---
 # Checks Docker daemon, Docker CLI and Compose plugin through sudo so verification works before docker group re-login.
 function verify_docker_installation() {
-    section "VERIFICATION"
+    apply_group_header "Marker / verification"
 
     msg_info "Checking Docker CLI"
     run_cmd "checking Docker CLI" docker --version
@@ -1469,9 +1693,102 @@ function verify_docker_installation() {
 # --- 43. VERIFICATION REPORT ---
 # Writes a detailed Docker verification report to /var/log/docker-setup-verify.log.
 function create_verification_report() {
-    section "VERIFICATION REPORT"
+    if [ "${VERIFY_ONLY_MODE:-no}" != "yes" ]; then
+        apply_group_header "Marker / verification"
+    fi
 
     msg_info "Writing Docker verification report"
+
+    local report_body=""
+    local docker_version=""
+    local compose_version=""
+    local ufw_status=""
+
+    report_body="$(mktemp)"
+    TEMP_FILES+=("$report_body")
+
+    VERIFY_STATUS="PASS"
+    VERIFY_PASS_COUNT="0"
+    VERIFY_WARN_COUNT="0"
+    VERIFY_FAIL_COUNT="0"
+    VERIFY_FIRST_ISSUE_TYPE=""
+    VERIFY_FIRST_ISSUE_CHECK=""
+    VERIFY_FIRST_ISSUE_REASON=""
+    VERIFY_FIRST_ISSUE_FIX=""
+
+    verify_record_first_issue() {
+        local issue_type="$1"
+        local check="$2"
+        local reason="$3"
+        local fix="$4"
+
+        if [ -z "$VERIFY_FIRST_ISSUE_TYPE" ]; then
+            VERIFY_FIRST_ISSUE_TYPE="$issue_type"
+            VERIFY_FIRST_ISSUE_CHECK="$check"
+            VERIFY_FIRST_ISSUE_REASON="$reason"
+            VERIFY_FIRST_ISSUE_FIX="$fix"
+        fi
+    }
+
+    verify_pass() { VERIFY_PASS_COUNT="$(( VERIFY_PASS_COUNT + 1 ))"; echo "✓ PASS - $1" >> "$report_body"; }
+    verify_warn() { local check="$1" reason="${2:-warning condition detected}" fix="${3:-review ${VERIFY_LOG}}"; VERIFY_WARN_COUNT="$(( VERIFY_WARN_COUNT + 1 ))"; verify_record_first_issue "Warning" "$check" "$reason" "$fix"; echo "! WARN - ${check}: ${reason}" >> "$report_body"; }
+    verify_fail() { local check="$1" reason="${2:-check failed}" fix="${3:-review ${VERIFY_LOG}}"; VERIFY_FAIL_COUNT="$(( VERIFY_FAIL_COUNT + 1 ))"; verify_record_first_issue "Failure" "$check" "$reason" "$fix"; echo "✗ FAIL - ${check}: ${reason}" >> "$report_body"; }
+    verify_info() { echo "- INFO - $1" >> "$report_body"; }
+
+    if command -v docker >/dev/null 2>&1; then verify_pass "Docker CLI exists"; else verify_fail "Docker CLI exists" "docker command missing" "install Docker Engine packages"; fi
+    if docker_version="$(docker --version 2>/dev/null || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker --version 2>/dev/null; } || true)" && [ -n "$docker_version" ]; then verify_pass "docker --version works"; else verify_fail "docker --version" "docker --version failed" "check Docker CLI installation"; fi
+    if compose_version="$(docker compose version 2>/dev/null || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version 2>/dev/null; } || true)" && [ -n "$compose_version" ]; then verify_pass "Docker Compose plugin works"; else verify_fail "Docker Compose plugin" "docker compose version failed" "install docker-compose-plugin"; fi
+    if docker info >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker info >/dev/null 2>&1; }; then verify_pass "Docker daemon reachable"; else verify_fail "Docker daemon reachable" "docker info failed" "check docker service status and logs"; fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet docker 2>/dev/null; then verify_pass "Docker service active"; else verify_warn "Docker service active" "service is not active or unavailable" "run sudo systemctl status docker"; fi
+        if systemctl is-active --quiet containerd 2>/dev/null; then verify_pass "containerd service active"; else verify_warn "containerd service active" "service is not active or unavailable" "run sudo systemctl status containerd"; fi
+    else
+        verify_info "systemctl unavailable"
+    fi
+
+    if [ -f /etc/docker/daemon.json ]; then verify_pass "daemon.json exists"; else verify_fail "daemon.json exists" "/etc/docker/daemon.json missing" "rerun daemon config step"; fi
+    if validate_docker_daemon_json; then verify_pass "daemon.json valid"; else verify_fail "daemon.json valid" "daemon config validation failed" "inspect /etc/docker/daemon.json"; fi
+
+    if [ -f /etc/sysctl.d/99-redis-overcommit.conf ]; then verify_pass "Redis overcommit sysctl file exists"; else verify_fail "Redis overcommit sysctl file exists" "sysctl file missing" "rerun Redis host tuning step"; fi
+    if [ "$(sysctl -n vm.overcommit_memory 2>/dev/null || echo unknown)" = "1" ]; then verify_pass "vm.overcommit_memory=1 active"; else verify_warn "vm.overcommit_memory=1 active" "current value is $(sysctl -n vm.overcommit_memory 2>/dev/null || echo unknown)" "run sudo sysctl -w vm.overcommit_memory=1"; fi
+
+    if [ "$INSTALL_DOCKER_GC" == "y" ]; then
+        if [ -x /usr/local/sbin/docker-gc-safe ]; then verify_pass "docker-gc-safe helper exists"; else verify_fail "docker-gc-safe helper exists" "helper missing" "rerun cleanup helper install step"; fi
+        if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker-gc-safe.timer >/dev/null 2>&1; then verify_pass "docker-gc-safe.timer exists"; else verify_warn "docker-gc-safe.timer exists" "timer not found" "run sudo systemctl status docker-gc-safe.timer"; fi
+    else
+        verify_info "docker-gc-safe helper not selected"
+        verify_info "docker-gc-safe.timer not selected"
+    fi
+
+    if getent group docker >/dev/null 2>&1; then verify_pass "docker group exists"; else verify_fail "docker group exists" "docker group missing" "run sudo groupadd docker"; fi
+    if id -nG "$TARGET_USER" 2>/dev/null | grep -qw docker; then verify_pass "target user is in docker group"; else verify_warn "target user docker group" "membership not confirmed" "run sudo usermod -aG docker ${TARGET_USER}, then re-login"; fi
+
+    if [ "$DISABLE_SWAP" == "y" ]; then
+        if swapon --show 2>/dev/null | grep -q .; then verify_warn "no active swap detected" "active swap still detected" "review /etc/fstab and run sudo swapoff -a"; else verify_pass "no active swap detected"; fi
+    else
+        verify_info "swap disable not selected"
+    fi
+
+    if [ "$CONFIGURE_UFW" == "y" ]; then
+        ufw_status="$(ufw status 2>/dev/null || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" ufw status 2>/dev/null; } || true)"
+        if grep -qi "Status:[[:space:]]*active" <<< "$ufw_status"; then verify_pass "UFW active"; else verify_warn "UFW active" "UFW not active or unavailable" "run sudo ufw status verbose"; fi
+        if grep -Eq '22/tcp|OpenSSH' <<< "$ufw_status"; then verify_pass "UFW SSH rule present"; else verify_warn "UFW SSH rule" "OpenSSH/22 rule not confirmed" "run sudo ufw allow OpenSSH"; fi
+        if grep -Eq '80/tcp' <<< "$ufw_status"; then verify_pass "UFW HTTP rule present"; else verify_warn "UFW HTTP rule" "80/tcp rule not confirmed" "run sudo ufw allow 80/tcp"; fi
+        if grep -Eq '443/tcp' <<< "$ufw_status"; then verify_pass "UFW HTTPS rule present"; else verify_warn "UFW HTTPS rule" "443/tcp rule not confirmed" "run sudo ufw allow 443/tcp"; fi
+    else
+        verify_info "UFW setup not selected"
+    fi
+
+    if root_path_exists "$COMPLETED_MARKER"; then verify_pass "Completion marker exists"; else verify_warn "Completion marker exists" "marker missing" "rerun marker write step"; fi
+
+    if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="FAIL"
+    elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="PASS_WITH_WARNINGS"
+    else
+        VERIFY_STATUS="PASS"
+    fi
 
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" bash -c "cat > '$VERIFY_LOG'" <<EOF
@@ -1482,8 +1799,17 @@ Virt Type: $VIRT_TYPE
 Container: $IS_CONTAINER
 LXC: $IS_LXC
 VM: $IS_VM
+VERIFY_STATUS=$VERIFY_STATUS
+VERIFY_PASS_COUNT=$VERIFY_PASS_COUNT
+VERIFY_WARN_COUNT=$VERIFY_WARN_COUNT
+VERIFY_FAIL_COUNT=$VERIFY_FAIL_COUNT
 
 Results:
+$(cat "$report_body")
+
+Docker versions:
+${docker_version:-unknown}
+${compose_version:-unknown}
 EOF
     else
         cat > "$VERIFY_LOG" <<EOF
@@ -1494,65 +1820,32 @@ Virt Type: $VIRT_TYPE
 Container: $IS_CONTAINER
 LXC: $IS_LXC
 VM: $IS_VM
+VERIFY_STATUS=$VERIFY_STATUS
+VERIFY_PASS_COUNT=$VERIFY_PASS_COUNT
+VERIFY_WARN_COUNT=$VERIFY_WARN_COUNT
+VERIFY_FAIL_COUNT=$VERIFY_FAIL_COUNT
 
 Results:
+$(cat "$report_body")
+
+Docker versions:
+${docker_version:-unknown}
+${compose_version:-unknown}
 EOF
     fi
 
-    {
-        if command -v docker >/dev/null 2>&1; then echo "✓ PASS - Docker CLI exists"; else echo "✗ FAIL - Docker CLI missing"; fi
-        if docker --version >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker --version >/dev/null 2>&1; }; then echo "✓ PASS - docker --version works"; else echo "✗ FAIL - docker --version failed"; fi
-        if docker compose version >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version >/dev/null 2>&1; }; then echo "✓ PASS - Docker Compose plugin works"; else echo "✗ FAIL - Docker Compose plugin failed"; fi
-        if docker info >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker info >/dev/null 2>&1; }; then echo "✓ PASS - Docker daemon reachable"; else echo "✗ FAIL - Docker daemon not reachable"; fi
-
-        if command -v systemctl >/dev/null 2>&1; then
-            if systemctl is-active --quiet docker 2>/dev/null; then echo "✓ PASS - Docker service active"; else echo "! WARN - Docker service not active or unavailable"; fi
-            if systemctl is-active --quiet containerd 2>/dev/null; then echo "✓ PASS - containerd service active"; else echo "! WARN - containerd service not active or unavailable"; fi
-        else
-            echo "! INFO - systemctl unavailable"
-        fi
-
-        if [ -f /etc/docker/daemon.json ]; then echo "✓ PASS - daemon.json exists"; else echo "✗ FAIL - daemon.json missing"; fi
-        if validate_docker_daemon_json; then echo "✓ PASS - daemon.json valid"; else echo "✗ FAIL - daemon.json validation failed"; fi
-
-        if [ -f /etc/sysctl.d/99-redis-overcommit.conf ]; then echo "✓ PASS - Redis overcommit sysctl file exists"; else echo "✗ FAIL - Redis overcommit sysctl file missing"; fi
-        if [ "$(sysctl -n vm.overcommit_memory 2>/dev/null || echo unknown)" = "1" ]; then echo "✓ PASS - vm.overcommit_memory=1 active"; else echo "! WARN - vm.overcommit_memory is not 1"; fi
-
-        if [ -x /usr/local/sbin/docker-gc-safe ]; then echo "✓ PASS - docker-gc-safe helper exists"; else echo "! INFO - docker-gc-safe helper not installed"; fi
-        if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker-gc-safe.timer >/dev/null 2>&1; then echo "✓ PASS - docker-gc-safe.timer exists"; else echo "! INFO - docker-gc-safe.timer not installed"; fi
-
-        if getent group docker >/dev/null 2>&1; then echo "✓ PASS - docker group exists"; else echo "✗ FAIL - docker group missing"; fi
-        if id -nG "$TARGET_USER" 2>/dev/null | grep -qw docker; then echo "✓ PASS - target user is in docker group"; else echo "! WARN - target user docker group membership not confirmed"; fi
-
-        if [ "$DISABLE_SWAP" == "y" ]; then
-            if swapon --show 2>/dev/null | grep -q .; then echo "! WARN - active swap still detected"; else echo "✓ PASS - no active swap detected"; fi
-        else
-            echo "! INFO - swap disable not selected"
-        fi
-
-        if [ "$CONFIGURE_UFW" == "y" ]; then
-            if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then echo "✓ PASS - UFW active"; else echo "! WARN - UFW not active or not available"; fi
-        else
-            echo "! INFO - UFW setup not selected"
-        fi
-
-        if [ -f "$COMPLETED_MARKER" ]; then echo "✓ PASS - completion marker exists"; else echo "! WARN - completion marker not present yet at verification time"; fi
-
-        echo ""
-        echo "Docker versions:"
-        docker --version 2>/dev/null || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker --version 2>/dev/null; } || true
-        docker compose version 2>/dev/null || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version 2>/dev/null; } || true
-    } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee -a "$VERIFY_LOG" >/dev/null; else tee -a "$VERIFY_LOG" >/dev/null; fi
-
+    rm -f "$report_body"
     msg_ok "DOCKER VERIFICATION REPORT WRITTEN"
 }
 
 # --- 44. COMPLETION MARKER ---
 # Creates marker showing setup completed.
 function write_completion_marker() {
-    section "COMPLETION MARKER"
+    apply_group_header "Marker / verification"
 
     msg_info "Writing completion marker"
+
+    POST_REBOOT_VERIFY_MARKER="/home/${TARGET_USER}/.docker-setup-verify-displayed"
 
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" bash -c "cat > '$COMPLETED_MARKER'" <<EOF
@@ -1579,6 +1872,23 @@ UFW result: $UFW_ENABLED
 Daemon config valid: $DAEMON_CONFIG_VALID
 Existing setup detected: $EXISTING_SETUP
 Verify log: $VERIFY_LOG
+SCRIPT5_STATUS=completed
+SCRIPT5_VERSION=$SCRIPT_VERSION
+SCRIPT5_BUILD=$SCRIPT_BUILD
+SCRIPT5_VERIFY_STATUS=$VERIFY_STATUS
+SCRIPT5_VERIFY_LOG=$VERIFY_LOG
+SCRIPT5_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
+SCRIPT5_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
+SCRIPT5_POST_REBOOT_DISPLAY_MARKER=$POST_REBOOT_VERIFY_MARKER
+SCRIPT5_TARGET_USER=$TARGET_USER
+SCRIPT5_DOCKER_INSTALLED=$DOCKER_INSTALLED
+SCRIPT5_DOCKER_SERVICE_ENABLED=$DOCKER_SERVICE_ENABLED
+SCRIPT5_CONTAINERD_SERVICE_ENABLED=$CONTAINERD_SERVICE_ENABLED
+SCRIPT5_USER_ADDED_TO_DOCKER=$USER_ADDED_TO_DOCKER
+SCRIPT5_DOCKER_GC_TIMER=$DOCKER_GC_TIMER_INSTALLED
+SCRIPT5_REDIS_OVERCOMMIT=$REDIS_OVERCOMMIT_CONFIGURED
+SCRIPT5_UFW_ENABLED=$UFW_ENABLED
+SCRIPT5_DAEMON_CONFIG_VALID=$DAEMON_CONFIG_VALID
 EOF
     else
         cat > "$COMPLETED_MARKER" <<EOF
@@ -1605,58 +1915,350 @@ UFW result: $UFW_ENABLED
 Daemon config valid: $DAEMON_CONFIG_VALID
 Existing setup detected: $EXISTING_SETUP
 Verify log: $VERIFY_LOG
+SCRIPT5_STATUS=completed
+SCRIPT5_VERSION=$SCRIPT_VERSION
+SCRIPT5_BUILD=$SCRIPT_BUILD
+SCRIPT5_VERIFY_STATUS=$VERIFY_STATUS
+SCRIPT5_VERIFY_LOG=$VERIFY_LOG
+SCRIPT5_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
+SCRIPT5_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
+SCRIPT5_POST_REBOOT_DISPLAY_MARKER=$POST_REBOOT_VERIFY_MARKER
+SCRIPT5_TARGET_USER=$TARGET_USER
+SCRIPT5_DOCKER_INSTALLED=$DOCKER_INSTALLED
+SCRIPT5_DOCKER_SERVICE_ENABLED=$DOCKER_SERVICE_ENABLED
+SCRIPT5_CONTAINERD_SERVICE_ENABLED=$CONTAINERD_SERVICE_ENABLED
+SCRIPT5_USER_ADDED_TO_DOCKER=$USER_ADDED_TO_DOCKER
+SCRIPT5_DOCKER_GC_TIMER=$DOCKER_GC_TIMER_INSTALLED
+SCRIPT5_REDIS_OVERCOMMIT=$REDIS_OVERCOMMIT_CONFIGURED
+SCRIPT5_UFW_ENABLED=$UFW_ENABLED
+SCRIPT5_DAEMON_CONFIG_VALID=$DAEMON_CONFIG_VALID
 EOF
     fi
 
     msg_ok "COMPLETION MARKER WRITTEN"
 }
 
-# --- 45. FINAL SUMMARY ---
-# Displays installed versions and next step using script 1-style output.
-function show_final_summary() {
-    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+function colorize_verify_line() {
+    local line="$1"
+    case "$line" in
+        "✓ PASS -"*) printf '%b\n' "  ${GN}${line}${CL}" ;;
+        "! WARN -"*) printf '%b\n' "  ${YW}${line}${CL}" ;;
+        "✗ FAIL -"*) printf '%b\n' "  ${RD}${line}${CL}" ;;
+        "- INFO -"*) printf '%b\n' "  ${BL}${line}${CL}" ;;
+        *) printf '%b\n' "  ${DGN}${line}${CL}" ;;
+    esac
+}
+
+function write_verify_display_log() {
+    local display_tmp=""
+    local result_lines=""
+    local docker_lines=""
+    local user_lines=""
+    local system_lines=""
+    local other_lines=""
+    local line=""
+
+    display_tmp="$(mktemp)"
+    TEMP_FILES+=("$display_tmp")
+
+    if root_path_exists "$VERIFY_LOG"; then
+        result_lines="$(root_cat_file "$VERIFY_LOG" 2>/dev/null | awk '/^Results:/{flag=1; next} /^Docker versions:/{flag=0} flag {print}' || true)"
+    fi
+
+    docker_lines="$(printf '%s\n' "$result_lines" | grep -E 'Docker CLI exists|docker --version works|Docker Compose plugin works|Docker daemon reachable|Docker service active|containerd service active|daemon.json exists|daemon.json valid' || true)"
+    user_lines="$(printf '%s\n' "$result_lines" | grep -E 'docker group exists|target user is in docker group' || true)"
+    system_lines="$(printf '%s\n' "$result_lines" | grep -E 'no active swap detected|vm.overcommit_memory=1 active|Redis overcommit sysctl file exists|UFW active|UFW SSH rule|UFW HTTP rule|UFW HTTPS rule|Completion marker exists|docker-gc-safe' || true)"
+    other_lines="$(printf '%s\n' "$result_lines" | grep -Ev 'Docker CLI exists|docker --version works|Docker Compose plugin works|Docker daemon reachable|Docker service active|containerd service active|daemon.json exists|daemon.json valid|docker group exists|target user is in docker group|no active swap detected|vm.overcommit_memory=1 active|Redis overcommit sysctl file exists|UFW active|UFW SSH rule|UFW HTTP rule|UFW HTTPS rule|Completion marker exists|docker-gc-safe' || true)"
+
+    {
+        echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+        echo -e "${BL}SCRIPT 5 POST-REBOOT VERIFICATION${CL}"
+        echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+        echo ""
+        echo -e "${YW}Docker:${CL}"
+        if [ -n "$docker_lines" ]; then while IFS= read -r line; do [ -n "$line" ] && colorize_verify_line "$line"; done <<< "$docker_lines"; else echo -e "  ${BL}- INFO - No Docker verification lines recorded${CL}"; fi
+        echo ""
+        echo -e "${YW}User / Group:${CL}"
+        if [ -n "$user_lines" ]; then while IFS= read -r line; do [ -n "$line" ] && colorize_verify_line "$line"; done <<< "$user_lines"; else echo -e "  ${BL}- INFO - No user/group verification lines recorded${CL}"; fi
+        echo ""
+        echo -e "${YW}System:${CL}"
+        if [ -n "$system_lines" ]; then while IFS= read -r line; do [ -n "$line" ] && colorize_verify_line "$line"; done <<< "$system_lines"; else echo -e "  ${BL}- INFO - No system verification lines recorded${CL}"; fi
+        if [ -n "$other_lines" ]; then while IFS= read -r line; do [ -n "$line" ] && colorize_verify_line "$line"; done <<< "$other_lines"; fi
+        echo ""
+        echo -e "${YW}Verification:${CL}"
+        case "$VERIFY_STATUS" in
+            PASS) echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}" ;;
+            PASS_WITH_WARNINGS) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}" ;;
+            FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
+            *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
+        esac
+        echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+        echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+        echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+        echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+        echo ""
+        echo -e "${YW}Next Step:${CL}"
+        echo -e "  ${YW}Run ${ANS}Script 6${YW}.${CL}"
+    } > "$display_tmp"
 
     if [ -n "$SUDO_CMD" ]; then
-        "$SUDO_CMD" docker --version || true
-        "$SUDO_CMD" docker compose version || true
+        "$SUDO_CMD" cp "$display_tmp" "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
     else
-        docker --version || true
-        docker compose version || true
+        cp "$display_tmp" "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+        chmod 0644 "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+    fi
+
+    rm -f "$display_tmp"
+}
+
+function install_post_reboot_verify_hook() {
+    local helper_tmp=""
+    local hook_tmp=""
+    local display_marker="/home/${TARGET_USER}/.docker-setup-verify-displayed"
+
+    POST_REBOOT_VERIFY_MARKER="$display_marker"
+    helper_tmp="$(mktemp)"
+    hook_tmp="$(mktemp)"
+    TEMP_FILES+=("$helper_tmp" "$hook_tmp")
+
+    cat > "$helper_tmp" <<EOF_HELPER
+#!/usr/bin/env bash
+set +e
+COMPLETED_MARKER="$COMPLETED_MARKER"
+VERIFY_DISPLAY_LOG="$VERIFY_DISPLAY_LOG"
+DISPLAY_MARKER="$display_marker"
+TARGET_USER="$TARGET_USER"
+
+if [ -f "\$COMPLETED_MARKER" ]; then
+    :
+elif command -v sudo >/dev/null 2>&1 && sudo -n test -f "\$COMPLETED_MARKER" >/dev/null 2>&1; then
+    :
+else
+    [ -f "\$VERIFY_DISPLAY_LOG" ] || exit 0
+fi
+
+[ -f "\$VERIFY_DISPLAY_LOG" ] || exit 0
+[ -n "\${SSH_CONNECTION:-}" ] || exit 0
+[ "\${USER:-}" = "\$TARGET_USER" ] || exit 0
+[ -f "\$DISPLAY_MARKER" ] && exit 0
+
+cat "\$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+mkdir -p "\$(dirname "\$DISPLAY_MARKER")" 2>/dev/null || true
+touch "\$DISPLAY_MARKER" 2>/dev/null || true
+exit 0
+EOF_HELPER
+
+    cat > "$hook_tmp" <<'EOF_HOOK'
+case "$-" in
+  *i*) ;;
+  *) return 0 2>/dev/null || exit 0 ;;
+esac
+
+[ -n "${SSH_CONNECTION:-}" ] || return 0 2>/dev/null || exit 0
+
+/usr/local/sbin/circl8-script5-post-reboot-verify 2>/dev/null || true
+return 0 2>/dev/null || exit 0
+EOF_HOOK
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp "$helper_tmp" "$POST_REBOOT_VERIFY_HELPER" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0755 "$POST_REBOOT_VERIFY_HELPER" 2>/dev/null || true
+        "$SUDO_CMD" cp "$hook_tmp" "$POST_REBOOT_VERIFY_HOOK" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$POST_REBOOT_VERIFY_HOOK" 2>/dev/null || true
+    else
+        cp "$helper_tmp" "$POST_REBOOT_VERIFY_HELPER" 2>/dev/null || true
+        chmod 0755 "$POST_REBOOT_VERIFY_HELPER" 2>/dev/null || true
+        cp "$hook_tmp" "$POST_REBOOT_VERIFY_HOOK" 2>/dev/null || true
+        chmod 0644 "$POST_REBOOT_VERIFY_HOOK" 2>/dev/null || true
+    fi
+
+    rm -f "$helper_tmp" "$hook_tmp"
+}
+
+function update_completion_marker_script5_fields() {
+    local marker_tmp=""
+    local existing_marker=""
+    local display_marker="/home/${TARGET_USER}/.docker-setup-verify-displayed"
+
+    POST_REBOOT_VERIFY_MARKER="$display_marker"
+    marker_tmp="$(mktemp)"
+    TEMP_FILES+=("$marker_tmp")
+
+    if root_path_exists "$COMPLETED_MARKER"; then
+        existing_marker="$(root_cat_file "$COMPLETED_MARKER" 2>/dev/null | grep -Ev '^SCRIPT5_' || true)"
+    fi
+
+    {
+        [ -n "$existing_marker" ] && printf '%s\n' "$existing_marker"
+        echo "SCRIPT5_STATUS=completed"
+        echo "SCRIPT5_VERSION=$SCRIPT_VERSION"
+        echo "SCRIPT5_BUILD=$SCRIPT_BUILD"
+        echo "SCRIPT5_VERIFY_STATUS=$VERIFY_STATUS"
+        echo "SCRIPT5_VERIFY_LOG=$VERIFY_LOG"
+        echo "SCRIPT5_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG"
+        echo "SCRIPT5_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK"
+        echo "SCRIPT5_POST_REBOOT_DISPLAY_MARKER=$display_marker"
+        echo "SCRIPT5_TARGET_USER=$TARGET_USER"
+        echo "SCRIPT5_DOCKER_INSTALLED=$DOCKER_INSTALLED"
+        echo "SCRIPT5_DOCKER_SERVICE_ENABLED=$DOCKER_SERVICE_ENABLED"
+        echo "SCRIPT5_CONTAINERD_SERVICE_ENABLED=$CONTAINERD_SERVICE_ENABLED"
+        echo "SCRIPT5_USER_ADDED_TO_DOCKER=$USER_ADDED_TO_DOCKER"
+        echo "SCRIPT5_DOCKER_GC_TIMER=$DOCKER_GC_TIMER_INSTALLED"
+        echo "SCRIPT5_REDIS_OVERCOMMIT=$REDIS_OVERCOMMIT_CONFIGURED"
+        echo "SCRIPT5_UFW_ENABLED=$UFW_ENABLED"
+        echo "SCRIPT5_DAEMON_CONFIG_VALID=$DAEMON_CONFIG_VALID"
+    } > "$marker_tmp"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp "$marker_tmp" "$COMPLETED_MARKER" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$COMPLETED_MARKER" 2>/dev/null || true
+    else
+        cp "$marker_tmp" "$COMPLETED_MARKER" 2>/dev/null || true
+        chmod 0644 "$COMPLETED_MARKER" 2>/dev/null || true
+    fi
+
+    rm -f "$marker_tmp"
+}
+
+function load_state_from_completion_marker() {
+    local marker_file="$COMPLETED_MARKER"
+    local value=""
+
+    value="$(marker_display_value "Target user" "$marker_file")"; [ "$value" != "unknown" ] && TARGET_USER="$value"
+    value="$(marker_display_value "Virt Type" "$marker_file")"; [ "$value" != "unknown" ] && VIRT_TYPE="$value"
+    value="$(marker_display_value "Container" "$marker_file")"; [ "$value" != "unknown" ] && IS_CONTAINER="$value"
+    value="$(marker_display_value "LXC" "$marker_file")"; [ "$value" != "unknown" ] && IS_LXC="$value"
+    value="$(marker_display_value "VM" "$marker_file")"; [ "$value" != "unknown" ] && IS_VM="$value"
+    value="$(marker_display_value "Swap disabled selected" "$marker_file")"; [ "$value" != "unknown" ] && DISABLE_SWAP="$value"
+    value="$(marker_display_value "Docker installed" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_INSTALLED="$value"
+    value="$(marker_display_value "Docker service enabled" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_SERVICE_ENABLED="$value"
+    value="$(marker_display_value "containerd service enabled" "$marker_file")"; [ "$value" != "unknown" ] && CONTAINERD_SERVICE_ENABLED="$value"
+    value="$(marker_display_value "User added to docker group" "$marker_file")"; [ "$value" != "unknown" ] && USER_ADDED_TO_DOCKER="$value"
+    value="$(marker_display_value "Docker GC timer" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_GC_TIMER_INSTALLED="$value"
+    value="$(marker_display_value "Redis overcommit configured" "$marker_file")"; [ "$value" != "unknown" ] && REDIS_OVERCOMMIT_CONFIGURED="$value"
+    value="$(marker_display_value "UFW configured selected" "$marker_file")"; [ "$value" != "unknown" ] && CONFIGURE_UFW="$value"
+    value="$(marker_display_value "UFW result" "$marker_file")"; [ "$value" != "unknown" ] && UFW_ENABLED="$value"
+    value="$(marker_display_value "Daemon config valid" "$marker_file")"; [ "$value" != "unknown" ] && DAEMON_CONFIG_VALID="$value"
+
+    if [ "$DOCKER_GC_TIMER_INSTALLED" == "yes" ]; then INSTALL_DOCKER_GC="y"; else INSTALL_DOCKER_GC="n"; fi
+    POST_REBOOT_VERIFY_MARKER="/home/${TARGET_USER}/.docker-setup-verify-displayed"
+    return 0
+}
+
+function show_verify_only_summary() {
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+
+    echo -e "${YW}Verification:${CL}"
+    case "$VERIFY_STATUS" in
+        PASS) echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}" ;;
+        PASS_WITH_WARNINGS) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}" ;;
+        FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
+        *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
+    esac
+    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+    echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+    echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+    echo -e "  ${BL}Display log:${CL} ${GN}${VERIFY_DISPLAY_LOG}${CL}"
+
+    if [ -n "$VERIFY_FIRST_ISSUE_TYPE" ]; then
+        echo ""
+        echo -e "${YW}${VERIFY_FIRST_ISSUE_TYPE} 1:${CL}"
+        echo -e "  ${BL}Check:${CL} ${GN}${VERIFY_FIRST_ISSUE_CHECK}${CL}"
+        echo -e "  ${BL}Reason:${CL} ${YW}${VERIFY_FIRST_ISSUE_REASON}${CL}"
+        echo -e "  ${BL}Fix:${CL} ${GN}${VERIFY_FIRST_ISSUE_FIX}${CL}"
     fi
 
     echo ""
-    detail_line "TARGET USER" "$TARGET_USER"
+    echo -e "${BL}Next Step:${CL}"
+    echo -e "  ${YW}Run ${ANS}Script 6${YW}.${CL}"
+}
 
-    if [ "$IS_CONTAINER" == "yes" ]; then
-        detail_line "ENVIRONMENT" "LXC/Container (${VIRT_TYPE})"
+function run_verify_only_mode() {
+    VERIFY_ONLY_MODE="yes"
+    load_state_from_completion_marker
+    create_verification_report
+    write_verify_display_log
+    update_completion_marker_script5_fields
+    show_verify_only_summary
+    exit 0
+}
+
+# --- 45. FINAL SUMMARY ---
+# Displays installed versions and next step using script 1-style output.
+function show_final_summary() {
+    local docker_version=""
+    local compose_version=""
+
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+
+    if [ -n "$SUDO_CMD" ]; then
+        docker_version="$($SUDO_CMD docker --version 2>/dev/null || true)"
+        compose_version="$($SUDO_CMD docker compose version 2>/dev/null || true)"
     else
-        detail_line "ENVIRONMENT" "VM (${VIRT_TYPE})"
+        docker_version="$(docker --version 2>/dev/null || true)"
+        compose_version="$(docker compose version 2>/dev/null || true)"
     fi
 
+    echo -e "${YW}Docker:${CL}"
+    echo -e "  ${BL}Docker version:${CL} ${GN}${docker_version:-unknown}${CL}"
+    echo -e "  ${BL}Compose version:${CL} ${GN}${compose_version:-unknown}${CL}"
+    echo -e "  ${BL}Docker service:${CL} ${GN}${DOCKER_SERVICE_ENABLED}${CL}"
+    echo -e "  ${BL}containerd service:${CL} ${GN}${CONTAINERD_SERVICE_ENABLED}${CL}"
+    echo -e "  ${BL}Target user:${CL} ${GN}${TARGET_USER}${CL}"
+    echo -e "  ${BL}User in docker group:${CL} ${GN}${USER_ADDED_TO_DOCKER}${CL}"
+
+    echo ""
+    echo -e "${YW}System:${CL}"
+    detail_line "ENVIRONMENT" "$([ "$IS_CONTAINER" == "yes" ] && echo "LXC/Container (${VIRT_TYPE})" || echo "VM (${VIRT_TYPE})")"
     detail_line "SWAP DISABLED" "$SWAP_DISABLED"
-    detail_line "DOCKER INSTALLED" "$DOCKER_INSTALLED"
-    detail_line "DOCKER SERVICE" "$DOCKER_SERVICE_ENABLED"
-    detail_line "CONTAINERD SERVICE" "$CONTAINERD_SERVICE_ENABLED"
-    detail_line "DOCKER GROUP READY" "$DOCKER_GROUP_READY"
-    detail_line "USER ADDED TO DOCKER" "$USER_ADDED_TO_DOCKER"
     detail_line "DOCKER-GC HELPER" "$DOCKER_GC_INSTALLED"
     detail_line "DOCKER-GC TIMER" "$DOCKER_GC_TIMER_INSTALLED"
     detail_line "REDIS OVERCOMMIT" "${REDIS_OVERCOMMIT_CONFIGURED} (${REDIS_OVERCOMMIT_VALUE})"
     detail_line "UFW FIREWALL" "$UFW_ENABLED"
     detail_line "DAEMON CONFIG VALID" "$DAEMON_CONFIG_VALID"
-    detail_line "EXISTING SETUP DETECTED" "$EXISTING_SETUP"
-    detail_line "VERIFY LOG" "$VERIFY_LOG"
 
     echo ""
-    echo -e "${YW}Docker group membership usually requires logout/login or reboot before using Docker without sudo.${CL}"
+    echo -e "${YW}Verification:${CL}"
+    case "$VERIFY_STATUS" in
+        PASS) echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}" ;;
+        PASS_WITH_WARNINGS) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}" ;;
+        FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
+        *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
+    esac
+    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+    echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+    echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+    echo -e "  ${BL}Setup log:${CL} ${GN}${LOG_FILE}${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+
+    if [ -n "$VERIFY_FIRST_ISSUE_TYPE" ]; then
+        echo ""
+        echo -e "${YW}${VERIFY_FIRST_ISSUE_TYPE} 1:${CL}"
+        echo -e "  ${BL}Check:${CL} ${GN}${VERIFY_FIRST_ISSUE_CHECK}${CL}"
+        echo -e "  ${BL}Reason:${CL} ${YW}${VERIFY_FIRST_ISSUE_REASON}${CL}"
+        echo -e "  ${BL}Fix:${CL} ${GN}${VERIFY_FIRST_ISSUE_FIX}${CL}"
+    fi
+
     echo ""
     echo -e "${BL}SECURITY NOTE:${CL}"
     echo -e "${YW}Docker can publish container ports using Docker-managed firewall rules. Keep public exposure limited to Traefik/80/443 unless intentionally needed.${CL}"
-    echo -e "${YW}We will revisit DOCKER-USER firewall hardening after the compose stack is fully deployed and stable.
-${YW}Safe Docker cleanup uses host-side /usr/local/sbin/docker-gc-safe and never prunes volumes automatically.${CL}"
+    echo -e "${YW}Safe Docker cleanup uses host-side /usr/local/sbin/docker-gc-safe and never prunes volumes automatically.${CL}"
     echo ""
-    echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}After reboot and SSH reconnect, run script 6-dockerENVsetup-circl8.sh.${CL}"
+    echo -e "${BL}Next Step${CL}"
+    echo ""
+    if [ "$REBOOT_AFTER_FINISH" == "y" ]; then
+        echo -e "${YW}Reboot the VM, SSH back in, then run ${ANS}Script 6${YW}.${CL}"
+        echo -e "${DGN}Current file: 6-dockerENVsetup-circl8.sh${CL}"
+    else
+        echo -e "${YW}Option A - ${GN}reboot first:${CL}"
+        echo -e "  ${YW}Reboot the VM, SSH back in, then run ${ANS}Script 6${YW}.${CL}"
+        echo ""
+        echo -e "${YW}Option B - ${GN}continue after re-login:${CL}"
+        echo -e "  ${YW}Log out/in or start a new SSH session so docker group membership applies, then run ${ANS}Script 6${YW}.${CL}"
+        echo -e "  ${DGN}Current file: 6-dockerENVsetup-circl8.sh${CL}"
+    fi
     echo ""
 }
 
@@ -1667,6 +2269,7 @@ function reboot_prompt() {
     section "REBOOT"
 
     if [ "$REBOOT_AFTER_FINISH" != "y" ]; then
+        msg_skip "AUTO REBOOT SKIPPED"
         echo -e "${YW}Reboot was disabled during question collection. Reboot manually when ready.${CL}"
         return 0
     fi
@@ -1720,6 +2323,9 @@ function main() {
     verify_docker_installation
     write_completion_marker
     create_verification_report
+    write_verify_display_log
+    install_post_reboot_verify_hook
+    update_completion_marker_script5_fields
     show_final_summary
     reboot_prompt
 
