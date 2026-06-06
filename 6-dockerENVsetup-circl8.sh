@@ -13,6 +13,7 @@ BL="$(printf '\033[36m')"
 RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
 GN="$(printf '\033[1;92m')"
+ANS="$(printf '\033[1;95m')"
 DGN="$(printf '\033[32m')"
 CL="$(printf '\033[m')"
 CLF="$(printf '\033[5m')"
@@ -25,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.5.10"
-SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="postgres-pgdata-permission-repair"
+SCRIPT_VERSION="v1.6.8"
+SCRIPT_UPDATED="2026-06-06"
+SCRIPT_BUILD="script5-preflight-alignment"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -36,6 +37,17 @@ T=15
 LOG_FILE="/var/log/docker-env-setup.log"
 RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/docker-env-setup-verify.log"
+VERIFY_DISPLAY_LOG="/var/log/docker-env-setup-verify-display.log"
+VERIFY_ONLY_MODE="no"
+VERIFY_STATUS="not-run"
+VERIFY_PASS_COUNT="0"
+VERIFY_WARN_COUNT="0"
+VERIFY_FAIL_COUNT="0"
+VERIFY_FIRST_ISSUE_TYPE=""
+VERIFY_FIRST_ISSUE_CHECK=""
+VERIFY_FIRST_ISSUE_REASON=""
+VERIFY_FIRST_ISSUE_FIX=""
+PERMISSION_AUDIT_STATUS="not-run"
 COMPLETED_MARKER="/root/.docker-env-setup-completed"
 
 DEFAULT_USER="${DEFAULT_USER:-${SUDO_USER:-${USER:-dockeradmin}}}"
@@ -70,6 +82,12 @@ REGENERATE_SECRETS="n"
 DOCKER_READY="unknown"
 DOCKER_COMPOSE_READY="unknown"
 DOCKER_USER_IN_DOCKER_GROUP="unknown"
+DOCKER_PREFLIGHT_USER=""
+SCRIPT5_MARKER="/root/.docker-setup-completed"
+SCRIPT5_VERIFY_LOG="/var/log/docker-setup-verify.log"
+SCRIPT5_MARKER_STATE="missing"
+SCRIPT5_VERIFY_LOG_STATE="missing"
+SCRIPT5_VERIFY_STATUS="missing"
 
 POSTGRES_PASSWORD=""
 REDIS_PASSWORD=""
@@ -92,7 +110,9 @@ AUTHENTIK_HOST_VALUE=""
 AUTHENTIK_HOST_BROWSER_VALUE=""
 AUTHENTIK_BOOTSTRAP_EMAIL_VALUE=""
 AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
+AUTHENTIK_BOOTSTRAP_PASSWORD_MODE="auto"
 AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
+AUTHENTIK_BOOTSTRAP_TOKEN_MODE="auto"
 AUTHENTIK_API_TOKEN_MODE="skip"
 AUTHENTIK_API_TOKEN_VALUE=""
 AUTHENTIK_EMAIL__HOST_VALUE=""
@@ -131,6 +151,13 @@ PROXMOX_URL=""
 
 TEMP_FILES=()
 TEMP_DIRS=()
+APPLY_CHANGES_SECTION_SHOWN="no"
+APPLY_CURRENT_GROUP=""
+SETUP_OPTIONS_SECTION_SHOWN="no"
+SETUP_OPTIONS_CURRENT_GROUP=""
+EXISTING_SETUP_SECTION_SHOWN="no"
+EXISTING_SETUP_CURRENT_GROUP=""
+MARKER_RERUN_SELECTED="no"
 
 # =========================================================
 #  OUTPUT / LOGGING FUNCTIONS
@@ -140,12 +167,12 @@ TEMP_DIRS=()
 # Displays the Docker ENV Setup banner.
 function header_info {
 echo -e "${BL}
-██████╗  ██████╗  ██████╗██╗  ██╗███████╗██████╗     ███████╗███╗   ██╗██╗   ██╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
-██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗    ██╔════╝████╗  ██║██║   ██║    ██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
-██║  ██║██║   ██║██║     █████╔╝ █████╗  ██████╔╝    █████╗  ██╔██╗ ██║██║   ██║    ███████╗█████╗     ██║   ██║   ██║██████╔╝
-██║  ██║██║   ██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗    ██╔══╝  ██║╚██╗██║╚██╗ ██╔╝    ╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝ 
-██████╔╝╚██████╔╝╚██████╗██║  ██╗███████╗██║  ██║    ███████╗██║ ╚████║ ╚████╔╝     ███████║███████╗   ██║   ╚██████╔╝██║     
-╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝    ╚══════╝╚═╝  ╚═══╝  ╚═══╝      ╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝     
+  ███████╗ ███╗   ██╗ ██╗   ██╗    ███████╗ ███████╗ ████████╗ ██╗   ██╗ ██████╗
+  ██╔════╝ ████╗  ██║ ██║   ██║    ██╔════╝ ██╔════╝ ╚══██╔══╝ ██║   ██║ ██╔══██╗
+  █████╗   ██╔██╗ ██║ ██║   ██║    ███████╗ █████╗      ██║    ██║   ██║ ██████╔╝
+  ██╔══╝   ██║╚██╗██║ ╚██╗ ██╔╝    ╚════██║ ██╔══╝      ██║    ██║   ██║ ██╔═══╝
+  ███████╗ ██║ ╚████║  ╚████╔╝     ███████║ ███████╗    ██║    ╚██████╔╝ ██║
+  ╚══════╝ ╚═╝  ╚═══╝   ╚═══╝      ╚══════╝ ╚══════╝    ╚═╝     ╚═════╝  ╚═╝
 ${CL}"
 }
 
@@ -154,7 +181,7 @@ ${CL}"
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
-function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
+function msg_skip() { echo -e "${BFR} - ${BL}INFO${CL} - ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
 # --- SCRIPT VERSION DISPLAY ---
@@ -182,12 +209,125 @@ function section_flash_success() {
     echo -e "${BORDER}"
 }
 
+
+function begin_setup_options_once() {
+    if [ "$SETUP_OPTIONS_SECTION_SHOWN" != "yes" ]; then
+        section "SETUP OPTIONS"
+        SETUP_OPTIONS_SECTION_SHOWN="yes"
+    fi
+}
+
+function setup_options_group_header() {
+    local title="${1:-}"
+
+    begin_setup_options_once
+
+    if [ "${SETUP_OPTIONS_CURRENT_GROUP:-}" == "$title" ]; then
+        return 0
+    fi
+
+    if [ -n "${SETUP_OPTIONS_CURRENT_GROUP:-}" ]; then
+        echo ""
+    fi
+
+    SETUP_OPTIONS_CURRENT_GROUP="$title"
+    echo -e "${YW}${title}:${CL}"
+}
+
+function begin_existing_setup_check_once() {
+    if [ "$EXISTING_SETUP_SECTION_SHOWN" != "yes" ]; then
+        section "EXISTING SETUP CHECK"
+        EXISTING_SETUP_SECTION_SHOWN="yes"
+    fi
+}
+
+function existing_setup_group_header() {
+    local title="${1:-}"
+
+    begin_existing_setup_check_once
+
+    if [ "${EXISTING_SETUP_CURRENT_GROUP:-}" == "$title" ]; then
+        return 0
+    fi
+
+    EXISTING_SETUP_CURRENT_GROUP="$title"
+    echo ""
+    echo -e "${YW}${title}:${CL}"
+}
+
+function begin_apply_changes_once() {
+    if [ "$APPLY_CHANGES_SECTION_SHOWN" != "yes" ]; then
+        section "APPLY CHANGES"
+        APPLY_CHANGES_SECTION_SHOWN="yes"
+    fi
+}
+
+function apply_group_header() {
+    local title="${1:-}"
+
+    begin_apply_changes_once
+
+    if [ "${APPLY_CURRENT_GROUP:-}" == "$title" ]; then
+        return 0
+    fi
+
+    if [ -n "${APPLY_CURRENT_GROUP:-}" ]; then
+        echo ""
+    fi
+
+    APPLY_CURRENT_GROUP="$title"
+    echo -e "${YW}${title}:${CL}"
+}
+
 # --- 5B. DETAIL LINE HELPER ---
 # Prints clean script 1-style detail lines for summaries and audit output.
 function detail_line() {
     local label="$1"
     local value="$2"
-    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+    echo -e "  ${BL}${label}:${CL} ${GN}${value}${CL}"
+}
+
+function final_line() {
+    local label="$1"
+    local value="${2:-not configured}"
+    local value_color="${3:-$GN}"
+
+    [ -n "$value" ] || value="not configured"
+    printf '  %b%-24s%b %b%s%b\n' "${BL}" "${label}:" "${CL}" "${value_color}" "$value" "${CL}"
+}
+
+function https_url_or_not_configured() {
+    local host="${1:-}"
+
+    if [ -z "$host" ]; then
+        printf 'not configured'
+    elif [[ "$host" =~ ^https?:// ]]; then
+        printf '%s' "$host"
+    else
+        printf 'https://%s' "$host"
+    fi
+}
+
+function status_color_for_value() {
+    local value="${1:-unknown}"
+
+    case "$value" in
+        PASS|present|ready|yes|root|*" ready") printf '%s' "$GN" ;;
+        PASS_WITH_WARNINGS) printf '%s' "$YW" ;;
+        missing|unknown|FAIL|no|"not ready") printf '%s' "$RD" ;;
+        *) printf '%s' "$GN" ;;
+    esac
+}
+
+function aligned_status_line() {
+    local label="$1"
+    local value="${2:-unknown}"
+    local value_color="${3:-}"
+    local label_width="${4:-27}"
+
+    [ -n "$value" ] || value="unknown"
+    [ -n "$value_color" ] || value_color="$(status_color_for_value "$value")"
+    printf '  %b%-*s%b %b%s%b\n' "$BL" "$label_width" "${label}:" "$CL" "$value_color" "$value" "$CL"
 }
 
 # --- 6. TTY PRINT HELPER ---
@@ -784,7 +924,7 @@ function timed_yes_no() {
     final_label="$(yes_no_label "$answer")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${final_label}${CL}"
     flush_input_buffer
 
     echo "$answer"
@@ -843,7 +983,7 @@ function timed_text_input() {
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
     flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
@@ -858,27 +998,54 @@ function text_input() {
 
     answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
-    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
     echo "$answer"
 }
 
-# --- 27A. UNTIMED MENU INPUT HELPER ---
-# Reads a small menu choice without a countdown.
-# Countdown prompts are reserved only for Y/n decisions.
-function untimed_menu_input() {
+# --- 27A. ROBUST NUMERIC MENU INPUT HELPER ---
+# Reads one full line from /dev/tty for numbered menus.
+# This avoids the editable character-by-character path and prevents arrow-key escape residue from becoming repeated errors.
+function numeric_menu_input() {
     local prompt="$1"
     local default="$2"
-    local answer=""
+    local min_choice="$3"
+    local max_choice="$4"
+    local raw_choice=""
+    local choice=""
 
     while true; do
-        answer="$(timed_text_input "$prompt" "$default")"
-        answer="$(printf '%s' "$answer" | tr -d '\r\n' | xargs || true)"
+        flush_input_buffer 2>/dev/null || true
+        tty_print "${YW}${prompt} [default: ${default}]: ${CL}"
 
-        if [ -n "$answer" ]; then
-            echo "$answer"
+        if [ -r /dev/tty ]; then
+            IFS= read -r raw_choice < /dev/tty || raw_choice=""
+        else
+            IFS= read -r raw_choice || raw_choice=""
+        fi
+
+        # Clear the prompt/value line after ENTER; caller-specific confirmations remain visible.
+        tty_print $'\033[1A\r\033[2K'
+
+        raw_choice="$(printf '%s' "$raw_choice" | tr -d '\r\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+
+        if [ -z "$raw_choice" ]; then
+            choice="$default"
+        else
+            choice="$(printf '%s' "$raw_choice" | tr -cd '0-9')"
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge "$min_choice" ] && [ "$choice" -le "$max_choice" ]; then
+            echo "$choice"
             return 0
         fi
+
+        tty_println "${WARN} ${YW}Invalid selection. Choose ${min_choice}-${max_choice}.${CL}"
     done
+}
+# --- 27A. UNTIMED MENU INPUT HELPER ---
+# Compatibility wrapper for numbered menus.
+function untimed_menu_input() {
+    numeric_menu_input "$1" "$2" "1" "9"
 }
 
 # --- 27B. NON-TIMED HOSTNAME INPUT HELPER ---
@@ -890,7 +1057,7 @@ function hostname_input() {
 
     answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
-    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
     echo "$answer"
 }
 
@@ -920,7 +1087,15 @@ function hidden_input() {
 # The value is returned through stdout for command substitution only; prompt/token text is printed only to /dev/tty.
 # Do not call flush_input_buffer here because it can consume pasted token characters.
 function sensitive_line_input() {
+    sensitive_visible_line_input "$1" "${2:-}"
+}
+
+# --- 28B. VISIBLE SENSITIVE LINE INPUT HELPER ---
+# Shows pasted/typed private values while entering, clears the raw line after ENTER, then prints a non-sensitive confirmation.
+# The captured value is returned through stdout only for assignment. Do not call flush_input_buffer here; it can consume pasted tokens.
+function sensitive_visible_line_input() {
     local prompt="$1"
+    local confirmation_label="${2:-}"
     local answer=""
     local cols="80"
     local visible_len="0"
@@ -944,9 +1119,12 @@ function sensitive_line_input() {
     [ "$lines_to_clear" -lt 1 ] && lines_to_clear="1"
 
     for ((i=0; i<lines_to_clear; i++)); do
-        tty_print "[1A
-[2K"
+        tty_print $'\033[1A\r\033[2K'
     done
+
+    if [ -n "$confirmation_label" ]; then
+        tty_println "${CM} ${GN}${confirmation_label}${CL}"
+    fi
 
     printf '%s' "$answer"
 }
@@ -1410,23 +1588,189 @@ function init_script() {
 
 # --- 41. PREVIOUS MARKER CHECK ---
 # Warns if Docker ENV setup was already completed before.
+function marker_display_value() {
+    local label="$1"
+    local file="$2"
+    local value=""
+
+    if root_path_exists "$file"; then
+        value="$(root_read_file "$file" 2>/dev/null | awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }' | xargs || true)"
+    fi
+
+    [ -n "$value" ] || value="unknown"
+    echo "$value"
+}
+
+function marker_key_value() {
+    local key="$1"
+    local file="$2"
+    local value=""
+
+    if root_path_exists "$file"; then
+        value="$(root_read_file "$file" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | xargs || true)"
+    fi
+
+    echo "$value"
+}
+
+function docker_env_summary_value_color() {
+    local value="${1:-unknown}"
+    case "$value" in
+        present|PASS) printf '%s' "$GN" ;;
+        PASS_WITH_WARNINGS) printf '%s' "$YW" ;;
+        missing|FAIL|unknown) printf '%s' "$RD" ;;
+        *) printf '%s' "$GN" ;;
+    esac
+}
+
+function show_previous_marker_compact_summary() {
+    local marker_file="$1"
+    local marker_docker_dir=""
+    local marker_secrets_dir=""
+    local verify_status=""
+    local env_state="missing"
+    local secrets_state="missing"
+    local marker_state="present"
+
+    marker_docker_dir="$(marker_display_value "Docker dir" "$marker_file")"
+    marker_secrets_dir="$(marker_display_value "Secrets dir" "$marker_file")"
+    verify_status="$(marker_key_value "SCRIPT6_VERIFY_STATUS" "$marker_file")"
+    [ -n "$verify_status" ] || verify_status="unknown"
+
+    if [ "$marker_docker_dir" != "unknown" ] && root_path_exists "${marker_docker_dir}/.env"; then
+        env_state="present"
+    fi
+
+    if [ "$marker_secrets_dir" != "unknown" ] && root_path_exists "$marker_secrets_dir"; then
+        secrets_state="present"
+    fi
+
+    echo -e "${YW}Existing Docker ENV detected:${CL}"
+    aligned_status_line "Docker directory" "$marker_docker_dir" "$(docker_env_summary_value_color "$marker_docker_dir")" 19
+    aligned_status_line ".env file" "$env_state" "$(docker_env_summary_value_color "$env_state")" 19
+    aligned_status_line "Secrets directory" "$secrets_state" "$(docker_env_summary_value_color "$secrets_state")" 19
+    aligned_status_line "Completion marker" "$marker_state" "$(docker_env_summary_value_color "$marker_state")" 19
+    aligned_status_line "Verification" "$verify_status" "$(docker_env_summary_value_color "$verify_status")" 19
+}
+
+function show_existing_path_compact_summary() {
+    local env_state="missing"
+    local secrets_state="missing"
+    local marker_state="missing"
+    local verify_status="unknown"
+
+    root_path_exists "${DOCKER_DIR}/.env" && env_state="present"
+    root_path_exists "$DOCKER_SECRETS_DIR" && secrets_state="present"
+    root_path_exists "$COMPLETED_MARKER" && marker_state="present"
+    if root_path_exists "$COMPLETED_MARKER"; then
+        verify_status="$(marker_key_value "SCRIPT6_VERIFY_STATUS" "$COMPLETED_MARKER")"
+        [ -n "$verify_status" ] || verify_status="unknown"
+    fi
+
+    echo -e "${YW}Existing Docker ENV detected:${CL}"
+    aligned_status_line "Docker directory" "$DOCKER_DIR" "$(docker_env_summary_value_color "$DOCKER_DIR")" 19
+    aligned_status_line ".env file" "$env_state" "$(docker_env_summary_value_color "$env_state")" 19
+    aligned_status_line "Secrets directory" "$secrets_state" "$(docker_env_summary_value_color "$secrets_state")" 19
+    aligned_status_line "Completion marker" "$marker_state" "$(docker_env_summary_value_color "$marker_state")" 19
+    aligned_status_line "Verification" "$verify_status" "$(docker_env_summary_value_color "$verify_status")" 19
+}
+
+function previous_marker_action_menu() {
+    local action=""
+
+    while true; do
+        tty_println "  ${YW}1)${CL} Verify existing setup"
+        tty_println "  ${YW}2)${CL} Re-run Docker ENV setup"
+        tty_println "  ${YW}3)${CL} Exit"
+        tty_println ""
+
+        action="$(numeric_menu_input "Select action" "1" "1" "3")"
+
+        case "$action" in
+            1)
+                tty_println "${CM} ${GN}Verify existing setup selected${CL}"
+                echo "$action"
+                return 0
+                ;;
+            2)
+                tty_println "${CM} ${GN}Re-run Docker ENV setup selected${CL}"
+                echo "$action"
+                return 0
+                ;;
+            3)
+                tty_println "${CM} ${GN}Exit selected${CL}"
+                echo "$action"
+                return 0
+                ;;
+            *)
+                tty_println "${WARN} ${YW}Invalid action. Choose 1, 2, or 3.${CL}"
+                tty_println ""
+                ;;
+        esac
+    done
+}
+
+function default_docker_env_setup_present() {
+    local default_userdir="/home/${DEFAULT_USER}"
+    local default_docker_dir="${default_userdir}/docker"
+    local default_secrets_dir="${default_docker_dir}/secrets"
+
+    if root_path_exists "$COMPLETED_MARKER" || root_path_exists "${default_docker_dir}/.env" || root_path_exists "$default_secrets_dir"; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 41. PREVIOUS MARKER CHECK ---
+# Offers verification-only rerun mode when Docker ENV setup was already completed previously.
 function check_previous_marker() {
-    local continue_yn=""
+    local marker_action=""
+    local default_userdir="/home/${DEFAULT_USER}"
+    local default_docker_dir="${default_userdir}/docker"
+    local default_secrets_dir="${default_docker_dir}/secrets"
 
     if root_path_exists "$COMPLETED_MARKER"; then
-        section "PREVIOUS DOCKER ENV SETUP MARKER DETECTED"
-
-        echo -e "${YW}A previous Docker ENV Setup marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
+        section "EXISTING SETUP CHECK"
+        EXISTING_SETUP_SECTION_SHOWN="yes"
+        show_previous_marker_compact_summary "$COMPLETED_MARKER"
         echo ""
-        root_read_file "$COMPLETED_MARKER" 2>/dev/null || true
-        echo ""
+        echo -e "${YW}Action:${CL}"
 
-        continue_yn="$(timed_yes_no "Continue anyway?" "n")"
+        marker_action="$(previous_marker_action_menu)"
 
-        if [[ "$continue_yn" =~ ^[Nn] ]]; then
-            exit 0
-        fi
+        case "$marker_action" in
+            1) run_verify_only_mode; exit 0 ;;
+            2) MARKER_RERUN_SELECTED="yes"; return 0 ;;
+            3) exit 0 ;;
+            *) return 0 ;;
+        esac
     fi
+
+    if root_path_exists "${default_docker_dir}/.env" || root_path_exists "$default_secrets_dir"; then
+        DOCKER_USER="$DEFAULT_USER"
+        USERDIR="$default_userdir"
+        DOCKER_DIR="$default_docker_dir"
+        DOCKER_SECRETS_DIR="$default_secrets_dir"
+        CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
+
+        section "EXISTING SETUP CHECK"
+        EXISTING_SETUP_SECTION_SHOWN="yes"
+        show_existing_path_compact_summary
+        echo ""
+        echo -e "${YW}Action:${CL}"
+
+        marker_action="$(previous_marker_action_menu)"
+
+        case "$marker_action" in
+            1) prepare_existing_verify_state_from_paths; run_verify_only_mode; exit 0 ;;
+            2) MARKER_RERUN_SELECTED="yes"; return 0 ;;
+            3) exit 0 ;;
+            *) return 0 ;;
+        esac
+    fi
+
+    return 0
 }
 
 # =========================================================
@@ -1440,9 +1784,8 @@ function start_confirmation() {
 
     section "START"
 
-    echo -e "${YW}This script creates Docker folders, .env and service secrets for the Home-Hosted Social Media SaaS project.${CL}"
-    echo -e "${YW}Secrets are written to .env and ${DEFAULT_USER}'s Docker secrets folder.${CL}"
-    echo -e "${YW}Sensitive input and final secret display bypass tee logging.${CL}"
+    echo -e "${YW}Creates Docker folders, .env, service secrets and Traefik config.${CL}"
+    echo -e "${YW}Sensitive inputs are not logged.${CL}"
     echo ""
 
     start_yn="$(timed_yes_no "Start the Docker ENV Setup Script?" "y")"
@@ -1454,12 +1797,123 @@ function start_confirmation() {
     return 0
 }
 
+# --- 42A. SCRIPT 5 PREFLIGHT HELPERS ---
+# Reads Script 5 marker/verification state and validates Docker user/group readiness before Script 6 choices.
+function script5_marker_readable_value() {
+    local label="$1"
+    local value=""
+
+    if root_path_exists "$SCRIPT5_MARKER"; then
+        value="$(root_read_file "$SCRIPT5_MARKER" 2>/dev/null | awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }' | xargs || true)"
+    fi
+
+    printf '%s' "$value"
+}
+
+function script5_marker_key_value() {
+    local key="$1"
+    local value=""
+
+    if root_path_exists "$SCRIPT5_MARKER"; then
+        value="$(root_read_file "$SCRIPT5_MARKER" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | xargs || true)"
+    fi
+
+    printf '%s' "$value"
+}
+
+function current_login_user_guess() {
+    local candidate="${SUDO_USER:-}"
+
+    if [ -z "$candidate" ] || [ "$candidate" == "root" ]; then
+        candidate="$(logname 2>/dev/null || true)"
+    fi
+
+    if [ -z "$candidate" ] || [ "$candidate" == "root" ]; then
+        candidate="${USER:-}"
+    fi
+
+    printf '%s' "$candidate"
+}
+
+function detect_script5_preflight_state() {
+    local marker_user=""
+    local current_user=""
+    local verify_from_log=""
+    local user_added=""
+
+    if root_path_exists "$SCRIPT5_MARKER"; then
+        SCRIPT5_MARKER_STATE="present"
+    else
+        SCRIPT5_MARKER_STATE="missing"
+    fi
+
+    if root_path_exists "$SCRIPT5_VERIFY_LOG"; then
+        SCRIPT5_VERIFY_LOG_STATE="present"
+        verify_from_log="$(root_read_file "$SCRIPT5_VERIFY_LOG" 2>/dev/null | awk -F= '$1 == "VERIFY_STATUS" {print $2; exit}' | xargs || true)"
+    else
+        SCRIPT5_VERIFY_LOG_STATE="missing"
+    fi
+
+    SCRIPT5_VERIFY_STATUS="$(script5_marker_key_value "SCRIPT5_VERIFY_STATUS")"
+    [ -n "$SCRIPT5_VERIFY_STATUS" ] || SCRIPT5_VERIFY_STATUS="$verify_from_log"
+    if [ -z "$SCRIPT5_VERIFY_STATUS" ]; then
+        if [ "$SCRIPT5_VERIFY_LOG_STATE" == "present" ]; then
+            SCRIPT5_VERIFY_STATUS="unknown"
+        else
+            SCRIPT5_VERIFY_STATUS="missing"
+        fi
+    fi
+
+    marker_user="$(script5_marker_key_value "SCRIPT5_TARGET_USER")"
+    [ -n "$marker_user" ] || marker_user="$(script5_marker_readable_value "Target user")"
+    [ -n "$marker_user" ] || marker_user="$(script5_marker_readable_value "User")"
+    current_user="$(current_login_user_guess)"
+
+    if [ -n "$marker_user" ]; then
+        DOCKER_PREFLIGHT_USER="$marker_user"
+    else
+        DOCKER_PREFLIGHT_USER="$current_user"
+    fi
+
+    user_added="$(script5_marker_key_value "SCRIPT5_USER_ADDED_TO_DOCKER")"
+
+    if getent group docker >/dev/null 2>&1 && [ -n "$DOCKER_PREFLIGHT_USER" ] && id "$DOCKER_PREFLIGHT_USER" >/dev/null 2>&1 && id -nG "$DOCKER_PREFLIGHT_USER" 2>/dev/null | grep -qw docker; then
+        DOCKER_USER_IN_DOCKER_GROUP="${DOCKER_PREFLIGHT_USER} ready"
+    elif [ "$user_added" == "yes" ] && [ -n "$DOCKER_PREFLIGHT_USER" ] && id "$DOCKER_PREFLIGHT_USER" >/dev/null 2>&1 && getent group docker >/dev/null 2>&1 && id -nG "$DOCKER_PREFLIGHT_USER" 2>/dev/null | grep -qw docker; then
+        DOCKER_USER_IN_DOCKER_GROUP="${DOCKER_PREFLIGHT_USER} ready"
+    else
+        DOCKER_USER_IN_DOCKER_GROUP="not ready"
+    fi
+}
+
+function script5_verify_display_value() {
+    if [ "$SCRIPT5_VERIFY_LOG_STATE" != "present" ]; then
+        printf 'missing'
+    else
+        printf '%s' "${SCRIPT5_VERIFY_STATUS:-unknown}"
+    fi
+}
+
+function script5_preflight_needs_warning() {
+    [ "$SCRIPT5_MARKER_STATE" != "present" ] && return 0
+    [ "$SCRIPT5_VERIFY_LOG_STATE" != "present" ] && return 0
+    case "$SCRIPT5_VERIFY_STATUS" in
+        PASS|PASS_WITH_WARNINGS) ;;
+        *) return 0 ;;
+    esac
+    [ "$DOCKER_USER_IN_DOCKER_GROUP" == "not ready" ] && return 0
+    return 1
+}
+
 # --- 43. DOCKER READINESS CHECK ---
 # Checks that script 5 likely ran successfully before this script.
 function check_docker_readiness() {
-    section "DOCKER READINESS CHECK"
+    local sudo_state="ready"
+    local script5_verify_display=""
 
-    msg_info "Checking Docker readiness"
+    section "ENVIRONMENT CHECK"
+
+    msg_info "Checking Docker ENV prerequisites"
 
     if command -v docker >/dev/null 2>&1 && docker --version >/dev/null 2>&1; then
         DOCKER_READY="yes"
@@ -1477,21 +1931,40 @@ function check_docker_readiness() {
         DOCKER_COMPOSE_READY="no"
     fi
 
-    msg_ok "DOCKER READINESS CHECK COMPLETE"
+    detect_script5_preflight_state
+    script5_verify_display="$(script5_verify_display_value)"
+    [ -z "$SUDO_CMD" ] && sudo_state="root"
+
+    msg_ok "ENVIRONMENT CHECK COMPLETE"
+
+    if ! default_docker_env_setup_present; then
+        msg_ok "No existing Docker ENV setup detected"
+    fi
 
     echo ""
-    detail_line "DOCKER CLI" "$DOCKER_READY"
-    detail_line "DOCKER COMPOSE" "$DOCKER_COMPOSE_READY"
+    echo -e "${YW}Environment:${CL}"
+    aligned_status_line "Sudo/passwordless sudo" "$sudo_state" "$(status_color_for_value "$sudo_state")" 27
+    aligned_status_line "Required dependencies" "ready" "$GN" 27
+    aligned_status_line "Docker CLI" "$DOCKER_READY" "$(status_color_for_value "$DOCKER_READY")" 27
+    aligned_status_line "Docker Compose" "$DOCKER_COMPOSE_READY" "$(status_color_for_value "$DOCKER_COMPOSE_READY")" 27
+    aligned_status_line "Docker user/group" "$DOCKER_USER_IN_DOCKER_GROUP" "$(status_color_for_value "$DOCKER_USER_IN_DOCKER_GROUP")" 27
+    aligned_status_line "Previous Script 5 marker" "$SCRIPT5_MARKER_STATE" "$(status_color_for_value "$SCRIPT5_MARKER_STATE")" 27
+    aligned_status_line "Previous Script 5 verify" "$script5_verify_display" "$(status_color_for_value "$script5_verify_display")" 27
 
     if [ "$DOCKER_READY" != "yes" ] || [ "$DOCKER_COMPOSE_READY" != "yes" ]; then
         msg_warn "Docker or Docker Compose was not detected. Script 5 should normally run before this script."
     fi
+
+    if script5_preflight_needs_warning; then
+        msg_warn "Script 5 Docker setup was not fully verified. Run Script 5 verify-only before Script 6."
+    fi
 }
+
 
 # --- 44. USER AND PATH INPUTS ---
 # Collects and validates Docker user, user home path and Docker project path.
 function collect_user_and_path_inputs() {
-    section "USER / PATH CONFIGURATION"
+    setup_options_group_header "User / path"
 
     while true; do
         DOCKER_USER="$(timed_text_input "Enter Linux username" "$DEFAULT_USER")"
@@ -1549,54 +2022,109 @@ function collect_user_and_path_inputs() {
 
 # --- 45. EXISTING SETUP DETECTION ---
 # Detects existing .env, secrets folder or marker to prevent accidental secret rotation.
+function read_existing_env_value() {
+    local key="$1"
+    local value=""
+
+    if [ -n "${DOCKER_DIR:-}" ] && root_path_exists "${DOCKER_DIR}/.env"; then
+        value="$(root_read_file "${DOCKER_DIR}/.env" 2>/dev/null | grep -E "^${key}=" | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    fi
+
+    printf '%s' "$value"
+}
+
+function prepare_existing_verify_state_from_paths() {
+    local value=""
+
+    [ -n "${DOCKER_SECRETS_DIR:-}" ] || DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
+    [ -n "${CF_API_TOKEN_FILE:-}" ] || CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
+    [ -n "${TRAEFIK_DIR:-}" ] || TRAEFIK_DIR="${DOCKER_DIR}/appdata/traefik"
+    [ -n "${TRAEFIK_ACME_DIR:-}" ] || TRAEFIK_ACME_DIR="${TRAEFIK_DIR}/acme"
+    [ -n "${TRAEFIK_STATIC_CONFIG_FILE:-}" ] || TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_DIR}/traefik.yml"
+    [ -n "${TRAEFIK_DYNAMIC_CONFIG_FILE:-}" ] || TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DIR}/dynamic-config.yml"
+
+    value="$(read_existing_env_value "DOMAIN")"; [ -n "$value" ] && DOMAIN_VALUE="$value"
+    value="$(read_existing_env_value "ADMIN_UI")"; [ -n "$value" ] && ADMIN_UI="$value"
+    value="$(read_existing_env_value "TRAEFIK_DASHBOARD_HOST")"; [ -n "$value" ] && TRAEFIK_DASHBOARD_HOST="$value"
+
+    return 0
+}
+
+# --- 45. EXISTING SETUP DETECTION ---
+# Detects existing .env, secrets folder or marker to prevent accidental secret rotation.
 function detect_existing_setup() {
-    local continue_existing_yn=""
+    local existing_action=""
     local regenerate_yn=""
+    local env_state="missing"
+    local secrets_state="missing"
+    local marker_state="missing"
 
-    section "EXISTING SETUP CHECK"
+    msg_info "Checking selected Docker ENV path"
 
-    msg_info "Checking for existing Docker ENV setup"
+    if root_path_exists "$COMPLETED_MARKER"; then marker_state="present"; fi
+    if root_path_exists "${DOCKER_DIR}/.env"; then env_state="present"; fi
+    if root_path_exists "${DOCKER_SECRETS_DIR}"; then secrets_state="present"; fi
 
-    if root_path_exists "$COMPLETED_MARKER" || root_path_exists "${DOCKER_DIR}/.env" || root_path_exists "${DOCKER_SECRETS_DIR}"; then
+    if [ "$marker_state" == "present" ] || [ "$env_state" == "present" ] || [ "$secrets_state" == "present" ]; then
         EXISTING_SETUP="yes"
     else
         EXISTING_SETUP="no"
     fi
 
-    if [ "$EXISTING_SETUP" == "yes" ]; then
-        msg_warn "Existing Docker ENV setup detected"
+    if [ "$EXISTING_SETUP" != "yes" ]; then
+        REGENERATE_SECRETS="n"
+        tty_print "${BFR}"
+        return 0
+    fi
+
+    tty_print "${BFR}"
+
+    if [ "$MARKER_RERUN_SELECTED" != "yes" ]; then
+        section "EXISTING SETUP CHECK"
+        EXISTING_SETUP_SECTION_SHOWN="yes"
+        show_existing_path_compact_summary
+    fi
+
+    if [ "$MARKER_RERUN_SELECTED" != "yes" ]; then
         echo ""
-        echo -e "${RD}WARNING: Existing Docker ENV setup detected.${CL}"
-        echo -e "${YW}Re-running can overwrite .env and service secret files.${CL}"
-        echo -e "${YW}Existing secrets will be reused unless you explicitly choose to regenerate them.${CL}"
-        echo ""
+        echo -e "${YW}Action:${CL}"
+        existing_action="$(previous_marker_action_menu)"
 
-        continue_existing_yn="$(timed_yes_no "Continue with existing Docker ENV setup?" "n")"
+        case "$existing_action" in
+            1)
+                prepare_existing_verify_state_from_paths
+                run_verify_only_mode
+                exit 0
+                ;;
+            2)
+                ;;
+            3)
+                exit 0
+                ;;
+            *)
+                ;;
+        esac
+    fi
 
-        if [[ "$continue_existing_yn" =~ ^[Nn] ]]; then
-            echo -e "${YW}Docker ENV setup cancelled. Existing files were left untouched.${CL}"
-            exit 0
-        fi
+    msg_warn "Existing Docker ENV setup detected"
+    echo -e "${YW}Existing secrets will be reused unless you explicitly choose to regenerate them.${CL}"
+    echo ""
 
-        regenerate_yn="$(timed_yes_no "Regenerate all service secrets?" "n")"
+    regenerate_yn="$(timed_yes_no "Regenerate all service secrets?" "n")"
 
-        if [[ "$regenerate_yn" =~ ^[Yy] ]]; then
-            REGENERATE_SECRETS="y"
-            msg_warn "Secret regeneration selected. Existing deployed containers may need rebuilding."
-        else
-            REGENERATE_SECRETS="n"
-            msg_ok "EXISTING SECRETS WILL BE REUSED WHERE PRESENT"
-        fi
+    if [[ "$regenerate_yn" =~ ^[Yy] ]]; then
+        REGENERATE_SECRETS="y"
+        msg_warn "Secret regeneration selected. Existing deployed containers may need rebuilding."
     else
         REGENERATE_SECRETS="n"
-        msg_ok "NO EXISTING DOCKER ENV SETUP DETECTED"
+        msg_ok "EXISTING SECRETS WILL BE REUSED WHERE PRESENT"
     fi
 }
 
 # --- 46. DOMAIN / CLOUDFLARE INPUTS ---
 # Collects and validates timezone, domain, Cloudflare email/zone ID and token.
 function collect_domain_cloudflare_inputs() {
-    section "DOMAIN / CLOUDFLARE"
+    setup_options_group_header "Domain / Cloudflare"
 
     TZ_VALUE="$(timed_text_input "Enter timezone" "$DEFAULT_TZ")"
 
@@ -1611,18 +2139,24 @@ function collect_domain_cloudflare_inputs() {
     done
 
     while true; do
-        CF_ZONE_ID_VALUE="$(timed_text_input "Enter Cloudflare Zone ID or leave empty" "$DEFAULT_CF_ZONE_ID")"
+        CF_ZONE_ID_VALUE="$(sensitive_visible_line_input "Enter Cloudflare Zone ID, or leave empty")" || CF_ZONE_ID_VALUE=""
+        CF_ZONE_ID_VALUE="$(printf '%s' "$CF_ZONE_ID_VALUE" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
         if validate_cf_zone_id "$CF_ZONE_ID_VALUE"; then
+            if [ -n "$CF_ZONE_ID_VALUE" ]; then
+                msg_ok "Cloudflare Zone ID captured"
+            else
+                msg_skip "Cloudflare Zone ID left empty"
+            fi
             break
         fi
 
-        msg_warn "Invalid Cloudflare Zone ID. Leave empty or enter the hex zone ID."
+        msg_warn "Invalid Cloudflare Zone ID. Leave empty or enter the hex Zone ID."
     done
 
     # Ask for API token before email. When token auth is used, Cloudflare email is not required.
     # This avoids cf-companion receiving email-style auth values when a scoped API token is intended.
-    CF_API_TOKEN_VALUE="$(sensitive_line_input "Enter Cloudflare API Token, or leave empty")" || CF_API_TOKEN_VALUE=""
+    CF_API_TOKEN_VALUE="$(sensitive_visible_line_input "Enter Cloudflare API Token, or leave empty")" || CF_API_TOKEN_VALUE=""
     CF_API_TOKEN_VALUE="$(printf '%s' "$CF_API_TOKEN_VALUE" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
     if [ -z "$CF_API_TOKEN_VALUE" ] && root_file_not_empty "$CF_API_TOKEN_FILE"; then
@@ -1635,11 +2169,12 @@ function collect_domain_cloudflare_inputs() {
         CF_AUTH_MODE="api_token"
         CF_EMAIL_REQUIRED="no"
         CF_API_EMAIL_VALUE=""
-        msg_ok "CLOUDFLARE API TOKEN CAPTURED"
+        msg_ok "Cloudflare API token captured"
     else
         CF_AUTH_MODE="email_or_manual"
         CF_EMAIL_REQUIRED="yes"
-        msg_warn "Cloudflare API token left empty. Email can be entered for legacy/manual Cloudflare auth, but API token is recommended."
+        msg_skip "Cloudflare API token not provided"
+
         while true; do
             CF_API_EMAIL_VALUE="$(timed_text_input "Enter Cloudflare API Email" "$DEFAULT_CF_API_EMAIL")"
 
@@ -1658,9 +2193,9 @@ function collect_domain_cloudflare_inputs() {
 # --- 47. SERVICE HOSTNAMES INPUTS ---
 # Collects optional per-service hostnames and writes into variables used by write_env_file().
 function collect_service_hostnames() {
-    section "SERVICE HOSTNAMES"
+    setup_options_group_header "Service hostnames"
 
-    tty_println "Base domain: ${DOMAIN_VALUE}"
+    tty_println "${BL}Base domain:${CL} ${ANS}${DOMAIN_VALUE}${CL}"
     echo ""
 
     # Compute defaults
@@ -1709,17 +2244,17 @@ function collect_service_hostnames() {
     preview_files="${existing_files:-${def_files}}"
     preview_code="${existing_code:-${def_code}}"
 
-    echo "Default service hostnames:"
-    echo "  Landing page:      ${preview_landing}"
-    echo "  Landing www:       ${preview_landing_www}"
-    echo "  Authentik:         ${preview_authentik}"
-    echo "  Traefik:           ${preview_traefik}"
-    echo "  Admin UI:          ${preview_admin}"
-    echo "  Admin Dashboard:   ${preview_admin_dashboard}"
-    echo "  Postiz/Circl8 app: ${preview_postiz}"
-    echo "  n8n:               ${preview_n8n}"
-    echo "  Files:             ${preview_files}"
-    echo "  VS Code:           ${preview_code}"
+    echo -e "${YW}Service hostnames:${CL}"
+    echo -e "  ${BL}Landing page:${CL}      ${GN}${preview_landing}${CL}"
+    echo -e "  ${BL}Landing www:${CL}       ${GN}${preview_landing_www}${CL}"
+    echo -e "  ${BL}Authentik:${CL}         ${GN}${preview_authentik}${CL}"
+    echo -e "  ${BL}Traefik:${CL}           ${GN}${preview_traefik}${CL}"
+    echo -e "  ${BL}Admin UI:${CL}          ${GN}${preview_admin}${CL}"
+    echo -e "  ${BL}Admin Dashboard:${CL}   ${GN}${preview_admin_dashboard}${CL}"
+    echo -e "  ${BL}Postiz/Circl8 app:${CL} ${GN}${preview_postiz}${CL}"
+    echo -e "  ${BL}n8n:${CL}               ${GN}${preview_n8n}${CL}"
+    echo -e "  ${BL}Files:${CL}             ${GN}${preview_files}${CL}"
+    echo -e "  ${BL}VS Code:${CL}           ${GN}${preview_code}${CL}"
     echo ""
 
     # Ask whether to customize (default No)
@@ -1805,22 +2340,23 @@ function collect_service_hostnames() {
     done
 
     echo ""
-    detail_line "LANDING_HOST" "$LANDING_HOST"
-    detail_line "LANDING_WWW_HOST" "$LANDING_WWW_HOST"
-    detail_line "AUTHENTIK_HOST" "$AUTHENTIK_HOST"
-    detail_line "TRAEFIK_HOST" "$TRAEFIK_HOST"
-    detail_line "ADMIN_UI_HOST" "$ADMIN_UI_HOST"
-    detail_line "ADMIN_DASHBOARD_HOST" "$ADMIN_DASHBOARD_HOST"
-    detail_line "POSTIZ_HOST" "$POSTIZ_HOST"
-    detail_line "N8N_HOST" "$N8N_HOST"
-    detail_line "FILEBROWSER_HOST" "$FILEBROWSER_HOST"
-    detail_line "VSCODE_HOST" "$VSCODE_HOST"
+    echo -e "${YW}Service hostnames:${CL}"
+    echo -e "  ${BL}Landing page:${CL}      ${ANS}${LANDING_HOST}${CL}"
+    echo -e "  ${BL}Landing www:${CL}       ${ANS}${LANDING_WWW_HOST}${CL}"
+    echo -e "  ${BL}Authentik:${CL}         ${ANS}${AUTHENTIK_HOST}${CL}"
+    echo -e "  ${BL}Traefik:${CL}           ${ANS}${TRAEFIK_HOST}${CL}"
+    echo -e "  ${BL}Admin UI:${CL}          ${ANS}${ADMIN_UI_HOST}${CL}"
+    echo -e "  ${BL}Admin Dashboard:${CL}   ${ANS}${ADMIN_DASHBOARD_HOST}${CL}"
+    echo -e "  ${BL}Postiz/Circl8 app:${CL} ${ANS}${POSTIZ_HOST}${CL}"
+    echo -e "  ${BL}n8n:${CL}               ${ANS}${N8N_HOST}${CL}"
+    echo -e "  ${BL}Files:${CL}             ${ANS}${FILEBROWSER_HOST}${CL}"
+    echo -e "  ${BL}VS Code:${CL}           ${ANS}${VSCODE_HOST}${CL}"
 
     local confirm="$(timed_yes_no "Write these hostnames to .env?" "Y")"
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         msg_ok "Hostnames will be written into .env when write_env_file() runs"
     else
-        msg_warn "Hostnames not changed; existing values will be preserved"
+        msg_skip "Hostnames not changed; existing values will be preserved"
         # If user cancels, preserve existing or defaults without writing changes now
         LANDING_HOST="${existing_landing:-${def_landing}}"
         LANDING_WWW_HOST="${existing_landing_www:-${def_landing_www}}"
@@ -1849,16 +2385,9 @@ function collect_traefik_inputs() {
 
     detected_primary_ip="$(detect_primary_ipv4)"
     detected_gateway_ip="$(detect_default_gateway_ipv4)"
-
-    tty_println " ${BL}━━━━━▶${CL} ${YW}Discovering Proxmox host on local network...${CL}"
     default_proxmox_url="$(detect_proxmox_internal_url_default)"
-    if [ -n "$default_proxmox_url" ]; then
-        tty_println " ${CM} ${GN}PROXMOX HOST DISCOVERED:${CL} ${default_proxmox_url}"
-    else
-        tty_println " ${WARN} ${YW}PROXMOX HOST AUTO-DISCOVERY DID NOT FIND A VERIFIED HOST${CL}"
-    fi
 
-    section "TRAEFIK CONFIG"
+    setup_options_group_header "Traefik config"
 
     while true; do
         TRAEFIK_DASHBOARD_HOST="$(timed_text_input "Enter Traefik dashboard host" "$default_traefik_host")"
@@ -1871,12 +2400,13 @@ function collect_traefik_inputs() {
     done
 
     echo ""
-    [ -n "$detected_primary_ip" ] && detail_line "Detected current system IPv4" "$detected_primary_ip"
-    [ -n "$detected_gateway_ip" ] && detail_line "Detected default gateway (not assumed Proxmox)" "$detected_gateway_ip"
+    echo -e "${YW}Network / Proxmox:${CL}"
+    [ -n "$detected_primary_ip" ] && detail_line "System IPv4" "$detected_primary_ip"
+    [ -n "$detected_gateway_ip" ] && detail_line "Default gateway" "$detected_gateway_ip"
     if [ -n "$default_proxmox_url" ]; then
-        detail_line "Suggested Proxmox URL" "$default_proxmox_url"
+        detail_line "Proxmox LAN URL" "$default_proxmox_url"
     else
-        msg_warn "No Proxmox URL could be auto-detected. You will need to type it if enabling the route."
+        detail_line "Proxmox LAN URL" "not found"
     fi
     echo ""
 
@@ -1886,7 +2416,8 @@ function collect_traefik_inputs() {
         PROXMOX_ROUTE_ENABLED="y"
 
         while true; do
-            PROXMOX_HOST="$(timed_text_input "Enter Proxmox hostname" "$default_proxmox_host")"
+            PROXMOX_HOST="$(editable_input_loop "Enter Proxmox hostname" "$default_proxmox_host" "")"
+            [ -z "$PROXMOX_HOST" ] && PROXMOX_HOST="$default_proxmox_host"
 
             if validate_domain "$PROXMOX_HOST"; then
                 break
@@ -1895,13 +2426,29 @@ function collect_traefik_inputs() {
             msg_warn "Invalid Proxmox hostname. Use a bare hostname such as proxmox.${DOMAIN_VALUE}."
         done
 
-        PROXMOX_URL="$(timed_text_input "Enter Proxmox internal URL" "$default_proxmox_url")"
-        msg_ok "PROXMOX ROUTE WILL BE CREATED"
+        if [ -n "$default_proxmox_url" ]; then
+            PROXMOX_URL="$default_proxmox_url"
+        else
+            while true; do
+                PROXMOX_URL="$(editable_input_loop "Enter Proxmox LAN URL" "" "")"
+                PROXMOX_URL="$(printf '%s' "$PROXMOX_URL" | xargs || true)"
+
+                if [[ "$PROXMOX_URL" =~ ^https?://.+ ]]; then
+                    break
+                fi
+
+                msg_warn "Invalid Proxmox LAN URL. Use http:// or https:// URL format."
+            done
+        fi
+
+        msg_ok "Proxmox route enabled"
+        echo -e "  ${BL}Host:${CL} ${ANS}${PROXMOX_HOST}${CL}"
+        echo -e "  ${BL}LAN URL:${CL} ${GN}${PROXMOX_URL}${CL}"
     else
         PROXMOX_ROUTE_ENABLED="n"
         PROXMOX_HOST=""
         PROXMOX_URL=""
-        msg_ok "PROXMOX ROUTE SKIPPED"
+        msg_skip "Proxmox route skipped"
     fi
 
     TRAEFIK_DIR="${DOCKER_DIR}/appdata/traefik"
@@ -1921,7 +2468,7 @@ function collect_htpasswd_inputs() {
     local has_htpasswd_yn=""
     local create_htpasswd_yn=""
 
-    section "OPTIONAL HTPASSWD"
+    setup_options_group_header "Optional htpasswd"
 
     echo -e "${BL}Optional Traefik basic-auth htpasswd setup.${CL}"
     echo -e "${YW}Not required if you use Authentik, Authelia, or a similar SSO/auth gateway.${CL}"
@@ -1932,9 +2479,7 @@ function collect_htpasswd_inputs() {
     has_htpasswd_yn="$(timed_yes_no "Do you already have a hashed htpasswd line?" "n")"
 
     if [[ "$has_htpasswd_yn" =~ ^[Yy] ]]; then
-        disable_logging
-        HTPASSWD_LINE_VALUE="$(sensitive_line_input "Paste full htpasswd line username:hash")"
-        enable_logging
+        HTPASSWD_LINE_VALUE="$(sensitive_visible_line_input "Paste full htpasswd line username:hash" "htpasswd line captured")"
 
         HTPASSWD_LINE_VALUE="$(printf '%s' "$HTPASSWD_LINE_VALUE" | tr -d '\r\n')"
 
@@ -1953,9 +2498,7 @@ function collect_htpasswd_inputs() {
         if [[ "$create_htpasswd_yn" =~ ^[Yy] ]]; then
             HTPASSWD_USER_VALUE="$(timed_text_input "Enter htpasswd username" "$DEFAULT_HTPASSWD_USER")"
 
-            disable_logging
-            HTPASSWD_PASSWORD_VALUE="$(hidden_input "Enter htpasswd password")"
-            enable_logging
+            HTPASSWD_PASSWORD_VALUE="$(sensitive_visible_line_input "Enter htpasswd password" "htpasswd password captured")"
 
             if [ -n "$HTPASSWD_PASSWORD_VALUE" ]; then
                 HTPASSWD_HASH_VALUE="$(openssl passwd -6 "$HTPASSWD_PASSWORD_VALUE")"
@@ -2009,50 +2552,32 @@ function collect_admin_ui_selection() {
     local choice=""
     local default_choice="1"
 
-    section "ADMIN UI SELECTION"
+    setup_options_group_header "Admin UI"
 
-    echo -e "${BL}Choose the Docker administration interface for this deployment:${CL}"
-    echo "1) Dockge - lightweight Compose-focused admin UI"
-    echo "2) Portainer CE - full Docker management UI"
-    echo "3) Komodo - Git/server-oriented deployment UI"
-    echo "4) Dockhand - modern multi-host Docker management UI"
+    echo -e "  ${BL}1)${CL} Dockge"
+    echo -e "  ${BL}2)${CL} Portainer CE"
+    echo -e "  ${BL}3)${CL} Komodo"
+    echo -e "  ${BL}4)${CL} Dockhand"
     echo ""
 
     while true; do
-        choice="$(untimed_menu_input "Select admin UI option [1-4]" "$default_choice")"
+        choice="$(numeric_menu_input "Select admin UI option [1-4]" "$default_choice" "1" "4")"
 
         case "$choice" in
-            1|dockge|Dockge)
-                ADMIN_UI="dockge"
-                break
-                ;;
-            2|portainer|Portainer|portainer-ce|PortainerCE)
-                ADMIN_UI="portainer"
-                break
-                ;;
-            3|komodo|Komodo)
-                ADMIN_UI="komodo"
-                break
-                ;;
-            4|dockhand|Dockhand)
-                ADMIN_UI="dockhand"
-                break
-                ;;
-            *)
-                msg_warn "Invalid admin UI selection. Choose 1, 2, 3, or 4."
-                continue
-                ;;
+            1) ADMIN_UI="dockge"; break ;;
+            2) ADMIN_UI="portainer"; break ;;
+            3) ADMIN_UI="komodo"; break ;;
+            4) ADMIN_UI="dockhand"; break ;;
+            *) msg_warn "Invalid admin UI selection. Choose 1, 2, 3, or 4." ;;
         esac
-
-        break
     done
 
     set_admin_ui_details
 
-    msg_ok "ADMIN UI SELECTED: ${ADMIN_UI_DISPLAY_NAME}"
-    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
-    detail_line "Admin UI host" "$ADMIN_UI_HOST"
-    detail_line "Admin UI URL" "$ADMIN_UI_URL"
+    msg_ok "Admin UI selected: ${ADMIN_UI_DISPLAY_NAME}"
+    echo -e "  ${BL}Admin UI:${CL} ${ANS}${ADMIN_UI_DISPLAY_NAME}${CL}"
+    echo -e "  ${BL}Host:${CL} ${ANS}${ADMIN_UI_HOST}${CL}"
+    echo -e "  ${BL}URL:${CL} ${ANS}${ADMIN_UI_URL}${CL}"
 
     return 0
 }
@@ -2065,7 +2590,7 @@ function collect_authentik_inputs() {
     local api_choice=""
     local default_admin_email=""
 
-    section "AUTHENTIK BOOTSTRAP"
+    setup_options_group_header "Authentik bootstrap"
 
     AUTHENTIK_HOST_VALUE="$(timed_text_input "Enter Authentik external URL" "https://auth.${DOMAIN_VALUE}")"
     AUTHENTIK_HOST_BROWSER_VALUE="$(timed_text_input "Enter Authentik browser URL" "$AUTHENTIK_HOST_VALUE")"
@@ -2087,93 +2612,79 @@ function collect_authentik_inputs() {
     done
 
     echo ""
-    echo -e "${YW}Choose how Script 6 should set the first Authentik bootstrap admin password.${CL}"
-    echo -e "${YW}This is a menu choice, not the password prompt. Type 2 if you want to paste your own password.${CL}"
-    echo -e "${BL}1) Auto-generate password ${GN}(recommended/default)${CL}"
-    echo -e "${BL}2) Enter custom password${CL}"
+    echo -e "${YW}Authentik bootstrap password:${CL}"
+    echo -e "  ${BL}1)${CL} Auto-generate password ${GN}(recommended)${CL}"
+    echo -e "  ${BL}2)${CL} Enter custom password"
     echo ""
 
-    while true; do
-        password_choice="$(untimed_menu_input "Select Authentik bootstrap password option [1-2]" "1")"
-        case "$password_choice" in
-            1|auto|Auto|generate|generated)
-                AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(generate_secret)"
-                msg_ok "AUTHENTIK BOOTSTRAP PASSWORD WILL BE GENERATED"
-                break
-                ;;
-            2|custom|Custom|manual|Manual)
-                AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(sensitive_line_input "Enter Authentik bootstrap admin password")" || AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
-                AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" | tr -d '\r\n')"
-                [ -n "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" ] || msg_error "Authentik bootstrap password cannot be empty."
-                msg_ok "AUTHENTIK BOOTSTRAP PASSWORD CAPTURED"
-                break
-                ;;
-            *)
-                msg_warn "Invalid choice. Type 1 to auto-generate or 2 to enter a custom password. Do not paste the password at this menu prompt."
-                ;;
-        esac
-    done
+    password_choice="$(numeric_menu_input "Select Authentik bootstrap password option [1-2]" "1" "1" "2")"
+    case "$password_choice" in
+        2)
+            msg_ok "Custom Authentik bootstrap password selected"
+            AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(sensitive_visible_line_input "Enter Authentik bootstrap admin password" "Authentik bootstrap password captured")" || AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
+            AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" | tr -d '\r\n')"
+            [ -n "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" ] || msg_error "Authentik bootstrap password cannot be empty."
+            AUTHENTIK_BOOTSTRAP_PASSWORD_MODE="custom"
+            ;;
+        *)
+            AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(generate_secret)"
+            AUTHENTIK_BOOTSTRAP_PASSWORD_MODE="auto"
+            msg_ok "Authentik bootstrap password will be generated"
+            ;;
+    esac
 
     echo ""
-    echo -e "${YW}Choose how Script 6 should set the Authentik bootstrap token.${CL}"
-    echo -e "${YW}Fresh Authentik creates an akadmin API Access token from AUTHENTIK_BOOTSTRAP_TOKEN.${CL}"
-    echo -e "${BL}1) Auto-generate bootstrap token ${GN}(recommended/default)${CL}"
-    echo -e "${BL}2) Enter custom bootstrap token${CL}"
+    echo -e "${YW}Authentik bootstrap token:${CL}"
+    echo -e "  ${BL}1)${CL} Auto-generate token ${GN}(recommended)${CL}"
+    echo -e "  ${BL}2)${CL} Enter custom token"
     echo ""
 
-    while true; do
-        token_choice="$(untimed_menu_input "Select Authentik bootstrap token option [1-2]" "1")"
-        case "$token_choice" in
-            1|auto|Auto|generate|generated)
-                AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(generate_secret)"
-                msg_ok "AUTHENTIK BOOTSTRAP TOKEN WILL BE GENERATED"
-                break
-                ;;
-            2|custom|Custom|manual|Manual)
-                AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(sensitive_line_input "Enter Authentik bootstrap token")" || AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
-                AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" | tr -d '\r\n')"
-                [ -n "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" ] || msg_error "Authentik bootstrap token cannot be empty."
-                msg_ok "AUTHENTIK BOOTSTRAP TOKEN CAPTURED"
-                break
-                ;;
-            *)
-                msg_warn "Invalid choice. Type 1 to auto-generate or 2 to enter a custom bootstrap token."
-                ;;
-        esac
-    done
+    token_choice="$(numeric_menu_input "Select Authentik bootstrap token option [1-2]" "1" "1" "2")"
+    case "$token_choice" in
+        2)
+            msg_ok "Custom Authentik bootstrap token selected"
+            AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(sensitive_visible_line_input "Enter Authentik bootstrap token" "Authentik bootstrap token captured")" || AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
+            AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" | tr -d '\r\n')"
+            [ -n "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" ] || msg_error "Authentik bootstrap token cannot be empty."
+            AUTHENTIK_BOOTSTRAP_TOKEN_MODE="custom"
+            ;;
+        *)
+            AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(generate_secret)"
+            AUTHENTIK_BOOTSTRAP_TOKEN_MODE="auto"
+            msg_ok "Authentik bootstrap token will be generated"
+            ;;
+    esac
 
     echo ""
-    echo -e "${YW}Script 6.5 will configure Authentik provider/application/outpost setup during deployment.${CL}"
-    echo -e "${YW}Fresh Authentik creates an akadmin API Access token from AUTHENTIK_BOOTSTRAP_TOKEN.${CL}"
-    echo -e "${YW}Default: reuse the bootstrap token automatically. Paste a different API token only for an existing Authentik install.${CL}"
-    echo -e "${BL}1) Use AUTHENTIK_BOOTSTRAP_TOKEN as API token ${GN}(recommended/default)${CL}"
-    echo -e "${BL}2) Paste existing Authentik API token${CL}"
-    echo -e "${BL}3) Skip API automation for now${CL}"
+    echo -e "${YW}Authentik API token:${CL}"
+    echo -e "  ${BL}1)${CL} Reuse bootstrap token ${GN}(recommended)${CL}"
+    echo -e "  ${BL}2)${CL} Paste existing API token"
+    echo -e "  ${BL}3)${CL} Skip API automation"
     echo ""
 
-    api_choice="$(untimed_menu_input "Select Authentik API token option [1-3]" "1")"
+    api_choice="$(numeric_menu_input "Select Authentik API token option [1-3]" "1" "1" "3")"
     case "$api_choice" in
         2)
-            AUTHENTIK_API_TOKEN_VALUE="$(sensitive_line_input "Paste existing Authentik API token")" || AUTHENTIK_API_TOKEN_VALUE=""
+            msg_ok "Existing Authentik API token selected"
+            AUTHENTIK_API_TOKEN_VALUE="$(sensitive_visible_line_input "Paste existing Authentik API token" "Authentik API token captured")" || AUTHENTIK_API_TOKEN_VALUE=""
             AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '\r\n')"
             if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
                 AUTHENTIK_API_TOKEN_MODE="provided"
-                msg_ok "AUTHENTIK API TOKEN CAPTURED"
             else
                 AUTHENTIK_API_TOKEN_MODE="bootstrap"
                 AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
-                msg_warn "No API token pasted. Script 6.5 will try AUTHENTIK_BOOTSTRAP_TOKEN."
+                msg_skip "No API token pasted; bootstrap token will be used"
             fi
             ;;
         3)
             AUTHENTIK_API_TOKEN_MODE="skip"
             AUTHENTIK_API_TOKEN_VALUE=""
-            msg_ok "AUTHENTIK API AUTOMATION SKIPPED FOR NOW"
+            msg_skip "Authentik API automation skipped"
             ;;
         *)
             AUTHENTIK_API_TOKEN_MODE="bootstrap"
             AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
-            msg_ok "AUTHENTIK API TOKEN WILL REUSE BOOTSTRAP TOKEN"
+            msg_ok "Authentik API token will reuse bootstrap token"
             ;;
     esac
 
@@ -2195,8 +2706,11 @@ function collect_authentik_email_smtp_inputs() {
     local existing_timeout=""
     local existing_from=""
     local password_rotate=""
+    local has_existing_smtp="no"
+    local use_defaults=""
+    local show_smtp_plan="no"
 
-    section "AUTHENTIK SMTP RELAY"
+    setup_options_group_header "Authentik SMTP relay"
 
     if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
         existing_host="$(grep -E '^AUTHENTIK_EMAIL__HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
@@ -2209,7 +2723,11 @@ function collect_authentik_email_smtp_inputs() {
         existing_from="$(grep -E '^AUTHENTIK_EMAIL__FROM=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
     fi
 
-    AUTHENTIK_EMAIL__HOST_VALUE="${AUTHENTIK_EMAIL__HOST:-${existing_host:-}}"
+    if [ -n "${AUTHENTIK_EMAIL__HOST:-}" ] || [ -n "${AUTHENTIK_EMAIL__USERNAME:-}" ] || [ -n "${AUTHENTIK_EMAIL__PASSWORD:-}" ] || [ -n "$existing_host" ] || [ -n "$existing_username" ] || [ -n "$existing_password" ]; then
+        has_existing_smtp="yes"
+    fi
+
+    AUTHENTIK_EMAIL__HOST_VALUE="${AUTHENTIK_EMAIL__HOST:-${existing_host:-smtp-relay.brevo.com}}"
     AUTHENTIK_EMAIL__PORT_VALUE="${AUTHENTIK_EMAIL__PORT:-${existing_port:-587}}"
     AUTHENTIK_EMAIL__USERNAME_VALUE="${AUTHENTIK_EMAIL__USERNAME:-${existing_username:-}}"
     AUTHENTIK_EMAIL__PASSWORD_VALUE="${AUTHENTIK_EMAIL__PASSWORD:-${existing_password:-}}"
@@ -2218,95 +2736,144 @@ function collect_authentik_email_smtp_inputs() {
     AUTHENTIK_EMAIL__TIMEOUT_VALUE="${AUTHENTIK_EMAIL__TIMEOUT:-${existing_timeout:-30}}"
     AUTHENTIK_EMAIL__FROM_VALUE="${AUTHENTIK_EMAIL__FROM:-${existing_from:-Circl8 <no-reply@${DOMAIN_VALUE}>}}"
 
-    if [ -n "$AUTHENTIK_EMAIL__HOST_VALUE" ] || [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] || [ -n "$AUTHENTIK_EMAIL__FROM_VALUE" ]; then
-        detail_line "Existing SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-not configured}"
-        detail_line "Existing SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)"
-        detail_line "Existing SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE:-not set}"
-        detail_line "Existing SMTP timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}"
+    if [ "$has_existing_smtp" == "yes" ]; then
+        echo -e "${YW}Existing SMTP settings:${CL}"
+        detail_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-not configured}"
+        detail_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}"
+        detail_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)"
+        detail_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE:-not set}"
+        detail_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}"
+        detail_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}"
+        echo ""
+
         configure_choice="$(timed_yes_no "Update Authentik SMTP relay settings?" "N")"
         if [[ "$configure_choice" =~ ^[Nn]$ ]]; then
             msg_ok "Authentik SMTP relay settings preserved"
             return 0
         fi
+
+        show_smtp_plan="yes"
     else
-        configure_choice="$(timed_yes_no "Configure Authentik SMTP relay now?" "N")"
-        if [[ "$configure_choice" =~ ^[Nn]$ ]]; then
-            msg_ok "Authentik SMTP relay configuration skipped"
-            return 0
+        echo -e "${YW}Defaults:${CL}"
+        detail_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE}"
+        detail_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE}"
+        detail_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE}"
+        detail_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}"
+        detail_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE}"
+        echo ""
+
+        use_defaults="$(timed_yes_no "Use these SMTP defaults?" "Y")"
+        if [[ "$use_defaults" =~ ^[Yy]$ ]]; then
+            msg_ok "SMTP defaults selected"
+        else
+            show_smtp_plan="yes"
         fi
     fi
 
-    while true; do
-        AUTHENTIK_EMAIL__HOST_VALUE="$(hostname_input "Enter Authentik SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-smtp-relay.brevo.com}")"
-        if [ -n "$AUTHENTIK_EMAIL__HOST_VALUE" ]; then
-            break
-        fi
-        msg_warn "SMTP host cannot be empty."
-    done
+    if [ "$show_smtp_plan" == "yes" ]; then
+        while true; do
+            AUTHENTIK_EMAIL__HOST_VALUE="$(hostname_input "Enter Authentik SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-smtp-relay.brevo.com}")"
+            if [ -n "$AUTHENTIK_EMAIL__HOST_VALUE" ]; then
+                break
+            fi
+            msg_warn "SMTP host cannot be empty."
+        done
 
-    AUTHENTIK_EMAIL__PORT_VALUE="$(text_input "Enter Authentik SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}")"
-    AUTHENTIK_EMAIL__USERNAME_VALUE="$(text_input "Enter Authentik SMTP username" "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}")"
+        AUTHENTIK_EMAIL__PORT_VALUE="$(text_input "Enter Authentik SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}")"
+    fi
 
-    if [ -n "${AUTHENTIK_EMAIL__PASSWORD_VALUE:-}" ]; then
+    AUTHENTIK_EMAIL__USERNAME_VALUE="$(editable_input_loop "Enter Authentik SMTP username" "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}" "")"
+    msg_ok "Authentik SMTP username captured"
+
+    if [ "$has_existing_smtp" == "yes" ] && [ -n "${AUTHENTIK_EMAIL__PASSWORD_VALUE:-}" ]; then
         password_rotate="$(timed_yes_no "Rotate/update Authentik SMTP password?" "N")"
         if [[ "$password_rotate" =~ ^[Yy]$ ]]; then
-            AUTHENTIK_EMAIL__PASSWORD_VALUE="$(sensitive_line_input "Enter Authentik SMTP password")" || AUTHENTIK_EMAIL__PASSWORD_VALUE=""
+            AUTHENTIK_EMAIL__PASSWORD_VALUE="$(sensitive_visible_line_input "Enter Authentik SMTP password" "Authentik SMTP password captured")" || AUTHENTIK_EMAIL__PASSWORD_VALUE=""
+        else
+            msg_ok "Existing Authentik SMTP password preserved"
         fi
     else
-        AUTHENTIK_EMAIL__PASSWORD_VALUE="$(sensitive_line_input "Enter Authentik SMTP password")" || AUTHENTIK_EMAIL__PASSWORD_VALUE=""
+        AUTHENTIK_EMAIL__PASSWORD_VALUE="$(sensitive_visible_line_input "Enter Authentik SMTP password" "Authentik SMTP password captured")" || AUTHENTIK_EMAIL__PASSWORD_VALUE=""
     fi
 
     AUTHENTIK_EMAIL__PASSWORD_VALUE="$(printf '%s' "$AUTHENTIK_EMAIL__PASSWORD_VALUE" | tr -d '\r\n')"
     [ -n "$AUTHENTIK_EMAIL__PASSWORD_VALUE" ] || msg_error "Authentik SMTP password cannot be empty when SMTP host is configured."
 
-    AUTHENTIK_EMAIL__FROM_VALUE="$(text_input "Enter Authentik SMTP sender address" "${AUTHENTIK_EMAIL__FROM_VALUE}")"
-    AUTHENTIK_EMAIL__TIMEOUT_VALUE="$(text_input "Enter Authentik SMTP timeout seconds" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}")"
+    if [ "$show_smtp_plan" == "yes" ]; then
+        AUTHENTIK_EMAIL__FROM_VALUE="$(text_input "Enter Authentik SMTP sender address" "${AUTHENTIK_EMAIL__FROM_VALUE}")"
+        AUTHENTIK_EMAIL__TIMEOUT_VALUE="$(text_input "Enter Authentik SMTP timeout seconds" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}")"
 
-    echo ""
-    detail_line "SMTP host" "$AUTHENTIK_EMAIL__HOST_VALUE"
-    detail_line "SMTP port" "$AUTHENTIK_EMAIL__PORT_VALUE"
-    detail_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)"
-    detail_line "SMTP from" "$AUTHENTIK_EMAIL__FROM_VALUE"
-    detail_line "SMTP TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}"
-    detail_line "SMTP timeout" "$AUTHENTIK_EMAIL__TIMEOUT_VALUE"
+        echo ""
+        echo -e "${YW}SMTP plan:${CL}"
+        detail_line "SMTP host" "$AUTHENTIK_EMAIL__HOST_VALUE"
+        detail_line "SMTP port" "$AUTHENTIK_EMAIL__PORT_VALUE"
+        detail_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)"
+        detail_line "SMTP from" "$AUTHENTIK_EMAIL__FROM_VALUE"
+        detail_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}"
+        detail_line "Timeout" "$AUTHENTIK_EMAIL__TIMEOUT_VALUE"
+    fi
 }
-
-# --- 47C. READY TO APPLY SUMMARY ---
+# --- 47C. SETUP PLAN SUMMARY ---
 # Shows every collected setting before directories, secrets, .env, templates or permissions are written.
 function show_ready_summary_and_confirm() {
     local apply_yn=""
+    local cloudflare_auth_summary=""
+    local cloudflare_token_summary=""
+    local smtp_summary="skipped"
+    local service_secret_summary="generate new"
+    local bootstrap_summary=""
 
-    section "READY TO APPLY"
+    section "SETUP PLAN"
 
-    echo -e "${YW}All questions have been collected. No Docker ENV files, secrets or templates have been written yet.${CL}"
-    echo ""
-    detail_line "Docker user" "$DOCKER_USER"
-    detail_line "User directory" "$USERDIR"
-    detail_line "Docker directory" "$DOCKER_DIR"
-    detail_line "Secrets directory" "$DOCKER_SECRETS_DIR"
-    detail_line "PUID / PGID" "${PUID_VALUE} / ${PGID_VALUE}"
-    detail_line "Timezone" "$TZ_VALUE"
-    detail_line "Domain" "$DOMAIN_VALUE"
-    detail_line "Cloudflare auth mode" "$CF_AUTH_MODE"
-    detail_line "Cloudflare email" "${CF_API_EMAIL_VALUE:-not used with token auth}"
-    detail_line "Cloudflare zone ID" "${CF_ZONE_ID_VALUE:-not set}"
-    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
-    detail_line "Admin UI host" "$ADMIN_UI_HOST"
-    detail_line "Authentik host" "$AUTHENTIK_HOST_VALUE"
-    detail_line "Authentik bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
-    detail_line "Authentik SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-not configured}"
-    detail_line "Authentik SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE:-not set}"
-    detail_line "Authentik SMTP username" "$( [ -n "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}" ] && echo set || echo missing)"
-    detail_line "Authentik SMTP TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE:-true}/${AUTHENTIK_EMAIL__USE_SSL_VALUE:-false}"
-    detail_line "Traefik dashboard host" "$TRAEFIK_DASHBOARD_HOST"
-    detail_line "Proxmox route enabled" "$PROXMOX_ROUTE_ENABLED"
-    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
-        detail_line "Proxmox hostname" "$PROXMOX_HOST"
-        detail_line "Proxmox internal URL" "$PROXMOX_URL"
+    if [ "$CF_AUTH_MODE" == "api_token" ]; then
+        cloudflare_auth_summary="API token captured"
+        cloudflare_token_summary="captured"
+    elif [ "$CF_AUTH_MODE" == "api_token_file_reuse" ]; then
+        cloudflare_auth_summary="API token reused"
+        cloudflare_token_summary="reused"
+    elif [ "$CF_AUTH_MODE" == "email_or_manual" ]; then
+        cloudflare_auth_summary="email/manual"
+        cloudflare_token_summary="not provided"
+    else
+        cloudflare_auth_summary="${CF_AUTH_MODE:-unknown}"
+        cloudflare_token_summary="unknown"
     fi
-    detail_line "Regenerate secrets" "$(yes_no_label "$REGENERATE_SECRETS")"
+
+    if [ -n "${AUTHENTIK_EMAIL__HOST_VALUE:-}" ] && [ -n "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}" ]; then
+        smtp_summary="configured"
+    fi
+
+    if [ "$EXISTING_SETUP" == "yes" ] && [ "$REGENERATE_SECRETS" != "y" ]; then
+        service_secret_summary="reuse existing"
+    fi
+
+    bootstrap_summary="$([ "${AUTHENTIK_BOOTSTRAP_PASSWORD_MODE:-auto}" == "custom" ] && echo "custom password" || echo "generated password") / $([ "${AUTHENTIK_BOOTSTRAP_TOKEN_MODE:-auto}" == "custom" ] && echo "custom token" || echo "generated token")"
+
+    echo -e "${YW}No Docker ENV files, secrets or templates have been written yet.${CL}"
     echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will create/update folders, .env, secrets and templates.${CL}"
+    echo -e "${YW}User / path:${CL}"
+    echo -e "  ${BL}Docker user:${CL} ${ANS}${DOCKER_USER}${CL}"
+    echo -e "  ${BL}Docker directory:${CL} ${ANS}${DOCKER_DIR}${CL}"
+    echo ""
+    echo -e "${YW}Domain / routing:${CL}"
+    echo -e "  ${BL}Domain:${CL} ${ANS}${DOMAIN_VALUE}${CL}"
+    echo -e "  ${BL}Cloudflare auth:${CL} ${GN}${cloudflare_auth_summary}${CL}"
+    echo -e "  ${BL}Proxmox route:${CL} ${GN}$(yes_no_label "$PROXMOX_ROUTE_ENABLED")${CL}"
+    echo ""
+    echo -e "${YW}Applications:${CL}"
+    echo -e "  ${BL}Admin UI:${CL} ${ANS}${ADMIN_UI_DISPLAY_NAME}${CL}"
+    echo -e "  ${BL}Authentik URL:${CL} ${ANS}${AUTHENTIK_HOST_VALUE}${CL}"
+    echo -e "  ${BL}SMTP relay:${CL} ${GN}${smtp_summary}${CL}"
+    echo ""
+    echo -e "${YW}Secrets:${CL}"
+    echo -e "  ${BL}Service secrets:${CL} ${GN}${service_secret_summary}${CL}"
+    echo -e "  ${BL}Cloudflare token:${CL} ${GN}${cloudflare_token_summary}${CL}"
+    echo -e "  ${BL}Authentik bootstrap:${CL} ${GN}${bootstrap_summary}${CL}"
+    if [ "$EXISTING_SETUP" == "yes" ]; then
+        echo -e "  ${BL}Regenerate secrets:${CL} ${ANS}$(yes_no_label "$REGENERATE_SECRETS")${CL}"
+    fi
+    echo ""
+    echo -e "${RD}After confirmation, Script 6 will create folders, .env, secrets and Traefik config.${CL}"
     echo ""
 
     apply_yn="$(timed_yes_no "Apply this Docker ENV setup plan now?" "y")"
@@ -2326,7 +2893,7 @@ function show_ready_summary_and_confirm() {
 # --- 48. DOCKER DIRECTORY CREATION ---
 # Creates project folders for compose, appdata, backups, shared files and secrets.
 function create_docker_directories() {
-    section "DOCKER FOLDER STRUCTURE"
+    apply_group_header "Folder structure"
 
     msg_info "Creating Docker folder structure"
     ensure_required_service_directories
@@ -2337,7 +2904,7 @@ function create_docker_directories() {
 # --- 49. SECRET GENERATION / REUSE ---
 # Generates service secrets on first run. On reruns, reuses existing secret files unless regeneration was explicitly selected.
 function generate_or_reuse_secrets() {
-    section "SECRET GENERATION / REUSE"
+    apply_group_header "Secret generation / reuse"
 
     msg_info "Generating or reusing secrets"
 
@@ -2359,7 +2926,7 @@ function generate_or_reuse_secrets() {
 # --- 50. POSTGRES INIT SCRIPT CREATION ---
 # Creates unattended PostgreSQL init script for app databases on first PostgreSQL container startup.
 function create_postgres_init_script() {
-    section "POSTGRES INIT SCRIPT"
+    apply_group_header "PostgreSQL init script"
 
     msg_info "Writing PostgreSQL unattended app database init script"
 
@@ -2419,40 +2986,40 @@ function create_traefik_config_files() {
     local static_template=""
     local dynamic_template=""
 
-    section "TRAEFIK CONFIG FILES"
+    apply_group_header "Traefik config files"
 
     msg_info "Preparing temporary Traefik template workspace"
     TRAEFIK_TEMPLATE_TMP_DIR="$(mktemp -d /tmp/traefik-template-render.XXXXXX)"
     TEMP_DIRS+=("$TRAEFIK_TEMPLATE_TMP_DIR")
     static_template="${TRAEFIK_TEMPLATE_TMP_DIR}/traefik.yml.template"
     dynamic_template="${TRAEFIK_TEMPLATE_TMP_DIR}/dynamic-config.yml.template"
-    msg_ok "TRAEFIK TEMPLATE WORKSPACE READY"
+    msg_ok "Template workspace ready"
 
     msg_info "Downloading Traefik static template"
     download_file "$TRAEFIK_STATIC_TEMPLATE_URL" "$static_template" || msg_error "Failed to download Traefik template: ${TRAEFIK_STATIC_TEMPLATE_URL}"
-    msg_ok "TRAEFIK STATIC TEMPLATE DOWNLOADED"
+    msg_ok "Static template downloaded"
 
     msg_info "Downloading Traefik dynamic template"
     download_file "$TRAEFIK_DYNAMIC_TEMPLATE_URL" "$dynamic_template" || msg_error "Failed to download Traefik template: ${TRAEFIK_DYNAMIC_TEMPLATE_URL}"
-    msg_ok "TRAEFIK DYNAMIC TEMPLATE DOWNLOADED"
+    msg_ok "Dynamic template downloaded"
 
     msg_info "Rendering Traefik static config"
     render_traefik_template "$static_template" "$TRAEFIK_STATIC_CONFIG_FILE"
-    msg_ok "TRAEFIK STATIC CONFIG CREATED"
+    msg_ok "Static config created"
 
     msg_info "Rendering Traefik dynamic config"
     render_traefik_template "$dynamic_template" "$TRAEFIK_DYNAMIC_CONFIG_FILE"
-    msg_ok "TRAEFIK DYNAMIC CONFIG CREATED"
+    msg_ok "Dynamic config created"
 
     msg_info "Securing Traefik ACME storage"
     run_cmd "setting Traefik ACME storage permissions" chmod 600 "${TRAEFIK_ACME_DIR}/acme.json"
-    msg_ok "TRAEFIK ACME STORAGE READY"
+    msg_ok "ACME storage ready"
 }
 
 # --- 50B. TRAEFIK CONFIG POST-RENDER VERIFICATION ---
 # Verifies Traefik files immediately after rendering so Script 6 fails here, not later in Script 6.5.
 function verify_traefik_config_files_created() {
-    section "TRAEFIK CONFIG VERIFICATION"
+    apply_group_header "Traefik config files"
 
     [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ] || msg_error "Traefik static config was not created: ${TRAEFIK_STATIC_CONFIG_FILE}"
     [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] || msg_error "Traefik dynamic config was not created: ${TRAEFIK_DYNAMIC_CONFIG_FILE}"
@@ -2474,14 +3041,14 @@ function verify_traefik_config_files_created() {
         msg_error "Traefik dynamic config still contains per-router certResolver entries. Keep wildcard issuance centralized in traefik.yml."
     fi
 
-    msg_ok "TRAEFIK CONFIG FILES VERIFIED"
+    msg_ok "Config files verified"
 }
 
 
 # --- 51. SECRET FILE CREATION ---
 # Writes generated/reused secrets to individual secret files.
 function write_secret_files() {
-    section "SECRET FILES"
+    apply_group_header "Secret files"
 
     msg_info "Writing secret files"
 
@@ -2520,7 +3087,7 @@ function write_secret_files() {
 # Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
 # This file contains secrets and is locked down to 600 later.
 function write_env_file() {
-    section "DOCKER .ENV"
+    apply_group_header ".env file"
 
     msg_info "Creating Docker .env file"
 
@@ -2570,7 +3137,7 @@ PROXMOX_URL="${PROXMOX_URL}"
 TRAEFIK_DASHBOARD_HOST="${TRAEFIK_DASHBOARD_HOST}"
 TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_STATIC_CONFIG_FILE}"
 TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DYNAMIC_CONFIG_FILE}"
-    TRAEFIK_ACME_STORAGE="${TRAEFIK_ACME_DIR}/acme.json"
+TRAEFIK_ACME_STORAGE="${TRAEFIK_ACME_DIR}/acme.json"
 
 # --- Service hostnames (set by collect_service_hostnames) ---
 LANDING_HOST="${LANDING_HOST}"
@@ -2596,6 +3163,9 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
 REDIS_PASSWORD="${REDIS_PASSWORD}"
 
 # --- Authentik ---
+# Compatibility note: AUTHENTIK_HOST is intentionally emitted again here.
+# Earlier service-hostname consumers expect AUTHENTIK_HOST as the route hostname, while Authentik runtime uses the external URL.
+# Preserve this duplicate assignment until Script 6.5/compose consumers are migrated together.
 AUTHENTIK_HOST="${AUTHENTIK_HOST_VALUE}"
 AUTHENTIK_HOST_BROWSER="${AUTHENTIK_HOST_BROWSER_VALUE}"
 AUTHENTIK_SECRET_KEY="${AUTHENTIK_SECRET_KEY}"
@@ -2670,7 +3240,7 @@ EOF
 # Applies secure permissions without breaking PostgreSQL init script readability.
 # .env and secret files are treated as high-value secret material.
 function apply_permissions() {
-    section "PERMISSIONS"
+    apply_group_header "Permissions"
 
     msg_info "Ensuring all required service folders exist"
     ensure_required_service_directories
@@ -2712,7 +3282,7 @@ function assert_owner_mode() {
         msg_error "Permission audit failed for ${path}. Expected ${expected_uid}:${expected_gid}:${expected_mode}, got ${actual:-unknown}."
     fi
 
-    msg_ok "PERMISSION OK: ${path}"
+    echo -e " ${CM} ${BL}PERMISSION OK:${CL} ${GN}${path}${CL}"
 }
 
 
@@ -2725,7 +3295,7 @@ function assert_root_executable() {
         test -x "$path" || msg_error "Executable audit failed: ${path}"
     fi
 
-    msg_ok "EXECUTABLE OK: ${path}"
+    echo -e " ${CM} ${BL}EXECUTABLE OK:${CL} ${GN}${path}${CL}"
 }
 
 
@@ -2741,11 +3311,11 @@ function assert_user_writable_dir() {
         touch "$test_file" && rm -f "$test_file" >/dev/null 2>&1 || msg_error "Current user cannot write to ${path}"
     fi
 
-    msg_ok "WRITABLE OK: ${path}"
+    echo -e " ${CM} ${BL}WRITABLE OK:${CL} ${GN}${path}${CL}"
 }
 
 function verify_service_permissions() {
-    section "SERVICE PERMISSION AUDIT"
+    apply_group_header "Service permission audit"
 
     # This audit deliberately does not create or repair paths.
     # It verifies that Script 6's create -> chown -> chmod stages already left the expected final state.
@@ -2796,6 +3366,7 @@ function verify_service_permissions() {
     assert_owner_mode "${DOCKER_DIR}/.env" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "600"
     assert_owner_mode "${TRAEFIK_ACME_DIR}/acme.json" "$PUID_VALUE" "$PGID_VALUE" "600"
 
+    PERMISSION_AUDIT_STATUS="PASS"
     msg_ok "SERVICE PERMISSION AUDIT PASSED"
 }
 
@@ -2806,10 +3377,142 @@ function verify_service_permissions() {
 
 # --- 54. VERIFICATION REPORT ---
 # Creates a verification report without printing secret values.
+function verify_record_first_issue() {
+    local issue_type="$1"
+    local check="$2"
+    local reason="$3"
+    local fix="$4"
+
+    if [ -z "$VERIFY_FIRST_ISSUE_TYPE" ]; then
+        VERIFY_FIRST_ISSUE_TYPE="$issue_type"
+        VERIFY_FIRST_ISSUE_CHECK="$check"
+        VERIFY_FIRST_ISSUE_REASON="$reason"
+        VERIFY_FIRST_ISSUE_FIX="$fix"
+    fi
+}
+
+
+# --- 54. VERIFICATION REPORT ---
+# Creates a verification report without printing secret values.
 function create_verification_report() {
-    section "VERIFICATION"
+    if [ "${VERIFY_ONLY_MODE:-no}" != "yes" ]; then
+        apply_group_header "Marker / verification"
+    fi
 
     msg_info "Creating Docker ENV verification report"
+
+    local report_body=""
+    local secret_file=""
+    local current_mode=""
+    local docker_compose_ok="no"
+
+    report_body="$(mktemp)"
+    TEMP_FILES+=("$report_body")
+
+    VERIFY_STATUS="PASS"
+    VERIFY_PASS_COUNT="0"
+    VERIFY_WARN_COUNT="0"
+    VERIFY_FAIL_COUNT="0"
+    VERIFY_FIRST_ISSUE_TYPE=""
+    VERIFY_FIRST_ISSUE_CHECK=""
+    VERIFY_FIRST_ISSUE_REASON=""
+    VERIFY_FIRST_ISSUE_FIX=""
+
+    verify_pass() {
+        VERIFY_PASS_COUNT="$(( VERIFY_PASS_COUNT + 1 ))"
+        echo "✓ PASS - $1" >> "$report_body"
+    }
+
+    verify_warn() {
+        local check="$1"
+        local reason="${2:-warning condition detected}"
+        local fix="${3:-review ${VERIFY_LOG}}"
+        VERIFY_WARN_COUNT="$(( VERIFY_WARN_COUNT + 1 ))"
+        verify_record_first_issue "Warning" "$check" "$reason" "$fix"
+        echo "! WARN - ${check}: ${reason}" >> "$report_body"
+    }
+
+    verify_fail() {
+        local check="$1"
+        local reason="${2:-check failed}"
+        local fix="${3:-review ${VERIFY_LOG}}"
+        VERIFY_FAIL_COUNT="$(( VERIFY_FAIL_COUNT + 1 ))"
+        verify_record_first_issue "Failure" "$check" "$reason" "$fix"
+        echo "✗ FAIL - ${check}: ${reason}" >> "$report_body"
+    }
+
+    verify_info() {
+        echo "- INFO - $1" >> "$report_body"
+    }
+
+    if id "$DOCKER_USER" >/dev/null 2>&1; then verify_pass "Docker user exists"; else verify_fail "Docker user exists" "user ${DOCKER_USER:-unknown} missing" "run Script 4/5 or create the Docker user"; fi
+    if root_path_exists "$DOCKER_DIR"; then verify_pass "Docker directory exists"; else verify_fail "Docker directory exists" "${DOCKER_DIR:-unknown} missing" "rerun Script 6 setup"; fi
+    if root_path_exists "${DOCKER_DIR}/.env"; then verify_pass ".env exists"; else verify_fail ".env exists" "${DOCKER_DIR}/.env missing" "rerun Script 6 setup"; fi
+
+    current_mode="$(root_stat_mode "${DOCKER_DIR}/.env")"
+    if [ "$current_mode" == "600" ]; then verify_pass ".env mode is 600"; else verify_warn ".env mode is 600" "current mode is ${current_mode:-unknown}" "run normal Script 6 setup to repair permissions"; fi
+
+    if root_path_exists "$DOCKER_SECRETS_DIR"; then verify_pass "secrets directory exists"; else verify_fail "secrets directory exists" "${DOCKER_SECRETS_DIR:-unknown} missing" "rerun Script 6 setup"; fi
+    current_mode="$(root_stat_mode "$DOCKER_SECRETS_DIR")"
+    if [ "$current_mode" == "700" ]; then verify_pass "secrets directory mode is 700"; else verify_warn "secrets directory mode is 700" "current mode is ${current_mode:-unknown}" "run normal Script 6 setup to repair permissions"; fi
+
+    for secret_file in \
+        postgres_password \
+        redis_password \
+        authentik_secret_key \
+        authentik_postgres_password \
+        postiz_postgres_password \
+        postiz_jwt_secret \
+        temporal_postgres_password \
+        komodo_db_password \
+        komodo_passkey \
+        komodo_jwt_secret \
+        komodo_webhook_secret
+    do
+        if root_file_not_empty "${DOCKER_SECRETS_DIR}/${secret_file}"; then
+            verify_pass "${secret_file} exists and is non-empty"
+        else
+            verify_fail "${secret_file}" "secret file missing or empty" "rerun Script 6 setup or restore secret file from backup"
+        fi
+
+        current_mode="$(root_stat_mode "${DOCKER_SECRETS_DIR}/${secret_file}")"
+        if [ "$current_mode" == "600" ]; then
+            verify_pass "${secret_file} mode is 600"
+        else
+            verify_warn "${secret_file} mode is 600" "current mode is ${current_mode:-unknown}" "run normal Script 6 setup to repair permissions"
+        fi
+    done
+
+    if root_path_exists "$CF_API_TOKEN_FILE"; then verify_pass "Cloudflare token file exists"; else verify_warn "Cloudflare token file exists" "token file missing" "create token file or rerun Script 6 if Cloudflare DNS automation is required"; fi
+    if root_path_exists "${DOCKER_SECRETS_DIR}/htpasswd"; then verify_pass "htpasswd file exists"; else verify_info "htpasswd file missing; acceptable when SSO/auth gateway is used"; fi
+    if root_path_exists "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" && { [ -z "$SUDO_CMD" ] && [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ] || [ -n "$SUDO_CMD" ] && "$SUDO_CMD" test -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" 2>/dev/null; }; then verify_pass "PostgreSQL init script exists and is executable"; else verify_fail "PostgreSQL init script" "missing or not executable" "rerun Script 6 setup"; fi
+    if root_path_exists "$TRAEFIK_STATIC_CONFIG_FILE"; then verify_pass "Traefik static config exists"; else verify_fail "Traefik static config" "missing" "rerun Script 6 template render step"; fi
+    if root_path_exists "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then verify_pass "Traefik dynamic config exists"; else verify_fail "Traefik dynamic config" "missing" "rerun Script 6 template render step"; fi
+    if root_path_exists "${TRAEFIK_ACME_DIR}/acme.json"; then verify_pass "Traefik acme.json exists"; else verify_fail "Traefik acme.json" "missing" "rerun Script 6 setup"; fi
+    current_mode="$(root_stat_mode "${TRAEFIK_ACME_DIR}/acme.json")"
+    if [ "$current_mode" == "600" ]; then verify_pass "Traefik acme.json mode is 600"; else verify_warn "Traefik acme.json mode is 600" "current mode is ${current_mode:-unknown}" "run normal Script 6 setup to repair permissions"; fi
+
+    if root_path_exists "${DOCKER_DIR}/.env" && { root_read_file "${DOCKER_DIR}/.env" 2>/dev/null | grep -q '^POSTIZ_JWT_SECRET='; }; then verify_pass "Postiz JWT secret env present"; else verify_fail "Postiz JWT secret env" "missing from .env" "rerun Script 6 .env generation"; fi
+    if root_file_not_empty "${DOCKER_SECRETS_DIR}/postiz_jwt_secret"; then verify_pass "postiz_jwt_secret exists and is non-empty"; else verify_fail "postiz_jwt_secret" "missing or empty" "rerun Script 6 setup or restore secret file"; fi
+
+    if command -v docker >/dev/null 2>&1; then verify_pass "Docker CLI detected"; else verify_warn "Docker CLI detected" "docker command not found" "run Script 5 before deploying"; fi
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        docker_compose_ok="yes"
+    elif command -v docker >/dev/null 2>&1 && [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version >/dev/null 2>&1; then
+        docker_compose_ok="yes"
+    fi
+    if [ "$docker_compose_ok" == "yes" ]; then verify_pass "Docker Compose plugin detected"; else verify_warn "Docker Compose plugin" "not detected for current shell" "run Script 5 and re-login if needed"; fi
+    if id -nG "$DOCKER_USER" 2>/dev/null | grep -qw docker; then verify_pass "Docker user is in docker group"; else verify_warn "Docker user docker group" "membership not confirmed" "run Script 5 and re-login"; fi
+
+    if root_path_exists "$COMPLETED_MARKER"; then verify_pass "Completion marker exists"; else verify_warn "Completion marker exists" "marker not present yet" "rerun marker write step"; fi
+
+    if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="FAIL"
+    elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then
+        VERIFY_STATUS="PASS_WITH_WARNINGS"
+    else
+        VERIFY_STATUS="PASS"
+    fi
 
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" bash -c "cat > '$VERIFY_LOG'" <<EOF
@@ -2819,8 +3522,13 @@ Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
 Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
+VERIFY_STATUS=$VERIFY_STATUS
+VERIFY_PASS_COUNT=$VERIFY_PASS_COUNT
+VERIFY_WARN_COUNT=$VERIFY_WARN_COUNT
+VERIFY_FAIL_COUNT=$VERIFY_FAIL_COUNT
 
 Results:
+$(cat "$report_body")
 EOF
     else
         cat > "$VERIFY_LOG" <<EOF
@@ -2830,62 +3538,17 @@ Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
 Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
+VERIFY_STATUS=$VERIFY_STATUS
+VERIFY_PASS_COUNT=$VERIFY_PASS_COUNT
+VERIFY_WARN_COUNT=$VERIFY_WARN_COUNT
+VERIFY_FAIL_COUNT=$VERIFY_FAIL_COUNT
 
 Results:
+$(cat "$report_body")
 EOF
     fi
 
-    {
-        if id "$DOCKER_USER" >/dev/null 2>&1; then echo "✓ PASS - Docker user exists"; else echo "✗ FAIL - Docker user missing"; fi
-        if [ -d "$DOCKER_DIR" ]; then echo "✓ PASS - Docker directory exists"; else echo "✗ FAIL - Docker directory missing"; fi
-        if [ -f "${DOCKER_DIR}/.env" ]; then echo "✓ PASS - .env exists"; else echo "✗ FAIL - .env missing"; fi
-        if [ "$(root_stat_mode "${DOCKER_DIR}/.env")" == "600" ]; then echo "✓ PASS - .env mode is 600"; else echo "! WARN - .env mode is not 600"; fi
-        if [ -d "$DOCKER_SECRETS_DIR" ]; then echo "✓ PASS - secrets directory exists"; else echo "✗ FAIL - secrets directory missing"; fi
-        if [ "$(root_stat_mode "$DOCKER_SECRETS_DIR")" == "700" ]; then echo "✓ PASS - secrets directory mode is 700"; else echo "! WARN - secrets directory mode is not 700"; fi
-
-        for secret_file in \
-            postgres_password \
-            redis_password \
-            authentik_secret_key \
-            authentik_postgres_password \
-            postiz_postgres_password \
-            postiz_jwt_secret \
-            temporal_postgres_password \
-            komodo_db_password \
-            komodo_passkey \
-            komodo_jwt_secret \
-            komodo_webhook_secret
-        do
-            if [ -s "${DOCKER_SECRETS_DIR}/${secret_file}" ]; then
-                echo "✓ PASS - ${secret_file} exists and is non-empty"
-            else
-                echo "✗ FAIL - ${secret_file} missing or empty"
-            fi
-
-            if [ "$(root_stat_mode "${DOCKER_SECRETS_DIR}/${secret_file}")" == "600" ]; then
-                echo "✓ PASS - ${secret_file} mode is 600"
-            else
-                echo "! WARN - ${secret_file} mode is not 600"
-            fi
-        done
-
-        if [ -e "$CF_API_TOKEN_FILE" ]; then echo "✓ PASS - Cloudflare token file exists"; else echo "! WARN - Cloudflare token file missing"; fi
-        if [ -e "${DOCKER_SECRETS_DIR}/htpasswd" ]; then echo "✓ PASS - htpasswd file exists"; else echo "! WARN - htpasswd file missing"; fi
-        if [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ]; then echo "✓ PASS - PostgreSQL init script exists and is executable"; else echo "✗ FAIL - PostgreSQL init script missing or not executable"; fi
-        if [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ]; then echo "✓ PASS - Traefik static config exists"; else echo "✗ FAIL - Traefik static config missing"; fi
-        if [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ]; then echo "✓ PASS - Traefik dynamic config exists"; else echo "✗ FAIL - Traefik dynamic config missing"; fi
-        if [ -f "${TRAEFIK_ACME_DIR}/acme.json" ]; then echo "✓ PASS - Traefik acme.json exists"; else echo "✗ FAIL - Traefik acme.json missing"; fi
-        if [ "$(root_stat_mode "${TRAEFIK_ACME_DIR}/acme.json")" == "600" ]; then echo "✓ PASS - Traefik acme.json mode is 600"; else echo "! WARN - Traefik acme.json mode is not 600"; fi
-        if grep -q "POSTIZ_JWT_SECRET=" "${DOCKER_DIR}/.env"; then echo "✓ PASS - Postiz JWT secret env present"; else echo "✗ FAIL - Postiz JWT secret env missing"; fi
-        if [ -s "${DOCKER_SECRETS_DIR}/postiz_jwt_secret" ]; then echo "✓ PASS - postiz_jwt_secret exists and is non-empty"; else echo "✗ FAIL - postiz_jwt_secret missing or empty"; fi
-
-        if command -v docker >/dev/null 2>&1; then echo "✓ PASS - Docker CLI detected"; else echo "! WARN - Docker CLI not detected"; fi
-        if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then echo "✓ PASS - Docker Compose plugin detected"; else echo "! WARN - Docker Compose plugin not detected for current shell"; fi
-        if id -nG "$DOCKER_USER" 2>/dev/null | grep -qw docker; then echo "✓ PASS - Docker user is in docker group"; else echo "! WARN - Docker user is not currently in docker group"; fi
-
-        if [ -f "$COMPLETED_MARKER" ]; then echo "✓ PASS - completion marker exists"; else echo "! WARN - completion marker not present yet at verification time"; fi
-    } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee -a "$VERIFY_LOG" >/dev/null; else tee -a "$VERIFY_LOG" >/dev/null; fi
-
+    rm -f "$report_body"
     msg_ok "DOCKER ENV VERIFICATION REPORT CREATED"
 }
 
@@ -2893,7 +3556,7 @@ EOF
 # Creates marker showing ENV setup completed successfully.
 # No secret values are stored in the marker.
 function write_completion_marker() {
-    section "COMPLETION MARKER"
+    apply_group_header "Marker / verification"
 
     msg_info "Writing completion marker"
 
@@ -2922,6 +3585,20 @@ Docker user in docker group: $DOCKER_USER_IN_DOCKER_GROUP
 Secret screen displayed: $SECRET_DISPLAY_WAS_SHOWN
 Secret screen cleared: $SECRET_SCREEN_CLEARED
 Verify log: $VERIFY_LOG
+SCRIPT6_STATUS=completed
+SCRIPT6_VERSION=$SCRIPT_VERSION
+SCRIPT6_BUILD=$SCRIPT_BUILD
+SCRIPT6_VERIFY_STATUS=$VERIFY_STATUS
+SCRIPT6_VERIFY_LOG=$VERIFY_LOG
+SCRIPT6_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
+SCRIPT6_DOCKER_DIR=$DOCKER_DIR
+SCRIPT6_SECRETS_DIR=$DOCKER_SECRETS_DIR
+SCRIPT6_DOMAIN=$DOMAIN_VALUE
+SCRIPT6_ADMIN_UI=$ADMIN_UI
+SCRIPT6_TRAEFIK_CONFIG=$([ -n "$TRAEFIK_STATIC_CONFIG_FILE" ] && [ -n "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] && echo yes || echo no)
+SCRIPT6_SECRETS_READY=unknown
+SCRIPT6_ENV_FILE_READY=unknown
+SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS
 EOF
     else
         cat > "$COMPLETED_MARKER" <<EOF
@@ -2948,10 +3625,218 @@ Docker user in docker group: $DOCKER_USER_IN_DOCKER_GROUP
 Secret screen displayed: $SECRET_DISPLAY_WAS_SHOWN
 Secret screen cleared: $SECRET_SCREEN_CLEARED
 Verify log: $VERIFY_LOG
+SCRIPT6_STATUS=completed
+SCRIPT6_VERSION=$SCRIPT_VERSION
+SCRIPT6_BUILD=$SCRIPT_BUILD
+SCRIPT6_VERIFY_STATUS=$VERIFY_STATUS
+SCRIPT6_VERIFY_LOG=$VERIFY_LOG
+SCRIPT6_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
+SCRIPT6_DOCKER_DIR=$DOCKER_DIR
+SCRIPT6_SECRETS_DIR=$DOCKER_SECRETS_DIR
+SCRIPT6_DOMAIN=$DOMAIN_VALUE
+SCRIPT6_ADMIN_UI=$ADMIN_UI
+SCRIPT6_TRAEFIK_CONFIG=$([ -n "$TRAEFIK_STATIC_CONFIG_FILE" ] && [ -n "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] && echo yes || echo no)
+SCRIPT6_SECRETS_READY=unknown
+SCRIPT6_ENV_FILE_READY=unknown
+SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS
 EOF
     fi
 
     msg_ok "COMPLETION MARKER WRITTEN"
+}
+
+function update_completion_marker_script6_fields() {
+    local marker_tmp=""
+    local existing_marker=""
+    local traefik_config_ready="no"
+    local secrets_ready="no"
+    local env_file_ready="no"
+
+    marker_tmp="$(mktemp)"
+    TEMP_FILES+=("$marker_tmp")
+
+    if root_path_exists "$COMPLETED_MARKER"; then
+        existing_marker="$(root_read_file "$COMPLETED_MARKER" 2>/dev/null | grep -Ev '^SCRIPT6_' || true)"
+    fi
+
+    root_path_exists "$TRAEFIK_STATIC_CONFIG_FILE" && root_path_exists "$TRAEFIK_DYNAMIC_CONFIG_FILE" && traefik_config_ready="yes"
+    root_path_exists "${DOCKER_DIR}/.env" && env_file_ready="yes"
+    root_file_not_empty "${DOCKER_SECRETS_DIR}/postgres_password" && root_file_not_empty "${DOCKER_SECRETS_DIR}/redis_password" && secrets_ready="yes"
+
+    {
+        [ -n "$existing_marker" ] && printf '%s\n' "$existing_marker"
+        echo "SCRIPT6_STATUS=completed"
+        echo "SCRIPT6_VERSION=$SCRIPT_VERSION"
+        echo "SCRIPT6_BUILD=$SCRIPT_BUILD"
+        echo "SCRIPT6_VERIFY_STATUS=$VERIFY_STATUS"
+        echo "SCRIPT6_VERIFY_LOG=$VERIFY_LOG"
+        echo "SCRIPT6_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG"
+        echo "SCRIPT6_DOCKER_DIR=$DOCKER_DIR"
+        echo "SCRIPT6_SECRETS_DIR=$DOCKER_SECRETS_DIR"
+        echo "SCRIPT6_DOMAIN=$DOMAIN_VALUE"
+        echo "SCRIPT6_ADMIN_UI=$ADMIN_UI"
+        echo "SCRIPT6_TRAEFIK_CONFIG=$traefik_config_ready"
+        echo "SCRIPT6_SECRETS_READY=$secrets_ready"
+        echo "SCRIPT6_ENV_FILE_READY=$env_file_ready"
+        echo "SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS"
+    } > "$marker_tmp"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp "$marker_tmp" "$COMPLETED_MARKER" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$COMPLETED_MARKER" 2>/dev/null || true
+    else
+        cp "$marker_tmp" "$COMPLETED_MARKER" 2>/dev/null || true
+        chmod 0644 "$COMPLETED_MARKER" 2>/dev/null || true
+    fi
+
+    rm -f "$marker_tmp"
+}
+
+function colorize_verify_line() {
+    local line="$1"
+    case "$line" in
+        "✓ PASS -"*) printf '%b\n' "  ${GN}${line}${CL}" ;;
+        "! WARN -"*) printf '%b\n' "  ${YW}${line}${CL}" ;;
+        "✗ FAIL -"*) printf '%b\n' "  ${RD}${line}${CL}" ;;
+        "- INFO -"*) printf '%b\n' "  ${BL}${line}${CL}" ;;
+        *) printf '%b\n' "  ${DGN}${line}${CL}" ;;
+    esac
+}
+
+function write_verify_display_log() {
+    local display_tmp=""
+    local result_lines=""
+    local line=""
+
+    display_tmp="$(mktemp)"
+    TEMP_FILES+=("$display_tmp")
+
+    if root_path_exists "$VERIFY_LOG"; then
+        result_lines="$(root_read_file "$VERIFY_LOG" 2>/dev/null | awk '/^Results:/{flag=1; next} flag {print}' || true)"
+    fi
+
+    {
+        echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+        echo -e "${BL}SCRIPT 6 VERIFICATION SUMMARY${CL}"
+        echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+        echo ""
+        echo -e "${YW}Docker ENV:${CL}"
+        echo -e "  ${BL}Docker dir:${CL} ${GN}${DOCKER_DIR:-unknown}${CL}"
+        echo -e "  ${BL}.env file:${CL} ${GN}${DOCKER_DIR:-unknown}/.env${CL}"
+        echo -e "  ${BL}Secrets dir:${CL} ${GN}${DOCKER_SECRETS_DIR:-unknown}${CL}"
+        echo -e "  ${BL}Domain:${CL} ${GN}${DOMAIN_VALUE:-unknown}${CL}"
+        echo -e "  ${BL}Admin UI:${CL} ${GN}${ADMIN_UI:-unknown}${CL}"
+        echo ""
+        echo -e "${YW}Checks:${CL}"
+        if [ -n "$result_lines" ]; then
+            while IFS= read -r line; do
+                [ -n "$line" ] && colorize_verify_line "$line"
+            done <<< "$result_lines"
+        else
+            echo -e "  ${BL}- INFO - No verification lines recorded${CL}"
+        fi
+        echo ""
+        echo -e "${YW}Verification:${CL}"
+        case "$VERIFY_STATUS" in
+            PASS) echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}" ;;
+            PASS_WITH_WARNINGS) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}" ;;
+            FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
+            *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
+        esac
+        echo -e "  ${BL}Pass:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+        echo -e "  ${BL}Warn:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+        echo -e "  ${BL}Fail:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+        echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+        echo -e "  ${BL}Display log:${CL} ${GN}${VERIFY_DISPLAY_LOG}${CL}"
+        echo ""
+        echo -e "${YW}Next Step:${CL}"
+        echo -e "  ${YW}Run ${ANS}6.5-dockerDeploy-circl8.sh${YW}.${CL}"
+    } > "$display_tmp"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp "$display_tmp" "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+    else
+        cp "$display_tmp" "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+        chmod 0644 "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+    fi
+
+    rm -f "$display_tmp"
+}
+
+function load_state_from_completion_marker() {
+    local marker_file="$COMPLETED_MARKER"
+    local value=""
+    local acme_storage=""
+
+    value="$(marker_display_value "Docker dir" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_DIR="$value"
+    value="$(marker_display_value "Secrets dir" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_SECRETS_DIR="$value"
+    value="$(marker_display_value "Domain" "$marker_file")"; [ "$value" != "unknown" ] && DOMAIN_VALUE="$value"
+    value="$(marker_display_value "User" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_USER="$value"
+    value="$(marker_display_value "PUID" "$marker_file")"; [ "$value" != "unknown" ] && PUID_VALUE="$value"
+    value="$(marker_display_value "PGID" "$marker_file")"; [ "$value" != "unknown" ] && PGID_VALUE="$value"
+    value="$(marker_display_value "Existing setup detected" "$marker_file")"; [ "$value" != "unknown" ] && EXISTING_SETUP="$value"
+    value="$(marker_display_value "Secrets regenerated" "$marker_file")"; [ "$value" != "unknown" ] && REGENERATE_SECRETS="$value"
+    value="$(marker_display_value "Cloudflare token file" "$marker_file")"; [ "$value" != "unknown" ] && CF_API_TOKEN_FILE="$value"
+    value="$(marker_display_value "Traefik static config" "$marker_file")"; [ "$value" != "unknown" ] && TRAEFIK_STATIC_CONFIG_FILE="$value"
+    value="$(marker_display_value "Traefik dynamic config" "$marker_file")"; [ "$value" != "unknown" ] && TRAEFIK_DYNAMIC_CONFIG_FILE="$value"
+    acme_storage="$(marker_display_value "Traefik ACME storage" "$marker_file")"
+    if [ "$acme_storage" != "unknown" ]; then
+        TRAEFIK_ACME_DIR="${acme_storage%/*}"
+    fi
+    value="$(marker_display_value "Traefik dashboard host" "$marker_file")"; [ "$value" != "unknown" ] && TRAEFIK_DASHBOARD_HOST="$value"
+    value="$(marker_display_value "Proxmox route enabled" "$marker_file")"; [ "$value" != "unknown" ] && PROXMOX_ROUTE_ENABLED="$value"
+    value="$(marker_display_value "Docker ready" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_READY="$value"
+    value="$(marker_display_value "Docker Compose ready" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_COMPOSE_READY="$value"
+    value="$(marker_display_value "Docker user in docker group" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_USER_IN_DOCKER_GROUP="$value"
+    value="$(marker_key_value "SCRIPT6_ADMIN_UI" "$marker_file")"; [ -n "$value" ] && ADMIN_UI="$value"
+
+    [ -n "${DOCKER_SECRETS_DIR:-}" ] || DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
+    [ -n "${CF_API_TOKEN_FILE:-}" ] || CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
+    [ -n "${TRAEFIK_ACME_DIR:-}" ] || TRAEFIK_ACME_DIR="${DOCKER_DIR}/appdata/traefik/acme"
+    [ -n "${TRAEFIK_STATIC_CONFIG_FILE:-}" ] || TRAEFIK_STATIC_CONFIG_FILE="${DOCKER_DIR}/appdata/traefik/traefik.yml"
+    [ -n "${TRAEFIK_DYNAMIC_CONFIG_FILE:-}" ] || TRAEFIK_DYNAMIC_CONFIG_FILE="${DOCKER_DIR}/appdata/traefik/dynamic-config.yml"
+
+    return 0
+}
+
+function show_verify_only_summary() {
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+
+    echo -e "${YW}Verification:${CL}"
+    case "$VERIFY_STATUS" in
+        PASS) echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}" ;;
+        PASS_WITH_WARNINGS) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}" ;;
+        FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
+        *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
+    esac
+    echo -e "  ${BL}Pass:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+    echo -e "  ${BL}Warn:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+    echo -e "  ${BL}Fail:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+    echo -e "  ${BL}Display log:${CL} ${GN}${VERIFY_DISPLAY_LOG}${CL}"
+
+    if [ -n "$VERIFY_FIRST_ISSUE_TYPE" ]; then
+        echo ""
+        echo -e "${YW}${VERIFY_FIRST_ISSUE_TYPE} 1:${CL}"
+        echo -e "  ${BL}Check:${CL} ${GN}${VERIFY_FIRST_ISSUE_CHECK}${CL}"
+        echo -e "  ${BL}Reason:${CL} ${YW}${VERIFY_FIRST_ISSUE_REASON}${CL}"
+        echo -e "  ${BL}Fix:${CL} ${GN}${VERIFY_FIRST_ISSUE_FIX}${CL}"
+    fi
+
+    echo ""
+    echo -e "${YW}Next Step:${CL}"
+    echo -e "  ${YW}Run ${ANS}6.5-dockerDeploy-circl8.sh${YW}.${CL}"
+}
+
+function run_verify_only_mode() {
+    VERIFY_ONLY_MODE="yes"
+    load_state_from_completion_marker
+    create_verification_report
+    write_verify_display_log
+    update_completion_marker_script6_fields
+    show_verify_only_summary
+    exit 0
 }
 
 # --- 55B. POST-APPLY AUDIT PAUSE ---
@@ -3003,14 +3888,14 @@ function show_secrets_once_without_logging() {
     echo -e "${BL}DOMAIN / CLOUDFLARE:${CL}"
     echo -e "DOMAIN=${GN}${DOMAIN_VALUE}${CL}"
     echo -e "CF_API_EMAIL=${GN}${CF_API_EMAIL_VALUE:-not used with token auth}${CL}"
-    echo -e "CF_ZONE_ID=${GN}${CF_ZONE_ID_VALUE}${CL}"
+    echo -e "CF_ZONE_ID=${GN}$([ -n "$CF_ZONE_ID_VALUE" ] && echo captured || echo empty)${CL}"
     echo -e "CF_API_TOKEN_FILE=${GN}${CF_API_TOKEN_FILE}${CL}"
     echo -e "TRAEFIK_STATIC_CONFIG=${GN}${TRAEFIK_STATIC_CONFIG_FILE}${CL}"
     echo -e "TRAEFIK_DYNAMIC_CONFIG=${GN}${TRAEFIK_DYNAMIC_CONFIG_FILE}${CL}"
     echo -e "TRAEFIK_ACME_STORAGE=${GN}${TRAEFIK_ACME_DIR}/acme.json${CL}"
 
     if [ -n "$CF_API_TOKEN_VALUE" ]; then
-        echo -e "CF_API_TOKEN=${GN}${CF_API_TOKEN_VALUE}${CL}"
+        echo -e "CF_API_TOKEN=${YW}<captured / not displayed>${CL}"
     else
         echo -e "CF_API_TOKEN=${YW}<empty / not provided>${CL}"
     fi
@@ -3020,11 +3905,19 @@ function show_secrets_once_without_logging() {
     echo -e "AUTHENTIK_HOST=${GN}${AUTHENTIK_HOST_VALUE}${CL}"
     echo -e "AUTHENTIK_HOST_BROWSER=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
     echo -e "AUTHENTIK_BOOTSTRAP_EMAIL=${GN}${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_PASSWORD=${GN}${AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_TOKEN=${GN}${AUTHENTIK_BOOTSTRAP_TOKEN_VALUE}${CL}"
+    if [ "${AUTHENTIK_BOOTSTRAP_PASSWORD_MODE:-auto}" == "custom" ]; then
+        echo -e "AUTHENTIK_BOOTSTRAP_PASSWORD=${YW}<custom / not displayed>${CL}"
+    else
+        echo -e "AUTHENTIK_BOOTSTRAP_PASSWORD=${GN}${AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE}${CL}"
+    fi
+    if [ "${AUTHENTIK_BOOTSTRAP_TOKEN_MODE:-auto}" == "custom" ]; then
+        echo -e "AUTHENTIK_BOOTSTRAP_TOKEN=${YW}<custom / not displayed>${CL}"
+    else
+        echo -e "AUTHENTIK_BOOTSTRAP_TOKEN=${GN}${AUTHENTIK_BOOTSTRAP_TOKEN_VALUE}${CL}"
+    fi
     echo -e "AUTHENTIK_API_TOKEN_MODE=${GN}${AUTHENTIK_API_TOKEN_MODE}${CL}"
     if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
-        echo -e "AUTHENTIK_API_TOKEN=${GN}${AUTHENTIK_API_TOKEN_VALUE}${CL}"
+        echo -e "AUTHENTIK_API_TOKEN=${YW}<captured / not displayed>${CL}"
     else
         echo -e "AUTHENTIK_API_TOKEN=${YW}<empty / skipped>${CL}"
     fi
@@ -3094,30 +3987,97 @@ function show_secrets_once_without_logging() {
 # --- 57. CLEAN FINAL SUMMARY ---
 # Prints non-sensitive final summary after secrets have been cleared from the terminal.
 function show_clean_final_summary() {
+    local smtp_summary="skipped"
+    local service_secret_summary="generated"
+    local htpasswd_summary="empty or existing placeholder"
+    local traefik_app_host=""
+
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
-    detail_line "DOCKER DIR" "$DOCKER_DIR"
-    detail_line ".ENV FILE" "${DOCKER_DIR}/.env"
-    detail_line "SECRETS DIR" "$DOCKER_SECRETS_DIR"
-    detail_line "POSTGRES INIT" "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
-    detail_line "TRAEFIK STATIC CONFIG" "$TRAEFIK_STATIC_CONFIG_FILE"
-    detail_line "TRAEFIK DYNAMIC CONFIG" "$TRAEFIK_DYNAMIC_CONFIG_FILE"
-    detail_line "TRAEFIK ACME STORAGE" "${TRAEFIK_ACME_DIR}/acme.json"
-    detail_line "TRAEFIK DASHBOARD HOST" "$TRAEFIK_DASHBOARD_HOST"
-    detail_line "CLOUDFLARE TOKEN FILE" "$CF_API_TOKEN_FILE"
-    detail_line "HTPASSWD FILE" "${DOCKER_SECRETS_DIR}/htpasswd"
-    detail_line "DOMAIN" "$DOMAIN_VALUE"
-    detail_line "DOCKER USER" "$DOCKER_USER"
-    detail_line "PUID / PGID" "${PUID_VALUE}:${PGID_VALUE}"
-    detail_line "EXISTING SETUP" "$EXISTING_SETUP"
-    detail_line "SECRETS REGENERATED" "$REGENERATE_SECRETS"
-    detail_line "SECRET SCREEN CLEARED" "$SECRET_SCREEN_CLEARED"
-    detail_line "VERIFY LOG" "$VERIFY_LOG"
+    if [ -n "${AUTHENTIK_EMAIL__HOST_VALUE:-}" ] && [ -n "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}" ]; then
+        smtp_summary="configured"
+    fi
+
+    if [ "$EXISTING_SETUP" == "yes" ] && [ "$REGENERATE_SECRETS" != "y" ]; then
+        service_secret_summary="reused"
+    fi
+
+    case "$HTPASSWD_MODE" in
+        generated) htpasswd_summary="${DOCKER_SECRETS_DIR}/htpasswd (generated)" ;;
+        provided) htpasswd_summary="${DOCKER_SECRETS_DIR}/htpasswd (provided)" ;;
+        *) htpasswd_summary="${DOCKER_SECRETS_DIR}/htpasswd" ;;
+    esac
+
+    traefik_app_host="${TRAEFIK_HOST:-${TRAEFIK_DASHBOARD_HOST:-}}"
+
+    echo -e "${YW}Docker ENV:${CL}"
+    final_line "Docker dir" "$DOCKER_DIR"
+    final_line ".env file" "${DOCKER_DIR}/.env"
+    final_line "Secrets dir" "$DOCKER_SECRETS_DIR"
+    final_line "Domain" "$DOMAIN_VALUE"
+    final_line "Docker user" "$DOCKER_USER"
+    final_line "PUID / PGID" "${PUID_VALUE} / ${PGID_VALUE}"
+
+    echo ""
+    echo -e "${YW}Routing:${CL}"
+    final_line "Proxmox route" "$(yes_no_label "$PROXMOX_ROUTE_ENABLED")"
+    final_line "Proxmox host" "${PROXMOX_HOST:-skipped}"
+    final_line "Proxmox LAN URL" "${PROXMOX_URL:-skipped}"
+    final_line "Static config" "$TRAEFIK_STATIC_CONFIG_FILE"
+    final_line "Dynamic config" "$TRAEFIK_DYNAMIC_CONFIG_FILE"
+    final_line "ACME storage" "${TRAEFIK_ACME_DIR}/acme.json"
+
+    echo ""
+    echo -e "${YW}Applications:${CL}"
+    final_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
+    final_line "Admin UI URL" "$(https_url_or_not_configured "${ADMIN_UI_URL:-${ADMIN_UI_HOST:-}}")"
+    echo ""
+    final_line "Landing URL" "$(https_url_or_not_configured "${LANDING_HOST:-}")"
+    final_line "Landing www" "$(https_url_or_not_configured "${LANDING_WWW_HOST:-}")"
+    final_line "Postiz URL" "$(https_url_or_not_configured "${POSTIZ_HOST:-}")"
+    echo ""
+    final_line "Traefik URL" "$(https_url_or_not_configured "$traefik_app_host")"
+    final_line "n8n URL" "$(https_url_or_not_configured "${N8N_HOST:-}")"
+    final_line "Files URL" "$(https_url_or_not_configured "${FILEBROWSER_HOST:-}")"
+    final_line "VS Code URL" "$(https_url_or_not_configured "${VSCODE_HOST:-}")"
+    echo ""
+    final_line "Authentik URL" "$(https_url_or_not_configured "${AUTHENTIK_HOST_VALUE:-${AUTHENTIK_HOST:-}}")"
+    final_line "SMTP relay" "$smtp_summary"
+
+    echo ""
+    echo -e "${YW}Secrets:${CL}"
+    final_line "Service secrets" "$service_secret_summary"
+    final_line "Cloudflare token file" "$CF_API_TOKEN_FILE"
+    final_line "Htpasswd file" "$htpasswd_summary"
+    final_line "Secret screen cleared" "$SECRET_SCREEN_CLEARED"
+
+    echo ""
+    echo -e "${YW}Verification:${CL}"
+    case "$VERIFY_STATUS" in
+        PASS) final_line "Status" "$VERIFY_STATUS" "$GN" ;;
+        PASS_WITH_WARNINGS) final_line "Status" "$VERIFY_STATUS" "$YW" ;;
+        FAIL) final_line "Status" "$VERIFY_STATUS" "$RD" ;;
+        *) final_line "Status" "${VERIFY_STATUS:-unknown}" "$YW" ;;
+    esac
+    final_line "Pass" "$VERIFY_PASS_COUNT" "$GN"
+    final_line "Warn" "$VERIFY_WARN_COUNT" "$YW"
+    final_line "Fail" "$VERIFY_FAIL_COUNT" "$RD"
+    final_line "Verify log" "$VERIFY_LOG" "$GN"
+    final_line "Display log" "$VERIFY_DISPLAY_LOG" "$GN"
+
+    if [ -n "$VERIFY_FIRST_ISSUE_TYPE" ]; then
+        echo ""
+        echo -e "${YW}${VERIFY_FIRST_ISSUE_TYPE} 1:${CL}"
+        final_line "Check" "$VERIFY_FIRST_ISSUE_CHECK" "$GN"
+        final_line "Reason" "$VERIFY_FIRST_ISSUE_REASON" "$YW"
+        final_line "Fix" "$VERIFY_FIRST_ISSUE_FIX" "$GN"
+    fi
+
     echo ""
     echo -e "${YW}Sensitive values were displayed once, not logged, then terminal output was cleared where supported.${CL}"
     echo ""
-    echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Run script 6.5 to create Docker networks and deploy the selected dependency-aware stack plan.${CL}"
+    echo -e "${BL}Next Step${CL}"
+    echo -e "  ${YW}Run ${ANS}6.5-dockerDeploy-circl8.sh${YW} to create Docker networks and deploy the selected dependency-aware stack plan.${CL}"
     echo ""
 }
 
@@ -3130,9 +4090,9 @@ function show_clean_final_summary() {
 function main() {
     init_script
 
+    check_docker_readiness
     check_previous_marker
     start_confirmation
-    check_docker_readiness
     collect_user_and_path_inputs
     detect_existing_setup
     collect_domain_cloudflare_inputs
@@ -3158,6 +4118,8 @@ function main() {
 
     write_completion_marker
     create_verification_report
+    write_verify_display_log
+    update_completion_marker_script6_fields
     show_clean_final_summary
 
     exit 0
