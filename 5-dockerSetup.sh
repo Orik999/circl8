@@ -9,6 +9,7 @@ shopt -s inherit_errexit nullglob
 # --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
 # Central visual theme for Docker Setup.
 YW="$(printf '\033[33m')"
+YL="$(printf '\033[1;93m')"
 BL="$(printf '\033[36m')"
 RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
@@ -1997,8 +1998,8 @@ function write_verify_display_log() {
         echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
         echo ""
         echo -e "${YW}Next Step:${CL}"
-        echo -e "  ${YW}Run ${ANS}Script 6${YW}:${CL}"
-        echo -e "    ${ANS}6-dockerENVsetup-circl8.sh${CL}"
+        echo -e "  ${YW}Run ${YL}Script 6${YW}:${CL}"
+        echo -e "    ${BL}6-dockerENVsetup-circl8.sh${CL}"
     } > "$display_tmp"
 
     if [ -n "$SUDO_CMD" ]; then
@@ -2249,17 +2250,17 @@ function show_final_summary() {
     echo -e "${BL}Next Step${CL}"
     echo ""
     if [ "$REBOOT_AFTER_FINISH" == "y" ]; then
-        echo -e "${YW}Reboot the VM, SSH back in, then run ${ANS}Script 6${YW}:${CL}"
-        echo -e "  ${ANS}6-dockerENVsetup-circl8.sh${CL}"
+        echo -e "${YW}Reboot the VM, SSH back in, then run ${YL}Script 6${YW}:${CL}"
+        echo -e "  ${BL}6-dockerENVsetup-circl8.sh${CL}"
     else
         echo -e "${YW}Option A - ${GN}reboot first:${CL}"
-        echo -e "  ${YW}Reboot the VM, SSH back in, then run ${ANS}Script 6${YW}:${CL}"
-        echo -e "    ${ANS}6-dockerENVsetup-circl8.sh${CL}"
+        echo -e "  ${YW}Reboot the VM, SSH back in, then run ${YL}Script 6${YW}:${CL}"
+        echo -e "    ${BL}6-dockerENVsetup-circl8.sh${CL}"
         echo ""
         echo -e "${YW}Option B - ${GN}continue after re-login:${CL}"
         echo -e "  ${YW}Log out/in or start a new SSH session so docker group membership applies,${CL}"
-        echo -e "  ${YW}then run ${ANS}Script 6${YW}:${CL}"
-        echo -e "    ${ANS}6-dockerENVsetup-circl8.sh${CL}"
+        echo -e "  ${YW}then run ${YL}Script 6${YW}:${CL}"
+        echo -e "    ${BL}6-dockerENVsetup-circl8.sh${CL}"
     fi
 }
 
