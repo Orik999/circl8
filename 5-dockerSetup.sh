@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="5-dockerSetup.sh"
-SCRIPT_VERSION="v1.2.1"
+SCRIPT_VERSION="v1.2.2"
 SCRIPT_UPDATED="2026-06-06"
-SCRIPT_BUILD="standard-ui-verification-reboot"
+SCRIPT_BUILD="minor-ui-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log paths, user choices, environment state and final status values.
@@ -1029,12 +1029,12 @@ function detect_existing_setup() {
     msg_ok "EXISTING SETUP CHECK COMPLETE"
 
     echo ""
-    echo -e "${BL}DETECTED STATE:${CL}"
-    echo -e "DOCKER CLI FOUND:        ${GN}${DOCKER_CLI_FOUND}${CL}"
-    echo -e "DAEMON CONFIG FOUND:     ${GN}${DOCKER_DAEMON_CONFIG_FOUND}${CL}"
-    echo -e "COMPLETION MARKER FOUND: ${GN}${DOCKER_MARKER_FOUND}${CL}"
-    echo -e "DOCKER SERVICE ACTIVE:   ${GN}${DOCKER_SERVICE_ACTIVE}${CL}"
-    echo -e "CONTAINERD ACTIVE:       ${GN}${CONTAINERD_SERVICE_ACTIVE}${CL}"
+    echo -e "${YW}Existing Docker:${CL}"
+    echo -e "  ${BL}Docker CLI:${CL} ${GN}${DOCKER_CLI_FOUND}${CL}"
+    echo -e "  ${BL}Daemon config:${CL} ${GN}${DOCKER_DAEMON_CONFIG_FOUND}${CL}"
+    echo -e "  ${BL}Completion marker:${CL} ${GN}${DOCKER_MARKER_FOUND}${CL}"
+    echo -e "  ${BL}Docker service:${CL} ${GN}${DOCKER_SERVICE_ACTIVE}${CL}"
+    echo -e "  ${BL}containerd service:${CL} ${GN}${CONTAINERD_SERVICE_ACTIVE}${CL}"
     echo ""
 
     if [ "$EXISTING_SETUP" == "yes" ]; then
@@ -1998,7 +1998,8 @@ function write_verify_display_log() {
         echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
         echo ""
         echo -e "${YW}Next Step:${CL}"
-        echo -e "  ${YW}Run ${ANS}Script 6${YW}.${CL}"
+        echo -e "  ${YW}Run ${ANS}Script 6${YW}:${CL}"
+        echo -e "    ${ANS}6-dockerENVsetup-circl8.sh${CL}"
     } > "$display_tmp"
 
     if [ -n "$SUDO_CMD" ]; then
@@ -2249,15 +2250,17 @@ function show_final_summary() {
     echo -e "${BL}Next Step${CL}"
     echo ""
     if [ "$REBOOT_AFTER_FINISH" == "y" ]; then
-        echo -e "${YW}Reboot the VM, SSH back in, then run ${ANS}Script 6${YW}.${CL}"
-        echo -e "${DGN}Current file: 6-dockerENVsetup-circl8.sh${CL}"
+        echo -e "${YW}Reboot the VM, SSH back in, then run ${ANS}Script 6${YW}:${CL}"
+        echo -e "  ${ANS}6-dockerENVsetup-circl8.sh${CL}"
     else
         echo -e "${YW}Option A - ${GN}reboot first:${CL}"
-        echo -e "  ${YW}Reboot the VM, SSH back in, then run ${ANS}Script 6${YW}.${CL}"
+        echo -e "  ${YW}Reboot the VM, SSH back in, then run ${ANS}Script 6${YW}:${CL}"
+        echo -e "    ${ANS}6-dockerENVsetup-circl8.sh${CL}"
         echo ""
         echo -e "${YW}Option B - ${GN}continue after re-login:${CL}"
-        echo -e "  ${YW}Log out/in or start a new SSH session so docker group membership applies, then run ${ANS}Script 6${YW}.${CL}"
-        echo -e "  ${DGN}Current file: 6-dockerENVsetup-circl8.sh${CL}"
+        echo -e "  ${YW}Log out/in or start a new SSH session so docker group membership applies,${CL}"
+        echo -e "  ${YW}then run ${ANS}Script 6${YW}:${CL}"
+        echo -e "    ${ANS}6-dockerENVsetup-circl8.sh${CL}"
     fi
     echo ""
 }
