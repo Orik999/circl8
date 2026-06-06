@@ -1035,7 +1035,7 @@ function detect_existing_setup() {
     echo -e "  ${BL}Completion marker:${CL} ${GN}${DOCKER_MARKER_FOUND}${CL}"
     echo -e "  ${BL}Docker service:${CL} ${GN}${DOCKER_SERVICE_ACTIVE}${CL}"
     echo -e "  ${BL}containerd service:${CL} ${GN}${CONTAINERD_SERVICE_ACTIVE}${CL}"
-  
+
     if [ "$EXISTING_SETUP" == "yes" ]; then
         echo -e "${RD}WARNING: Existing Docker setup detected.${CL}"
         echo -e "${YW}The script is mostly safe to rerun, but it can update packages, rewrite Docker daemon settings, and reapply firewall rules.${CL}"
