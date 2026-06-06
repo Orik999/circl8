@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.6.8"
+SCRIPT_VERSION="v1.6.11"
 SCRIPT_UPDATED="2026-06-06"
-SCRIPT_BUILD="script5-preflight-alignment"
+SCRIPT_BUILD="compact-alignment-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -328,6 +328,60 @@ function aligned_status_line() {
     [ -n "$value" ] || value="unknown"
     [ -n "$value_color" ] || value_color="$(status_color_for_value "$value")"
     printf '  %b%-*s%b %b%s%b\n' "$BL" "$label_width" "${label}:" "$CL" "$value_color" "$value" "$CL"
+}
+
+function aligned_value_line() {
+    local label="$1"
+    local value="${2:-not configured}"
+    local value_color="${3:-$GN}"
+    local label_width="${4:-18}"
+
+    [ -n "$value" ] || value="not configured"
+    printf '  %b%-*s%b %b%s%b\n' "$BL" "$label_width" "${label}:" "$CL" "$value_color" "$value" "$CL"
+}
+
+function aligned_check_line() {
+    local label="$1"
+    local value="${2:-}"
+    local value_color="${3:-$ANS}"
+    local label_width="${4:-18}"
+
+    printf ' %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$label_width" "${label}:" "$CL" "$value_color" "$value" "$CL"
+}
+
+function compact_value_line() {
+    local label="$1"
+    local value="${2:-not configured}"
+    local value_color="${3:-$GN}"
+
+    [ -n "$value" ] || value="not configured"
+    printf '  %b%s:%b %b%s%b\n' "$BL" "$label" "$CL" "$value_color" "$value" "$CL"
+}
+
+function apply_status_line() {
+    local status="${1:-unknown}"
+
+    # Compact apply status examples: Status: created | Status: generated | Status: reused | Status: regenerated | Status: written
+    compact_value_line "Status" "$status" "$GN"
+}
+
+function permission_audit_line() {
+    local prefix="$1"
+    local path="$2"
+
+    printf ' %b %b%-16s%b %b%s%b\n' "$CM" "$BL" "$prefix" "$CL" "$GN" "$path" "$CL"
+}
+
+function secret_generation_status_label() {
+    if [ "$EXISTING_SETUP" == "yes" ]; then
+        if [ "$REGENERATE_SECRETS" == "y" ]; then
+            printf 'regenerated'
+        else
+            printf 'reused'
+        fi
+    else
+        printf 'generated'
+    fi
 }
 
 # --- 6. TTY PRINT HELPER ---
@@ -924,7 +978,9 @@ function timed_yes_no() {
     final_label="$(yes_no_label "$answer")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${final_label}${CL}"
+    if [ "${SUPPRESS_TIMED_YES_NO_CONFIRMATION:-no}" != "yes" ]; then
+        tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${final_label}${CL}"
+    fi
     flush_input_buffer
 
     echo "$answer"
@@ -983,7 +1039,9 @@ function timed_text_input() {
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
+    if [ "${SUPPRESS_TEXT_INPUT_CONFIRMATION:-no}" != "yes" ]; then
+        tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
+    fi
     flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
@@ -998,7 +1056,9 @@ function text_input() {
 
     answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
-    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
+    if [ "${SUPPRESS_TEXT_INPUT_CONFIRMATION:-no}" != "yes" ]; then
+        tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
+    fi
     echo "$answer"
 }
 
@@ -1057,7 +1117,9 @@ function hostname_input() {
 
     answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
-    tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
+    if [ "${SUPPRESS_TEXT_INPUT_CONFIRMATION:-no}" != "yes" ]; then
+        tty_println "${CM} ${GN}${prompt}${CL} ${ANS}${answer}${CL}"
+    fi
     echo "$answer"
 }
 
@@ -1788,12 +1850,15 @@ function start_confirmation() {
     echo -e "${YW}Sensitive inputs are not logged.${CL}"
     echo ""
 
+    SUPPRESS_TIMED_YES_NO_CONFIRMATION="yes"
     start_yn="$(timed_yes_no "Start the Docker ENV Setup Script?" "y")"
+    unset SUPPRESS_TIMED_YES_NO_CONFIRMATION
 
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
     fi
 
+    msg_ok "Docker ENV setup start confirmed"
     return 0
 }
 
@@ -1967,7 +2032,9 @@ function collect_user_and_path_inputs() {
     setup_options_group_header "User / path"
 
     while true; do
+        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         DOCKER_USER="$(timed_text_input "Enter Linux username" "$DEFAULT_USER")"
+        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
         if validate_linux_username "$DOCKER_USER"; then
             break
@@ -1984,7 +2051,9 @@ function collect_user_and_path_inputs() {
     DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
 
     while true; do
+        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         USERDIR="$(timed_text_input "Enter user home directory" "$DEFAULT_USERDIR")"
+        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
         if validate_absolute_path "$USERDIR"; then
             break
@@ -1996,7 +2065,9 @@ function collect_user_and_path_inputs() {
     DEFAULT_DOCKER_DIR="${USERDIR}/docker"
 
     while true; do
+        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         DOCKER_DIR="$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")"
+        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
         if validate_absolute_path "$DOCKER_DIR"; then
             break
@@ -2011,6 +2082,10 @@ function collect_user_and_path_inputs() {
     PUID_VALUE="$(id -u "$DOCKER_USER")"
     PGID_VALUE="$(id -g "$DOCKER_USER")"
     DOCKER_GID_VALUE="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
+
+    aligned_check_line "Linux username" "$DOCKER_USER" "$ANS" 18
+    aligned_check_line "User home" "$USERDIR" "$ANS" 18
+    aligned_check_line "Docker directory" "$DOCKER_DIR" "$ANS" 18
 
     if id -nG "$DOCKER_USER" 2>/dev/null | grep -qw docker; then
         DOCKER_USER_IN_DOCKER_GROUP="yes"
@@ -2124,12 +2199,20 @@ function detect_existing_setup() {
 # --- 46. DOMAIN / CLOUDFLARE INPUTS ---
 # Collects and validates timezone, domain, Cloudflare email/zone ID and token.
 function collect_domain_cloudflare_inputs() {
+    local cf_zone_summary="empty"
+    local cf_token_summary="not provided"
+    local cf_email_summary="not used"
+
     setup_options_group_header "Domain / Cloudflare"
 
+    SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
     TZ_VALUE="$(timed_text_input "Enter timezone" "$DEFAULT_TZ")"
+    unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
     while true; do
+        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         DOMAIN_VALUE="$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")"
+        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
         if validate_domain "$DOMAIN_VALUE"; then
             break
@@ -2144,9 +2227,9 @@ function collect_domain_cloudflare_inputs() {
 
         if validate_cf_zone_id "$CF_ZONE_ID_VALUE"; then
             if [ -n "$CF_ZONE_ID_VALUE" ]; then
-                msg_ok "Cloudflare Zone ID captured"
+                cf_zone_summary="captured"
             else
-                msg_skip "Cloudflare Zone ID left empty"
+                cf_zone_summary="empty"
             fi
             break
         fi
@@ -2164,26 +2247,38 @@ function collect_domain_cloudflare_inputs() {
         CF_AUTH_MODE="api_token_file_reuse"
         CF_EMAIL_REQUIRED="no"
         CF_API_EMAIL_VALUE=""
-        msg_ok "EXISTING CLOUDFLARE API TOKEN WILL BE REUSED"
+        cf_token_summary="reused"
     elif [ -n "$CF_API_TOKEN_VALUE" ]; then
         CF_AUTH_MODE="api_token"
         CF_EMAIL_REQUIRED="no"
         CF_API_EMAIL_VALUE=""
-        msg_ok "Cloudflare API token captured"
+        cf_token_summary="captured"
     else
         CF_AUTH_MODE="email_or_manual"
         CF_EMAIL_REQUIRED="yes"
-        msg_skip "Cloudflare API token not provided"
+        cf_token_summary="not provided"
+        cf_email_summary="required"
 
         while true; do
+            SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
             CF_API_EMAIL_VALUE="$(timed_text_input "Enter Cloudflare API Email" "$DEFAULT_CF_API_EMAIL")"
+            unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
             if validate_email "$CF_API_EMAIL_VALUE"; then
+                cf_email_summary="${CF_API_EMAIL_VALUE}"
                 break
             fi
 
             msg_warn "Invalid email format."
         done
+    fi
+
+    aligned_check_line "Timezone" "$TZ_VALUE" "$ANS" 19
+    aligned_check_line "Domain" "$DOMAIN_VALUE" "$ANS" 19
+    aligned_check_line "Cloudflare Zone ID" "$cf_zone_summary" "$GN" 19
+    aligned_check_line "Cloudflare token" "$cf_token_summary" "$GN" 19
+    if [ "$CF_EMAIL_REQUIRED" == "yes" ]; then
+        aligned_check_line "Cloudflare email" "$cf_email_summary" "$ANS" 19
     fi
 
     return 0
@@ -2194,9 +2289,6 @@ function collect_domain_cloudflare_inputs() {
 # Collects optional per-service hostnames and writes into variables used by write_env_file().
 function collect_service_hostnames() {
     setup_options_group_header "Service hostnames"
-
-    tty_println "${BL}Base domain:${CL} ${ANS}${DOMAIN_VALUE}${CL}"
-    echo ""
 
     # Compute defaults
     local d="${DOMAIN_VALUE}"
@@ -2244,17 +2336,16 @@ function collect_service_hostnames() {
     preview_files="${existing_files:-${def_files}}"
     preview_code="${existing_code:-${def_code}}"
 
-    echo -e "${YW}Service hostnames:${CL}"
-    echo -e "  ${BL}Landing page:${CL}      ${GN}${preview_landing}${CL}"
-    echo -e "  ${BL}Landing www:${CL}       ${GN}${preview_landing_www}${CL}"
-    echo -e "  ${BL}Authentik:${CL}         ${GN}${preview_authentik}${CL}"
-    echo -e "  ${BL}Traefik:${CL}           ${GN}${preview_traefik}${CL}"
-    echo -e "  ${BL}Admin UI:${CL}          ${GN}${preview_admin}${CL}"
-    echo -e "  ${BL}Admin Dashboard:${CL}   ${GN}${preview_admin_dashboard}${CL}"
-    echo -e "  ${BL}Postiz/Circl8 app:${CL} ${GN}${preview_postiz}${CL}"
-    echo -e "  ${BL}n8n:${CL}               ${GN}${preview_n8n}${CL}"
-    echo -e "  ${BL}Files:${CL}             ${GN}${preview_files}${CL}"
-    echo -e "  ${BL}VS Code:${CL}           ${GN}${preview_code}${CL}"
+    aligned_value_line "Landing page" "$preview_landing" "$GN" 19
+    aligned_value_line "Landing www" "$preview_landing_www" "$GN" 19
+    aligned_value_line "Authentik" "$preview_authentik" "$GN" 19
+    aligned_value_line "Traefik" "$preview_traefik" "$GN" 19
+    aligned_value_line "Admin UI" "$preview_admin" "$GN" 19
+    aligned_value_line "Admin Dashboard" "$preview_admin_dashboard" "$GN" 19
+    aligned_value_line "Postiz/Circl8 app" "$preview_postiz" "$GN" 19
+    aligned_value_line "n8n" "$preview_n8n" "$GN" 19
+    aligned_value_line "Files" "$preview_files" "$GN" 19
+    aligned_value_line "VS Code" "$preview_code" "$GN" 19
     echo ""
 
     # Ask whether to customize (default No)
@@ -2279,78 +2370,31 @@ function collect_service_hostnames() {
     fi
 
     # Interactive customization: use non-timed hostname_input() and validate
-    while true; do
-        LANDING_HOST="$(hostname_input "Landing page hostname" "${existing_landing:-${def_landing}}")"
-        if validate_domain "$LANDING_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
-
-    while true; do
-        LANDING_WWW_HOST="$(hostname_input "Landing www hostname" "${existing_landing_www:-${def_landing_www}}")"
-        if validate_domain "$LANDING_WWW_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
-
-    while true; do
-        AUTHENTIK_HOST="$(hostname_input "Authentik hostname" "${existing_authentik:-${def_authentik}}")"
-        if validate_domain "$AUTHENTIK_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
-
-    while true; do
-        TRAEFIK_HOST="$(hostname_input "Traefik hostname" "${existing_traefik:-${def_traefik}}")"
-        if validate_domain "$TRAEFIK_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
-
-    while true; do
-        ADMIN_UI_HOST="$(hostname_input "Admin UI hostname" "${existing_admin:-${def_admin}}")"
-        if validate_domain "$ADMIN_UI_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
-
-    while true; do
-        ADMIN_DASHBOARD_HOST="$(hostname_input "Admin Dashboard hostname" "${existing_admin_dashboard:-${def_admin_dashboard}}")"
-        if validate_domain "$ADMIN_DASHBOARD_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
-
-    while true; do
-        POSTIZ_HOST="$(hostname_input "Postiz app hostname" "${existing_postiz:-${def_postiz}}")"
-        if validate_domain "$POSTIZ_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
-
-    while true; do
-        N8N_HOST="$(hostname_input "n8n hostname" "${existing_n8n:-${def_n8n}}")"
-        if validate_domain "$N8N_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
-
-    while true; do
-        FILEBROWSER_HOST="$(hostname_input "Files hostname" "${existing_files:-${def_files}}")"
-        if validate_domain "$FILEBROWSER_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
-
-    while true; do
-        VSCODE_HOST="$(hostname_input "VS Code hostname" "${existing_code:-${def_code}}")"
-        if validate_domain "$VSCODE_HOST"; then break; fi
-        msg_warn "Invalid hostname format"
-    done
+    SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
+    while true; do LANDING_HOST="$(hostname_input "Landing page hostname" "${existing_landing:-${def_landing}}")"; validate_domain "$LANDING_HOST" && break; msg_warn "Invalid hostname format"; done
+    while true; do LANDING_WWW_HOST="$(hostname_input "Landing www hostname" "${existing_landing_www:-${def_landing_www}}")"; validate_domain "$LANDING_WWW_HOST" && break; msg_warn "Invalid hostname format"; done
+    while true; do AUTHENTIK_HOST="$(hostname_input "Authentik hostname" "${existing_authentik:-${def_authentik}}")"; validate_domain "$AUTHENTIK_HOST" && break; msg_warn "Invalid hostname format"; done
+    while true; do TRAEFIK_HOST="$(hostname_input "Traefik hostname" "${existing_traefik:-${def_traefik}}")"; validate_domain "$TRAEFIK_HOST" && break; msg_warn "Invalid hostname format"; done
+    while true; do ADMIN_UI_HOST="$(hostname_input "Admin UI hostname" "${existing_admin:-${def_admin}}")"; validate_domain "$ADMIN_UI_HOST" && break; msg_warn "Invalid hostname format"; done
+    while true; do ADMIN_DASHBOARD_HOST="$(hostname_input "Admin Dashboard hostname" "${existing_admin_dashboard:-${def_admin_dashboard}}")"; validate_domain "$ADMIN_DASHBOARD_HOST" && break; msg_warn "Invalid hostname format"; done
+    while true; do POSTIZ_HOST="$(hostname_input "Postiz app hostname" "${existing_postiz:-${def_postiz}}")"; validate_domain "$POSTIZ_HOST" && break; msg_warn "Invalid hostname format"; done
+    while true; do N8N_HOST="$(hostname_input "n8n hostname" "${existing_n8n:-${def_n8n}}")"; validate_domain "$N8N_HOST" && break; msg_warn "Invalid hostname format"; done
+    while true; do FILEBROWSER_HOST="$(hostname_input "Files hostname" "${existing_files:-${def_files}}")"; validate_domain "$FILEBROWSER_HOST" && break; msg_warn "Invalid hostname format"; done
+    while true; do VSCODE_HOST="$(hostname_input "VS Code hostname" "${existing_code:-${def_code}}")"; validate_domain "$VSCODE_HOST" && break; msg_warn "Invalid hostname format"; done
+    unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
     echo ""
     echo -e "${YW}Service hostnames:${CL}"
-    echo -e "  ${BL}Landing page:${CL}      ${ANS}${LANDING_HOST}${CL}"
-    echo -e "  ${BL}Landing www:${CL}       ${ANS}${LANDING_WWW_HOST}${CL}"
-    echo -e "  ${BL}Authentik:${CL}         ${ANS}${AUTHENTIK_HOST}${CL}"
-    echo -e "  ${BL}Traefik:${CL}           ${ANS}${TRAEFIK_HOST}${CL}"
-    echo -e "  ${BL}Admin UI:${CL}          ${ANS}${ADMIN_UI_HOST}${CL}"
-    echo -e "  ${BL}Admin Dashboard:${CL}   ${ANS}${ADMIN_DASHBOARD_HOST}${CL}"
-    echo -e "  ${BL}Postiz/Circl8 app:${CL} ${ANS}${POSTIZ_HOST}${CL}"
-    echo -e "  ${BL}n8n:${CL}               ${ANS}${N8N_HOST}${CL}"
-    echo -e "  ${BL}Files:${CL}             ${ANS}${FILEBROWSER_HOST}${CL}"
-    echo -e "  ${BL}VS Code:${CL}           ${ANS}${VSCODE_HOST}${CL}"
+    aligned_value_line "Landing page" "$LANDING_HOST" "$ANS" 19
+    aligned_value_line "Landing www" "$LANDING_WWW_HOST" "$ANS" 19
+    aligned_value_line "Authentik" "$AUTHENTIK_HOST" "$ANS" 19
+    aligned_value_line "Traefik" "$TRAEFIK_HOST" "$ANS" 19
+    aligned_value_line "Admin UI" "$ADMIN_UI_HOST" "$ANS" 19
+    aligned_value_line "Admin Dashboard" "$ADMIN_DASHBOARD_HOST" "$ANS" 19
+    aligned_value_line "Postiz/Circl8 app" "$POSTIZ_HOST" "$ANS" 19
+    aligned_value_line "n8n" "$N8N_HOST" "$ANS" 19
+    aligned_value_line "Files" "$FILEBROWSER_HOST" "$ANS" 19
+    aligned_value_line "VS Code" "$VSCODE_HOST" "$ANS" 19
 
     local confirm="$(timed_yes_no "Write these hostnames to .env?" "Y")"
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -2401,12 +2445,12 @@ function collect_traefik_inputs() {
 
     echo ""
     echo -e "${YW}Network / Proxmox:${CL}"
-    [ -n "$detected_primary_ip" ] && detail_line "System IPv4" "$detected_primary_ip"
-    [ -n "$detected_gateway_ip" ] && detail_line "Default gateway" "$detected_gateway_ip"
+    [ -n "$detected_primary_ip" ] && aligned_value_line "System IPv4" "$detected_primary_ip" "$GN" 17
+    [ -n "$detected_gateway_ip" ] && aligned_value_line "Default gateway" "$detected_gateway_ip" "$GN" 17
     if [ -n "$default_proxmox_url" ]; then
-        detail_line "Proxmox LAN URL" "$default_proxmox_url"
+        aligned_value_line "Proxmox LAN URL" "$default_proxmox_url" "$GN" 17
     else
-        detail_line "Proxmox LAN URL" "not found"
+        aligned_value_line "Proxmox LAN URL" "not found" "$GN" 17
     fi
     echo ""
 
@@ -2442,8 +2486,8 @@ function collect_traefik_inputs() {
         fi
 
         msg_ok "Proxmox route enabled"
-        echo -e "  ${BL}Host:${CL} ${ANS}${PROXMOX_HOST}${CL}"
-        echo -e "  ${BL}LAN URL:${CL} ${GN}${PROXMOX_URL}${CL}"
+        aligned_value_line "Host" "$PROXMOX_HOST" "$ANS" 17
+        aligned_value_line "LAN URL" "$PROXMOX_URL" "$GN" 17
     else
         PROXMOX_ROUTE_ENABLED="n"
         PROXMOX_HOST=""
@@ -2470,33 +2514,37 @@ function collect_htpasswd_inputs() {
 
     setup_options_group_header "Optional htpasswd"
 
-    echo -e "${BL}Optional Traefik basic-auth htpasswd setup.${CL}"
-    echo -e "${YW}Not required if you use Authentik, Authelia, or a similar SSO/auth gateway.${CL}"
-    echo -e "${YW}If a password is entered, this script will generate a SHA-512 htpasswd hash.${CL}"
-    echo -e "${YW}If a full htpasswd line is provided, it will be saved but not displayed in final output.${CL}"
+    echo -e "${BL}Optional Traefik basic-auth credentials.${CL}"
+    echo -e "${YW}Skip this when Authentik/SSO is used for access control.${CL}"
     echo ""
 
     has_htpasswd_yn="$(timed_yes_no "Do you already have a hashed htpasswd line?" "n")"
 
     if [[ "$has_htpasswd_yn" =~ ^[Yy] ]]; then
-        HTPASSWD_LINE_VALUE="$(sensitive_visible_line_input "Paste full htpasswd line username:hash" "htpasswd line captured")"
+        HTPASSWD_LINE_VALUE="$(sensitive_visible_line_input "Paste full htpasswd line username:hash")"
 
         HTPASSWD_LINE_VALUE="$(printf '%s' "$HTPASSWD_LINE_VALUE" | tr -d '\r\n')"
 
         if [ -n "$HTPASSWD_LINE_VALUE" ]; then
             if validate_htpasswd_line "$HTPASSWD_LINE_VALUE"; then
                 HTPASSWD_MODE="provided"
+                msg_ok "htpasswd line captured"
             else
                 HTPASSWD_LINE_VALUE=""
                 HTPASSWD_MODE="empty"
                 msg_warn "Provided htpasswd line did not look valid. Empty placeholder will be used unless an existing file is present."
             fi
+        else
+            HTPASSWD_MODE="empty"
+            msg_skip "htpasswd skipped"
         fi
     else
         create_htpasswd_yn="$(timed_yes_no "Create htpasswd entry now?" "n")"
 
         if [[ "$create_htpasswd_yn" =~ ^[Yy] ]]; then
+            SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
             HTPASSWD_USER_VALUE="$(timed_text_input "Enter htpasswd username" "$DEFAULT_HTPASSWD_USER")"
+            unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
             HTPASSWD_PASSWORD_VALUE="$(sensitive_visible_line_input "Enter htpasswd password" "htpasswd password captured")"
 
@@ -2505,12 +2553,15 @@ function collect_htpasswd_inputs() {
                 HTPASSWD_LINE_VALUE="${HTPASSWD_USER_VALUE}:${HTPASSWD_HASH_VALUE}"
                 HTPASSWD_PASSWORD_VALUE=""
                 HTPASSWD_MODE="generated"
+                aligned_value_line "htpasswd user" "$HTPASSWD_USER_VALUE" "$ANS" 15
+                aligned_value_line "htpasswd line" "generated" "$GN" 15
             else
                 HTPASSWD_MODE="empty"
                 msg_warn "htpasswd password was empty. Empty placeholder will be used unless an existing file is present."
             fi
         else
             HTPASSWD_MODE="empty"
+            msg_skip "htpasswd skipped"
         fi
     fi
 }
@@ -2554,10 +2605,10 @@ function collect_admin_ui_selection() {
 
     setup_options_group_header "Admin UI"
 
-    echo -e "  ${BL}1)${CL} Dockge"
-    echo -e "  ${BL}2)${CL} Portainer CE"
-    echo -e "  ${BL}3)${CL} Komodo"
-    echo -e "  ${BL}4)${CL} Dockhand"
+    echo -e "  ${YW}1)${CL} Dockge"
+    echo -e "  ${YW}2)${CL} Portainer CE"
+    echo -e "  ${YW}3)${CL} Komodo"
+    echo -e "  ${YW}4)${CL} Dockhand"
     echo ""
 
     while true; do
@@ -2575,9 +2626,9 @@ function collect_admin_ui_selection() {
     set_admin_ui_details
 
     msg_ok "Admin UI selected: ${ADMIN_UI_DISPLAY_NAME}"
-    echo -e "  ${BL}Admin UI:${CL} ${ANS}${ADMIN_UI_DISPLAY_NAME}${CL}"
-    echo -e "  ${BL}Host:${CL} ${ANS}${ADMIN_UI_HOST}${CL}"
-    echo -e "  ${BL}URL:${CL} ${ANS}${ADMIN_UI_URL}${CL}"
+    aligned_value_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$ANS" 9
+    aligned_value_line "Host" "$ADMIN_UI_HOST" "$ANS" 9
+    aligned_value_line "URL" "$ADMIN_UI_URL" "$ANS" 9
 
     return 0
 }
@@ -2589,11 +2640,16 @@ function collect_authentik_inputs() {
     local token_choice=""
     local api_choice=""
     local default_admin_email=""
+    local password_summary="generated"
+    local token_summary="generated"
+    local api_summary="reuse bootstrap token"
 
     setup_options_group_header "Authentik bootstrap"
 
+    SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
     AUTHENTIK_HOST_VALUE="$(timed_text_input "Enter Authentik external URL" "https://auth.${DOMAIN_VALUE}")"
     AUTHENTIK_HOST_BROWSER_VALUE="$(timed_text_input "Enter Authentik browser URL" "$AUTHENTIK_HOST_VALUE")"
+    unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
     while true; do
         if [ -n "$CF_API_EMAIL_VALUE" ]; then
@@ -2602,7 +2658,9 @@ function collect_authentik_inputs() {
             default_admin_email="admin@${DOMAIN_VALUE}"
         fi
 
+        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(timed_text_input "Enter Authentik bootstrap admin email" "$default_admin_email")"
+        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
         if validate_email "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"; then
             break
@@ -2610,6 +2668,10 @@ function collect_authentik_inputs() {
 
         msg_warn "Invalid email format."
     done
+
+    aligned_value_line "External URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 18
+    aligned_value_line "Browser URL" "$AUTHENTIK_HOST_BROWSER_VALUE" "$ANS" 18
+    aligned_value_line "Bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 18
 
     echo ""
     echo -e "${YW}Authentik bootstrap password:${CL}"
@@ -2625,11 +2687,12 @@ function collect_authentik_inputs() {
             AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" | tr -d '\r\n')"
             [ -n "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" ] || msg_error "Authentik bootstrap password cannot be empty."
             AUTHENTIK_BOOTSTRAP_PASSWORD_MODE="custom"
+            password_summary="captured"
             ;;
         *)
             AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(generate_secret)"
             AUTHENTIK_BOOTSTRAP_PASSWORD_MODE="auto"
-            msg_ok "Authentik bootstrap password will be generated"
+            password_summary="generated"
             ;;
     esac
 
@@ -2647,11 +2710,12 @@ function collect_authentik_inputs() {
             AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" | tr -d '\r\n')"
             [ -n "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" ] || msg_error "Authentik bootstrap token cannot be empty."
             AUTHENTIK_BOOTSTRAP_TOKEN_MODE="custom"
+            token_summary="captured"
             ;;
         *)
             AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(generate_secret)"
             AUTHENTIK_BOOTSTRAP_TOKEN_MODE="auto"
-            msg_ok "Authentik bootstrap token will be generated"
+            token_summary="generated"
             ;;
     esac
 
@@ -2670,23 +2734,34 @@ function collect_authentik_inputs() {
             AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '\r\n')"
             if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
                 AUTHENTIK_API_TOKEN_MODE="provided"
+                api_summary="captured"
             else
                 AUTHENTIK_API_TOKEN_MODE="bootstrap"
                 AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
+                api_summary="reuse bootstrap token"
                 msg_skip "No API token pasted; bootstrap token will be used"
             fi
             ;;
         3)
             AUTHENTIK_API_TOKEN_MODE="skip"
             AUTHENTIK_API_TOKEN_VALUE=""
-            msg_skip "Authentik API automation skipped"
+            api_summary="skipped"
             ;;
         *)
             AUTHENTIK_API_TOKEN_MODE="bootstrap"
             AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
-            msg_ok "Authentik API token will reuse bootstrap token"
+            api_summary="reuse bootstrap token"
             ;;
     esac
+
+    echo ""
+    echo -e "${YW}Authentik bootstrap:${CL}"
+    aligned_value_line "External URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 18
+    aligned_value_line "Browser URL" "$AUTHENTIK_HOST_BROWSER_VALUE" "$ANS" 18
+    aligned_value_line "Bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 18
+    aligned_value_line "Password" "$password_summary" "$GN" 18
+    aligned_value_line "Bootstrap token" "$token_summary" "$GN" 18
+    aligned_value_line "API token" "$api_summary" "$GN" 18
 
     collect_authentik_email_smtp_inputs
 
@@ -2709,6 +2784,7 @@ function collect_authentik_email_smtp_inputs() {
     local has_existing_smtp="no"
     local use_defaults=""
     local show_smtp_plan="no"
+    local defaults_selected="no"
 
     setup_options_group_header "Authentik SMTP relay"
 
@@ -2738,12 +2814,12 @@ function collect_authentik_email_smtp_inputs() {
 
     if [ "$has_existing_smtp" == "yes" ]; then
         echo -e "${YW}Existing SMTP settings:${CL}"
-        detail_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-not configured}"
-        detail_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}"
-        detail_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)"
-        detail_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE:-not set}"
-        detail_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}"
-        detail_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}"
+        aligned_value_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-not configured}" "$GN" 18
+        aligned_value_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}" "$GN" 18
+        aligned_value_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)" "$GN" 18
+        aligned_value_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE:-not set}" "$GN" 18
+        aligned_value_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}" "$GN" 18
+        aligned_value_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}" "$GN" 18
         echo ""
 
         configure_choice="$(timed_yes_no "Update Authentik SMTP relay settings?" "N")"
@@ -2755,16 +2831,16 @@ function collect_authentik_email_smtp_inputs() {
         show_smtp_plan="yes"
     else
         echo -e "${YW}Defaults:${CL}"
-        detail_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE}"
-        detail_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE}"
-        detail_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE}"
-        detail_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}"
-        detail_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE}"
+        aligned_value_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE}" "$GN" 18
+        aligned_value_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE}" "$GN" 18
+        aligned_value_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE}" "$GN" 18
+        aligned_value_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}" "$GN" 18
+        aligned_value_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE}" "$GN" 18
         echo ""
 
         use_defaults="$(timed_yes_no "Use these SMTP defaults?" "Y")"
         if [[ "$use_defaults" =~ ^[Yy]$ ]]; then
-            msg_ok "SMTP defaults selected"
+            defaults_selected="yes"
         else
             show_smtp_plan="yes"
         fi
@@ -2772,14 +2848,18 @@ function collect_authentik_email_smtp_inputs() {
 
     if [ "$show_smtp_plan" == "yes" ]; then
         while true; do
+            SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
             AUTHENTIK_EMAIL__HOST_VALUE="$(hostname_input "Enter Authentik SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-smtp-relay.brevo.com}")"
+            unset SUPPRESS_TEXT_INPUT_CONFIRMATION
             if [ -n "$AUTHENTIK_EMAIL__HOST_VALUE" ]; then
                 break
             fi
             msg_warn "SMTP host cannot be empty."
         done
 
+        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         AUTHENTIK_EMAIL__PORT_VALUE="$(text_input "Enter Authentik SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}")"
+        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
     fi
 
     AUTHENTIK_EMAIL__USERNAME_VALUE="$(editable_input_loop "Enter Authentik SMTP username" "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}" "")"
@@ -2800,17 +2880,25 @@ function collect_authentik_email_smtp_inputs() {
     [ -n "$AUTHENTIK_EMAIL__PASSWORD_VALUE" ] || msg_error "Authentik SMTP password cannot be empty when SMTP host is configured."
 
     if [ "$show_smtp_plan" == "yes" ]; then
+        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         AUTHENTIK_EMAIL__FROM_VALUE="$(text_input "Enter Authentik SMTP sender address" "${AUTHENTIK_EMAIL__FROM_VALUE}")"
         AUTHENTIK_EMAIL__TIMEOUT_VALUE="$(text_input "Enter Authentik SMTP timeout seconds" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}")"
+        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
         echo ""
         echo -e "${YW}SMTP plan:${CL}"
-        detail_line "SMTP host" "$AUTHENTIK_EMAIL__HOST_VALUE"
-        detail_line "SMTP port" "$AUTHENTIK_EMAIL__PORT_VALUE"
-        detail_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)"
-        detail_line "SMTP from" "$AUTHENTIK_EMAIL__FROM_VALUE"
-        detail_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}"
-        detail_line "Timeout" "$AUTHENTIK_EMAIL__TIMEOUT_VALUE"
+        aligned_value_line "SMTP host" "$AUTHENTIK_EMAIL__HOST_VALUE" "$ANS" 18
+        aligned_value_line "SMTP port" "$AUTHENTIK_EMAIL__PORT_VALUE" "$ANS" 18
+        aligned_value_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)" "$GN" 18
+        aligned_value_line "SMTP from" "$AUTHENTIK_EMAIL__FROM_VALUE" "$ANS" 18
+        aligned_value_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}" "$GN" 18
+        aligned_value_line "Timeout" "$AUTHENTIK_EMAIL__TIMEOUT_VALUE" "$ANS" 18
+    elif [ "$defaults_selected" == "yes" ]; then
+        echo ""
+        echo -e "${YW}SMTP:${CL}"
+        aligned_value_line "Defaults" "selected" "$GN" 18
+        aligned_value_line "Username" "captured" "$GN" 18
+        aligned_value_line "Password" "captured" "$GN" 18
     fi
 }
 # --- 47C. SETUP PLAN SUMMARY ---
@@ -2852,28 +2940,29 @@ function show_ready_summary_and_confirm() {
     echo -e "${YW}No Docker ENV files, secrets or templates have been written yet.${CL}"
     echo ""
     echo -e "${YW}User / path:${CL}"
-    echo -e "  ${BL}Docker user:${CL} ${ANS}${DOCKER_USER}${CL}"
-    echo -e "  ${BL}Docker directory:${CL} ${ANS}${DOCKER_DIR}${CL}"
+    aligned_value_line "Docker user" "$DOCKER_USER" "$ANS" 17
+    aligned_value_line "Docker directory" "$DOCKER_DIR" "$ANS" 17
     echo ""
     echo -e "${YW}Domain / routing:${CL}"
-    echo -e "  ${BL}Domain:${CL} ${ANS}${DOMAIN_VALUE}${CL}"
-    echo -e "  ${BL}Cloudflare auth:${CL} ${GN}${cloudflare_auth_summary}${CL}"
-    echo -e "  ${BL}Proxmox route:${CL} ${GN}$(yes_no_label "$PROXMOX_ROUTE_ENABLED")${CL}"
+    aligned_value_line "Domain" "$DOMAIN_VALUE" "$ANS" 17
+    aligned_value_line "Cloudflare auth" "$cloudflare_auth_summary" "$GN" 17
+    aligned_value_line "Proxmox route" "$(yes_no_label "$PROXMOX_ROUTE_ENABLED")" "$GN" 17
     echo ""
     echo -e "${YW}Applications:${CL}"
-    echo -e "  ${BL}Admin UI:${CL} ${ANS}${ADMIN_UI_DISPLAY_NAME}${CL}"
-    echo -e "  ${BL}Authentik URL:${CL} ${ANS}${AUTHENTIK_HOST_VALUE}${CL}"
-    echo -e "  ${BL}SMTP relay:${CL} ${GN}${smtp_summary}${CL}"
+    aligned_value_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$ANS" 15
+    aligned_value_line "Authentik URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 15
+    aligned_value_line "SMTP relay" "$smtp_summary" "$GN" 15
     echo ""
     echo -e "${YW}Secrets:${CL}"
-    echo -e "  ${BL}Service secrets:${CL} ${GN}${service_secret_summary}${CL}"
-    echo -e "  ${BL}Cloudflare token:${CL} ${GN}${cloudflare_token_summary}${CL}"
-    echo -e "  ${BL}Authentik bootstrap:${CL} ${GN}${bootstrap_summary}${CL}"
+    aligned_value_line "Service secrets" "$service_secret_summary" "$GN" 22
+    aligned_value_line "Cloudflare token" "$cloudflare_token_summary" "$GN" 22
+    aligned_value_line "Authentik bootstrap" "$bootstrap_summary" "$GN" 22
     if [ "$EXISTING_SETUP" == "yes" ]; then
-        echo -e "  ${BL}Regenerate secrets:${CL} ${ANS}$(yes_no_label "$REGENERATE_SECRETS")${CL}"
+        aligned_value_line "Regenerate secrets" "$(yes_no_label "$REGENERATE_SECRETS")" "$ANS" 22
     fi
     echo ""
-    echo -e "${RD}After confirmation, Script 6 will create folders, .env, secrets and Traefik config.${CL}"
+    echo -e "${RD}After confirmation, Script 6 will create:${CL}"
+    echo -e "  ${RD}folders, .env, secrets and Traefik config.${CL}"
     echo ""
 
     apply_yn="$(timed_yes_no "Apply this Docker ENV setup plan now?" "y")"
@@ -2897,7 +2986,8 @@ function create_docker_directories() {
 
     msg_info "Creating Docker folder structure"
     ensure_required_service_directories
-    msg_ok "DOCKER FOLDERS CREATED"
+    tty_print "${BFR}"
+    apply_status_line "created"
 }
 
 
@@ -2920,7 +3010,8 @@ function generate_or_reuse_secrets() {
     KOMODO_JWT_SECRET="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_jwt_secret")"
     KOMODO_WEBHOOK_SECRET="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_webhook_secret")"
 
-    msg_ok "SECRETS GENERATED / REUSED"
+    tty_print "${BFR}"
+    apply_status_line "$(secret_generation_status_label)"
 }
 
 # --- 50. POSTGRES INIT SCRIPT CREATION ---
@@ -2975,7 +3066,8 @@ EOF
 
     run_cmd "making PostgreSQL init script executable" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
-    msg_ok "POSTGRES INIT SCRIPT CREATED"
+    tty_print "${BFR}"
+    apply_status_line "created"
 }
 
 
@@ -3080,7 +3172,8 @@ function write_secret_files() {
         run_cmd "creating empty htpasswd placeholder" touch "${DOCKER_SECRETS_DIR}/htpasswd"
     fi
 
-    msg_ok "SECRET FILES WRITTEN"
+    tty_print "${BFR}"
+    apply_status_line "written"
 }
 
 # --- 52. ENV FILE CREATION ---
@@ -3231,7 +3324,8 @@ VSCODE_IMAGE="lscr.io/linuxserver/code-server:latest"
 FILEBROWSER_IMAGE="filebrowser/filebrowser:latest"
 EOF
 
-    msg_ok "DOCKER .ENV CREATED"
+    tty_print "${BFR}"
+    apply_status_line "created"
 }
 
 
@@ -3282,7 +3376,7 @@ function assert_owner_mode() {
         msg_error "Permission audit failed for ${path}. Expected ${expected_uid}:${expected_gid}:${expected_mode}, got ${actual:-unknown}."
     fi
 
-    echo -e " ${CM} ${BL}PERMISSION OK:${CL} ${GN}${path}${CL}"
+    permission_audit_line "PERMISSION OK:" "$path"
 }
 
 
@@ -3295,7 +3389,7 @@ function assert_root_executable() {
         test -x "$path" || msg_error "Executable audit failed: ${path}"
     fi
 
-    echo -e " ${CM} ${BL}EXECUTABLE OK:${CL} ${GN}${path}${CL}"
+    permission_audit_line "EXECUTABLE OK:" "$path"
 }
 
 
@@ -3311,7 +3405,7 @@ function assert_user_writable_dir() {
         touch "$test_file" && rm -f "$test_file" >/dev/null 2>&1 || msg_error "Current user cannot write to ${path}"
     fi
 
-    echo -e " ${CM} ${BL}WRITABLE OK:${CL} ${GN}${path}${CL}"
+    permission_audit_line "WRITABLE OK:" "$path"
 }
 
 function verify_service_permissions() {
@@ -3873,19 +3967,19 @@ function show_secrets_once_without_logging() {
     echo -e "${YW}Save these values now. This screen will be cleared after confirmation.${CL}"
     echo ""
 
-    echo -e "${BL}CORE PATHS:${CL}"
+    echo -e "${YW}CORE PATHS:${CL}"
     echo -e "DOCKER_DIR=${GN}${DOCKER_DIR}${CL}"
     echo -e "DOCKER_SECRETS_DIR=${GN}${DOCKER_SECRETS_DIR}${CL}"
     echo -e "USERDIR=${GN}${USERDIR}${CL}"
     echo ""
 
-    echo -e "${BL}LINUX USER / IDS:${CL}"
+    echo -e "${YW}LINUX USER / IDS:${CL}"
     echo -e "DOCKER_USER=${GN}${DOCKER_USER}${CL}"
     echo -e "PUID=${GN}${PUID_VALUE}${CL}"
     echo -e "PGID=${GN}${PGID_VALUE}${CL}"
     echo ""
 
-    echo -e "${BL}DOMAIN / CLOUDFLARE:${CL}"
+    echo -e "${YW}DOMAIN / CLOUDFLARE:${CL}"
     echo -e "DOMAIN=${GN}${DOMAIN_VALUE}${CL}"
     echo -e "CF_API_EMAIL=${GN}${CF_API_EMAIL_VALUE:-not used with token auth}${CL}"
     echo -e "CF_ZONE_ID=${GN}$([ -n "$CF_ZONE_ID_VALUE" ] && echo captured || echo empty)${CL}"
@@ -3901,7 +3995,7 @@ function show_secrets_once_without_logging() {
     fi
 
     echo ""
-    echo -e "${BL}AUTHENTIK BOOTSTRAP / API:${CL}"
+    echo -e "${YW}AUTHENTIK BOOTSTRAP / API:${CL}"
     echo -e "AUTHENTIK_HOST=${GN}${AUTHENTIK_HOST_VALUE}${CL}"
     echo -e "AUTHENTIK_HOST_BROWSER=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
     echo -e "AUTHENTIK_BOOTSTRAP_EMAIL=${GN}${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}${CL}"
@@ -3924,7 +4018,7 @@ function show_secrets_once_without_logging() {
     echo -e "${YW}Reminder: for fresh Authentik, AUTHENTIK_BOOTSTRAP_TOKEN creates an akadmin API Access token and Script 6.5 can reuse it.${CL}"
 
     echo ""
-    echo -e "${BL}SERVICE SECRETS:${CL}"
+    echo -e "${YW}SERVICE SECRETS:${CL}"
     echo -e "POSTGRES_PASSWORD=${GN}${POSTGRES_PASSWORD}${CL}"
     echo -e "REDIS_PASSWORD=${GN}${REDIS_PASSWORD}${CL}"
     echo -e "AUTHENTIK_SECRET_KEY=${GN}${AUTHENTIK_SECRET_KEY}${CL}"
@@ -3938,7 +4032,7 @@ function show_secrets_once_without_logging() {
     echo -e "KOMODO_WEBHOOK_SECRET=${GN}${KOMODO_WEBHOOK_SECRET}${CL}"
     echo ""
 
-    echo -e "${BL}HTPASSWD:${CL}"
+    echo -e "${YW}HTPASSWD:${CL}"
 
     if [ "$HTPASSWD_MODE" == "generated" ]; then
         echo -e "HTPASSWD_HASHED_LINE=${GN}${HTPASSWD_LINE_VALUE}${CL}"
@@ -3956,7 +4050,7 @@ function show_secrets_once_without_logging() {
 
 
     echo ""
-    echo -e "${BL}IMAGE DEFAULTS / DEVELOPMENT MODE:${CL}"
+    echo -e "${YW}IMAGE DEFAULTS / DEVELOPMENT MODE:${CL}"
     echo -e "SOCKET_PROXY_IMAGE=${GN}tecnativa/docker-socket-proxy:latest${CL}"
     echo -e "DOCKGE_IMAGE=${GN}louislam/dockge:latest${CL}"
     echo -e "DOCKHAND_IMAGE=${GN}fnsys/dockhand:latest${CL}"
