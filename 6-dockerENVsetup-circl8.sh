@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.6.11"
+SCRIPT_VERSION="v1.6.13"
 SCRIPT_UPDATED="2026-06-06"
-SCRIPT_BUILD="compact-alignment-polish"
+SCRIPT_BUILD="service-host-prefix-input"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -107,6 +107,8 @@ ADMIN_UI_HOST=""
 ADMIN_UI_URL=""
 
 AUTHENTIK_HOST_VALUE=""
+AUTHENTIK_ROUTE_HOST_VALUE=""
+AUTHENTIK_EXTERNAL_URL_VALUE=""
 AUTHENTIK_HOST_BROWSER_VALUE=""
 AUTHENTIK_BOOTSTRAP_EMAIL_VALUE=""
 AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
@@ -306,6 +308,131 @@ function https_url_or_not_configured() {
     else
         printf 'https://%s' "$host"
     fi
+}
+
+function bare_host_from_url_or_host() {
+    local value="${1:-}"
+
+    value="${value#http://}"
+    value="${value#https://}"
+    value="${value%%/*}"
+    value="${value%%\?*}"
+    value="${value%%#*}"
+
+    printf '%s' "$value"
+}
+
+function url_from_host_or_url() {
+    local value="${1:-}"
+
+    if [ -z "$value" ]; then
+        printf ''
+    elif [[ "$value" =~ ^https?:// ]]; then
+        printf '%s' "$value"
+    else
+        printf 'https://%s' "$value"
+    fi
+}
+
+function refresh_authentik_route_url_values() {
+    local route_source="${AUTHENTIK_ROUTE_HOST_VALUE:-${AUTHENTIK_HOST:-}}"
+    local external_source="${AUTHENTIK_EXTERNAL_URL_VALUE:-${AUTHENTIK_HOST_VALUE:-}}"
+    local browser_source="${AUTHENTIK_HOST_BROWSER_VALUE:-}"
+
+    [ -n "$route_source" ] || route_source="${external_source}"
+    [ -n "$external_source" ] || external_source="${route_source}"
+
+    AUTHENTIK_ROUTE_HOST_VALUE="$(bare_host_from_url_or_host "$route_source")"
+    AUTHENTIK_EXTERNAL_URL_VALUE="$(url_from_host_or_url "$external_source")"
+
+    [ -n "$AUTHENTIK_HOST_BROWSER_VALUE" ] || AUTHENTIK_HOST_BROWSER_VALUE="$browser_source"
+    [ -n "$AUTHENTIK_HOST_BROWSER_VALUE" ] || AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
+    AUTHENTIK_HOST_BROWSER_VALUE="$(url_from_host_or_url "$AUTHENTIK_HOST_BROWSER_VALUE")"
+
+    AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
+}
+
+function lowercase_value() {
+    printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
+function validate_subdomain_prefix() {
+    local prefix="${1:-}"
+
+    [ -n "$prefix" ] || return 1
+    [[ "$prefix" != *.* ]] || return 1
+    [[ "$prefix" != *://* ]] || return 1
+    [[ "$prefix" != */* ]] || return 1
+    [[ "$prefix" != *\?* ]] || return 1
+    [[ "$prefix" != *#* ]] || return 1
+    [[ "$prefix" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+
+    return 0
+}
+
+function hostname_from_prefix() {
+    local prefix="${1:-}"
+    local domain="${2:-}"
+
+    prefix="$(lowercase_value "$prefix")"
+    domain="$(lowercase_value "$domain")"
+    printf '%s.%s' "$prefix" "$domain"
+}
+
+function prefix_from_hostname() {
+    local hostname="${1:-}"
+    local domain="${2:-}"
+    local fallback_prefix="${3:-}"
+    local label="${4:-Service}"
+    local bare=""
+    local prefix=""
+
+    fallback_prefix="$(lowercase_value "$fallback_prefix")"
+    bare="$(bare_host_from_url_or_host "$hostname")"
+    bare="$(lowercase_value "$bare")"
+    domain="$(lowercase_value "$domain")"
+
+    if [ -z "$bare" ]; then
+        printf '%s' "$fallback_prefix"
+        return 0
+    fi
+
+    if [ "$bare" == "$domain" ]; then
+        printf '%s' "$fallback_prefix"
+        return 0
+    fi
+
+    if [[ "$bare" == *."$domain" ]]; then
+        prefix="${bare%.${domain}}"
+        if validate_subdomain_prefix "$prefix"; then
+            printf '%s' "$prefix"
+            return 0
+        fi
+    fi
+
+    msg_warn "Existing ${label} hostname is outside the configured domain and cannot be used in normal mode. Falling back to ${fallback_prefix}.${domain}."
+    printf '%s' "$fallback_prefix"
+    return 0
+}
+
+function prompt_subdomain_prefix() {
+    local prompt="$1"
+    local default_prefix="$2"
+    local answer=""
+
+    default_prefix="$(lowercase_value "$default_prefix")"
+
+    while true; do
+        answer="$(hostname_input "$prompt" "$default_prefix")"
+        answer="$(lowercase_value "$(printf '%s' "$answer" | xargs || true)")"
+
+        if validate_subdomain_prefix "$answer"; then
+            printf '%s' "$answer"
+            return 0
+        fi
+
+        msg_warn "Invalid subdomain prefix. Use one DNS label only, for example: ${default_prefix}. Do not enter dots, URLs, paths, or leading/trailing hyphens."
+    done
 }
 
 function status_color_for_value() {
@@ -2290,27 +2417,56 @@ function collect_domain_cloudflare_inputs() {
 function collect_service_hostnames() {
     setup_options_group_header "Service hostnames"
 
-    # Compute defaults
     local d="${DOMAIN_VALUE}"
     local def_landing="${d}"
-    local def_landing_www="www.${d}"
-    local def_authentik="auth.${d}"
-    local def_traefik="traefik.${d}"
-    local def_admin="dockge.${d}"
-    local def_admin_dashboard="admin.${d}"
-    local def_postiz="app.${d}"
-    local def_n8n="n8n.${d}"
-    local def_files="files.${d}"
-    local def_code="code.${d}"
+    local def_landing_www_prefix="www"
+    local def_authentik_prefix="auth"
+    local def_traefik_prefix="traefik"
+    local def_admin_prefix="dockge"
+    local def_admin_dashboard_prefix="admin"
+    local def_postiz_prefix="app"
+    local def_n8n_prefix="n8n"
+    local def_files_prefix="files"
+    local def_code_prefix="code"
 
-    local preview_landing preview_landing_www preview_authentik preview_traefik preview_admin preview_admin_dashboard preview_postiz preview_n8n preview_files preview_code
+    local landing_www_prefix=""
+    local authentik_prefix=""
+    local traefik_prefix=""
+    local admin_prefix=""
+    local admin_dashboard_prefix=""
+    local postiz_prefix=""
+    local n8n_prefix=""
+    local files_prefix=""
+    local code_prefix=""
 
-    # If an existing .env exists, prefer those values when preserving on No
-    local existing_landing existing_landing_www existing_authentik existing_traefik existing_admin existing_admin_dashboard existing_postiz existing_n8n existing_files existing_code
+    local existing_landing=""
+    local existing_landing_www=""
+    local existing_authentik=""
+    local existing_traefik=""
+    local existing_admin=""
+    local existing_admin_dashboard=""
+    local existing_postiz=""
+    local existing_n8n=""
+    local existing_files=""
+    local existing_code=""
+    local customize=""
+    local confirm=""
+
+    case "$ADMIN_UI" in
+        dockge) def_admin_prefix="dockge" ;;
+        portainer|portainer-ce) def_admin_prefix="portainer" ;;
+        komodo) def_admin_prefix="komodo" ;;
+        dockhand) def_admin_prefix="dockhand" ;;
+        *) def_admin_prefix="dockge" ;;
+    esac
+
     if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
         existing_landing="$(grep -E '^LANDING_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_landing_www="$(grep -E '^LANDING_WWW_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_authentik="$(grep -E '^AUTHENTIK_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_authentik="$(grep -E '^AUTHENTIK_ROUTE_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        if [ -z "$existing_authentik" ]; then
+            existing_authentik="$(grep -E '^AUTHENTIK_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        fi
         existing_traefik="$(grep -E '^TRAEFIK_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_admin="$(grep -E '^ADMIN_UI_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
         existing_admin_dashboard="$(grep -E '^ADMIN_DASHBOARD_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
@@ -2320,74 +2476,105 @@ function collect_service_hostnames() {
         existing_code="$(grep -E '^VSCODE_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
     fi
 
-    # If Admin UI selection already set ADMIN_UI_HOST at runtime, prefer it
     if [ -n "${ADMIN_UI_HOST:-}" ]; then
         existing_admin="${ADMIN_UI_HOST}"
     fi
 
-    preview_landing="${existing_landing:-${def_landing}}"
-    preview_landing_www="${existing_landing_www:-${def_landing_www}}"
-    preview_authentik="${existing_authentik:-${def_authentik}}"
-    preview_traefik="${existing_traefik:-${def_traefik}}"
-    preview_admin="${existing_admin:-${def_admin}}"
-    preview_admin_dashboard="${existing_admin_dashboard:-${def_admin_dashboard}}"
-    preview_postiz="${existing_postiz:-${def_postiz}}"
-    preview_n8n="${existing_n8n:-${def_n8n}}"
-    preview_files="${existing_files:-${def_files}}"
-    preview_code="${existing_code:-${def_code}}"
+    LANDING_HOST="$def_landing"
+    if [ -n "$existing_landing" ] && [ "$(lowercase_value "$(bare_host_from_url_or_host "$existing_landing")")" != "$(lowercase_value "$d")" ]; then
+        msg_warn "Existing Landing page hostname is outside the configured domain and cannot be used in normal mode. Landing root will remain ${d}."
+    fi
 
-    aligned_value_line "Landing page" "$preview_landing" "$GN" 19
-    aligned_value_line "Landing www" "$preview_landing_www" "$GN" 19
-    aligned_value_line "Authentik" "$preview_authentik" "$GN" 19
-    aligned_value_line "Traefik" "$preview_traefik" "$GN" 19
-    aligned_value_line "Admin UI" "$preview_admin" "$GN" 19
-    aligned_value_line "Admin Dashboard" "$preview_admin_dashboard" "$GN" 19
-    aligned_value_line "Postiz/Circl8 app" "$preview_postiz" "$GN" 19
-    aligned_value_line "n8n" "$preview_n8n" "$GN" 19
-    aligned_value_line "Files" "$preview_files" "$GN" 19
-    aligned_value_line "VS Code" "$preview_code" "$GN" 19
+    landing_www_prefix="$(prefix_from_hostname "$existing_landing_www" "$d" "$def_landing_www_prefix" "Landing www")"
+    authentik_prefix="$(prefix_from_hostname "$existing_authentik" "$d" "$def_authentik_prefix" "Authentik")"
+    traefik_prefix="$(prefix_from_hostname "$existing_traefik" "$d" "$def_traefik_prefix" "Traefik")"
+    admin_prefix="$(prefix_from_hostname "$existing_admin" "$d" "$def_admin_prefix" "Admin UI")"
+    admin_dashboard_prefix="$(prefix_from_hostname "$existing_admin_dashboard" "$d" "$def_admin_dashboard_prefix" "Admin Dashboard")"
+    postiz_prefix="$(prefix_from_hostname "$existing_postiz" "$d" "$def_postiz_prefix" "Postiz app")"
+    n8n_prefix="$(prefix_from_hostname "$existing_n8n" "$d" "$def_n8n_prefix" "n8n")"
+    files_prefix="$(prefix_from_hostname "$existing_files" "$d" "$def_files_prefix" "Files")"
+    code_prefix="$(prefix_from_hostname "$existing_code" "$d" "$def_code_prefix" "VS Code")"
+
+    LANDING_WWW_HOST="$(hostname_from_prefix "$landing_www_prefix" "$d")"
+    AUTHENTIK_ROUTE_HOST_VALUE="$(hostname_from_prefix "$authentik_prefix" "$d")"
+    AUTHENTIK_HOST="$AUTHENTIK_ROUTE_HOST_VALUE"
+    TRAEFIK_HOST="$(hostname_from_prefix "$traefik_prefix" "$d")"
+    ADMIN_UI_HOST="$(hostname_from_prefix "$admin_prefix" "$d")"
+    ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
+    ADMIN_DASHBOARD_HOST="$(hostname_from_prefix "$admin_dashboard_prefix" "$d")"
+    POSTIZ_HOST="$(hostname_from_prefix "$postiz_prefix" "$d")"
+    N8N_HOST="$(hostname_from_prefix "$n8n_prefix" "$d")"
+    FILEBROWSER_HOST="$(hostname_from_prefix "$files_prefix" "$d")"
+    VSCODE_HOST="$(hostname_from_prefix "$code_prefix" "$d")"
+    AUTHENTIK_EXTERNAL_URL_VALUE="https://${AUTHENTIK_ROUTE_HOST_VALUE}"
+    AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
+    AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
+
+    aligned_value_line "Landing page" "$LANDING_HOST" "$GN" 19
+    aligned_value_line "Landing www" "$LANDING_WWW_HOST" "$GN" 19
+    aligned_value_line "Authentik" "$AUTHENTIK_ROUTE_HOST_VALUE" "$GN" 19
+    aligned_value_line "Traefik" "$TRAEFIK_HOST" "$GN" 19
+    aligned_value_line "Admin UI" "$ADMIN_UI_HOST" "$GN" 19
+    aligned_value_line "Admin Dashboard" "$ADMIN_DASHBOARD_HOST" "$GN" 19
+    aligned_value_line "Postiz/Circl8 app" "$POSTIZ_HOST" "$GN" 19
+    aligned_value_line "n8n" "$N8N_HOST" "$GN" 19
+    aligned_value_line "Files" "$FILEBROWSER_HOST" "$GN" 19
+    aligned_value_line "VS Code" "$VSCODE_HOST" "$GN" 19
     echo ""
 
-    # Ask whether to customize (default No)
-    local customize="$(timed_yes_no "Customize service hostnames?" "N")"
+    customize="$(timed_yes_no "Customize service hostnames?" "N")"
 
     if [[ "$customize" =~ ^[Nn]$ ]]; then
-        # Preserve existing values when present, otherwise use defaults
-        LANDING_HOST="${preview_landing}"
-        LANDING_WWW_HOST="${preview_landing_www}"
-        AUTHENTIK_HOST="${preview_authentik}"
-        TRAEFIK_HOST="${preview_traefik}"
-        ADMIN_UI_HOST="${preview_admin}"
-        ADMIN_DASHBOARD_HOST="${preview_admin_dashboard}"
-        # POSTIZ_HOST handled by existing Batch 2 code; preserve existing or default
-        POSTIZ_HOST="${preview_postiz}"
-        N8N_HOST="${preview_n8n}"
-        FILEBROWSER_HOST="${preview_files}"
-        VSCODE_HOST="${preview_code}"
-
         msg_ok "Service hostnames set to defaults/preserved values"
         return 0
     fi
 
-    # Interactive customization: use non-timed hostname_input() and validate
+    local original_landing_www_prefix="$landing_www_prefix"
+    local original_authentik_prefix="$authentik_prefix"
+    local original_traefik_prefix="$traefik_prefix"
+    local original_admin_prefix="$admin_prefix"
+    local original_admin_dashboard_prefix="$admin_dashboard_prefix"
+    local original_postiz_prefix="$postiz_prefix"
+    local original_n8n_prefix="$n8n_prefix"
+    local original_files_prefix="$files_prefix"
+    local original_code_prefix="$code_prefix"
+
+    echo -e "${BL}Landing root host remains:${CL} ${GN}${LANDING_HOST}${CL}"
+    echo -e "${YW}Enter subdomain prefixes only. Script 6 will append .${DOMAIN_VALUE}.${CL}"
+    echo ""
+
     SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
-    while true; do LANDING_HOST="$(hostname_input "Landing page hostname" "${existing_landing:-${def_landing}}")"; validate_domain "$LANDING_HOST" && break; msg_warn "Invalid hostname format"; done
-    while true; do LANDING_WWW_HOST="$(hostname_input "Landing www hostname" "${existing_landing_www:-${def_landing_www}}")"; validate_domain "$LANDING_WWW_HOST" && break; msg_warn "Invalid hostname format"; done
-    while true; do AUTHENTIK_HOST="$(hostname_input "Authentik hostname" "${existing_authentik:-${def_authentik}}")"; validate_domain "$AUTHENTIK_HOST" && break; msg_warn "Invalid hostname format"; done
-    while true; do TRAEFIK_HOST="$(hostname_input "Traefik hostname" "${existing_traefik:-${def_traefik}}")"; validate_domain "$TRAEFIK_HOST" && break; msg_warn "Invalid hostname format"; done
-    while true; do ADMIN_UI_HOST="$(hostname_input "Admin UI hostname" "${existing_admin:-${def_admin}}")"; validate_domain "$ADMIN_UI_HOST" && break; msg_warn "Invalid hostname format"; done
-    while true; do ADMIN_DASHBOARD_HOST="$(hostname_input "Admin Dashboard hostname" "${existing_admin_dashboard:-${def_admin_dashboard}}")"; validate_domain "$ADMIN_DASHBOARD_HOST" && break; msg_warn "Invalid hostname format"; done
-    while true; do POSTIZ_HOST="$(hostname_input "Postiz app hostname" "${existing_postiz:-${def_postiz}}")"; validate_domain "$POSTIZ_HOST" && break; msg_warn "Invalid hostname format"; done
-    while true; do N8N_HOST="$(hostname_input "n8n hostname" "${existing_n8n:-${def_n8n}}")"; validate_domain "$N8N_HOST" && break; msg_warn "Invalid hostname format"; done
-    while true; do FILEBROWSER_HOST="$(hostname_input "Files hostname" "${existing_files:-${def_files}}")"; validate_domain "$FILEBROWSER_HOST" && break; msg_warn "Invalid hostname format"; done
-    while true; do VSCODE_HOST="$(hostname_input "VS Code hostname" "${existing_code:-${def_code}}")"; validate_domain "$VSCODE_HOST" && break; msg_warn "Invalid hostname format"; done
+    landing_www_prefix="$(prompt_subdomain_prefix "Landing www subdomain" "$landing_www_prefix")"
+    authentik_prefix="$(prompt_subdomain_prefix "Authentik subdomain" "$authentik_prefix")"
+    traefik_prefix="$(prompt_subdomain_prefix "Traefik subdomain" "$traefik_prefix")"
+    admin_prefix="$(prompt_subdomain_prefix "Admin UI subdomain" "$admin_prefix")"
+    admin_dashboard_prefix="$(prompt_subdomain_prefix "Admin Dashboard subdomain" "$admin_dashboard_prefix")"
+    postiz_prefix="$(prompt_subdomain_prefix "Postiz app subdomain" "$postiz_prefix")"
+    n8n_prefix="$(prompt_subdomain_prefix "n8n subdomain" "$n8n_prefix")"
+    files_prefix="$(prompt_subdomain_prefix "Files subdomain" "$files_prefix")"
+    code_prefix="$(prompt_subdomain_prefix "VS Code subdomain" "$code_prefix")"
     unset SUPPRESS_TEXT_INPUT_CONFIRMATION
+
+    LANDING_WWW_HOST="$(hostname_from_prefix "$landing_www_prefix" "$d")"
+    AUTHENTIK_ROUTE_HOST_VALUE="$(hostname_from_prefix "$authentik_prefix" "$d")"
+    AUTHENTIK_HOST="$AUTHENTIK_ROUTE_HOST_VALUE"
+    TRAEFIK_HOST="$(hostname_from_prefix "$traefik_prefix" "$d")"
+    ADMIN_UI_HOST="$(hostname_from_prefix "$admin_prefix" "$d")"
+    ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
+    ADMIN_DASHBOARD_HOST="$(hostname_from_prefix "$admin_dashboard_prefix" "$d")"
+    POSTIZ_HOST="$(hostname_from_prefix "$postiz_prefix" "$d")"
+    N8N_HOST="$(hostname_from_prefix "$n8n_prefix" "$d")"
+    FILEBROWSER_HOST="$(hostname_from_prefix "$files_prefix" "$d")"
+    VSCODE_HOST="$(hostname_from_prefix "$code_prefix" "$d")"
+    AUTHENTIK_EXTERNAL_URL_VALUE="https://${AUTHENTIK_ROUTE_HOST_VALUE}"
+    AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
+    AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
 
     echo ""
     echo -e "${YW}Service hostnames:${CL}"
-    aligned_value_line "Landing page" "$LANDING_HOST" "$ANS" 19
+    aligned_value_line "Landing page" "$LANDING_HOST" "$GN" 19
     aligned_value_line "Landing www" "$LANDING_WWW_HOST" "$ANS" 19
-    aligned_value_line "Authentik" "$AUTHENTIK_HOST" "$ANS" 19
+    aligned_value_line "Authentik" "$AUTHENTIK_ROUTE_HOST_VALUE" "$ANS" 19
     aligned_value_line "Traefik" "$TRAEFIK_HOST" "$ANS" 19
     aligned_value_line "Admin UI" "$ADMIN_UI_HOST" "$ANS" 19
     aligned_value_line "Admin Dashboard" "$ADMIN_DASHBOARD_HOST" "$ANS" 19
@@ -2396,22 +2583,25 @@ function collect_service_hostnames() {
     aligned_value_line "Files" "$FILEBROWSER_HOST" "$ANS" 19
     aligned_value_line "VS Code" "$VSCODE_HOST" "$ANS" 19
 
-    local confirm="$(timed_yes_no "Write these hostnames to .env?" "Y")"
+    confirm="$(timed_yes_no "Write these hostnames to .env?" "Y")"
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         msg_ok "Hostnames will be written into .env when write_env_file() runs"
     else
-        msg_skip "Hostnames not changed; existing values will be preserved"
-        # If user cancels, preserve existing or defaults without writing changes now
-        LANDING_HOST="${existing_landing:-${def_landing}}"
-        LANDING_WWW_HOST="${existing_landing_www:-${def_landing_www}}"
-        AUTHENTIK_HOST="${existing_authentik:-${def_authentik}}"
-        TRAEFIK_HOST="${existing_traefik:-${def_traefik}}"
-        ADMIN_UI_HOST="${existing_admin:-${def_admin}}"
-        ADMIN_DASHBOARD_HOST="${existing_admin_dashboard:-${def_admin_dashboard}}"
-        POSTIZ_HOST="${existing_postiz:-${def_postiz}}"
-        N8N_HOST="${existing_n8n:-${def_n8n}}"
-        FILEBROWSER_HOST="${existing_files:-${def_files}}"
-        VSCODE_HOST="${existing_code:-${def_code}}"
+        msg_skip "Hostname changes cancelled; safe defaults/preserved values under ${DOMAIN_VALUE} will be used"
+        LANDING_WWW_HOST="$(hostname_from_prefix "$original_landing_www_prefix" "$d")"
+        AUTHENTIK_ROUTE_HOST_VALUE="$(hostname_from_prefix "$original_authentik_prefix" "$d")"
+        AUTHENTIK_HOST="$AUTHENTIK_ROUTE_HOST_VALUE"
+        TRAEFIK_HOST="$(hostname_from_prefix "$original_traefik_prefix" "$d")"
+        ADMIN_UI_HOST="$(hostname_from_prefix "$original_admin_prefix" "$d")"
+        ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
+        ADMIN_DASHBOARD_HOST="$(hostname_from_prefix "$original_admin_dashboard_prefix" "$d")"
+        POSTIZ_HOST="$(hostname_from_prefix "$original_postiz_prefix" "$d")"
+        N8N_HOST="$(hostname_from_prefix "$original_n8n_prefix" "$d")"
+        FILEBROWSER_HOST="$(hostname_from_prefix "$original_files_prefix" "$d")"
+        VSCODE_HOST="$(hostname_from_prefix "$original_code_prefix" "$d")"
+        AUTHENTIK_EXTERNAL_URL_VALUE="https://${AUTHENTIK_ROUTE_HOST_VALUE}"
+        AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
+        AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
     fi
 }
 
@@ -2646,10 +2836,20 @@ function collect_authentik_inputs() {
 
     setup_options_group_header "Authentik bootstrap"
 
+    refresh_authentik_route_url_values
     SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
-    AUTHENTIK_HOST_VALUE="$(timed_text_input "Enter Authentik external URL" "https://auth.${DOMAIN_VALUE}")"
-    AUTHENTIK_HOST_BROWSER_VALUE="$(timed_text_input "Enter Authentik browser URL" "$AUTHENTIK_HOST_VALUE")"
+    AUTHENTIK_HOST_VALUE="$(timed_text_input "Enter Authentik external URL" "${AUTHENTIK_EXTERNAL_URL_VALUE:-https://${AUTHENTIK_ROUTE_HOST_VALUE:-auth.${DOMAIN_VALUE}}}")"
+    AUTHENTIK_HOST_BROWSER_VALUE="$(timed_text_input "Enter Authentik browser URL" "${AUTHENTIK_HOST_VALUE}")"
     unset SUPPRESS_TEXT_INPUT_CONFIRMATION
+
+    refresh_authentik_route_url_values
+    if [[ "$(lowercase_value "$AUTHENTIK_ROUTE_HOST_VALUE")" != *."$(lowercase_value "$DOMAIN_VALUE")" ]]; then
+        msg_warn "Authentik external URL is outside the configured domain and cannot be used for normal routing. Resetting route to auth.${DOMAIN_VALUE}."
+        AUTHENTIK_ROUTE_HOST_VALUE="auth.${DOMAIN_VALUE}"
+        AUTHENTIK_EXTERNAL_URL_VALUE="https://${AUTHENTIK_ROUTE_HOST_VALUE}"
+        AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
+        AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
+    fi
 
     while true; do
         if [ -n "$CF_API_EMAIL_VALUE" ]; then
@@ -2719,7 +2919,6 @@ function collect_authentik_inputs() {
             ;;
     esac
 
-    echo ""
     echo -e "${YW}Authentik API token:${CL}"
     echo -e "  ${BL}1)${CL} Reuse bootstrap token ${GN}(recommended)${CL}"
     echo -e "  ${BL}2)${CL} Paste existing API token"
@@ -2754,7 +2953,6 @@ function collect_authentik_inputs() {
             ;;
     esac
 
-    echo ""
     echo -e "${YW}Authentik bootstrap:${CL}"
     aligned_value_line "External URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 18
     aligned_value_line "Browser URL" "$AUTHENTIK_HOST_BROWSER_VALUE" "$ANS" 18
@@ -3190,6 +3388,8 @@ function write_env_file() {
     # during heredoc rendering.
     local DOMAIN="${DOMAIN_VALUE}"
 
+    refresh_authentik_route_url_values
+
     # Fail with a clear message before the heredoc if any required collected
     # value is unexpectedly empty/unset. This avoids cryptic set -u messages.
     : "${DOMAIN_VALUE:?DOMAIN_VALUE is required before writing .env}"
@@ -3235,7 +3435,7 @@ TRAEFIK_ACME_STORAGE="${TRAEFIK_ACME_DIR}/acme.json"
 # --- Service hostnames (set by collect_service_hostnames) ---
 LANDING_HOST="${LANDING_HOST}"
 LANDING_WWW_HOST="${LANDING_WWW_HOST}"
-AUTHENTIK_HOST="${AUTHENTIK_HOST}"
+AUTHENTIK_ROUTE_HOST="${AUTHENTIK_ROUTE_HOST_VALUE}"
 TRAEFIK_HOST="${TRAEFIK_HOST}"
 ADMIN_DASHBOARD_HOST="${ADMIN_DASHBOARD_HOST}"
 # POSTIZ_HOST is populated by Batch 2 and preserved here
@@ -3256,10 +3456,11 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
 REDIS_PASSWORD="${REDIS_PASSWORD}"
 
 # --- Authentik ---
-# Compatibility note: AUTHENTIK_HOST is intentionally emitted again here.
-# Earlier service-hostname consumers expect AUTHENTIK_HOST as the route hostname, while Authentik runtime uses the external URL.
-# Preserve this duplicate assignment until Script 6.5/compose consumers are migrated together.
-AUTHENTIK_HOST="${AUTHENTIK_HOST_VALUE}"
+# Compatibility note: AUTHENTIK_HOST is kept once as the legacy external URL value.
+# Route labels must use AUTHENTIK_ROUTE_HOST; runtime/API consumers should use AUTHENTIK_EXTERNAL_URL.
+AUTHENTIK_EXTERNAL_URL="${AUTHENTIK_EXTERNAL_URL_VALUE}"
+AUTHENTIK_HOST="${AUTHENTIK_EXTERNAL_URL_VALUE}"
+AUTHENTIK_HOST_BROWSER_VALUE="${AUTHENTIK_HOST_BROWSER_VALUE}"
 AUTHENTIK_HOST_BROWSER="${AUTHENTIK_HOST_BROWSER_VALUE}"
 AUTHENTIK_SECRET_KEY="${AUTHENTIK_SECRET_KEY}"
 AUTHENTIK_POSTGRES_PASSWORD="${AUTHENTIK_POSTGRES_PASSWORD}"
@@ -3996,7 +4197,11 @@ function show_secrets_once_without_logging() {
 
     echo ""
     echo -e "${YW}AUTHENTIK BOOTSTRAP / API:${CL}"
-    echo -e "AUTHENTIK_HOST=${GN}${AUTHENTIK_HOST_VALUE}${CL}"
+    refresh_authentik_route_url_values
+    echo -e "AUTHENTIK_ROUTE_HOST=${GN}${AUTHENTIK_ROUTE_HOST_VALUE}${CL}"
+    echo -e "AUTHENTIK_EXTERNAL_URL=${GN}${AUTHENTIK_EXTERNAL_URL_VALUE}${CL}"
+    echo -e "AUTHENTIK_HOST=${GN}${AUTHENTIK_EXTERNAL_URL_VALUE}${CL}"
+    echo -e "AUTHENTIK_HOST_BROWSER_VALUE=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
     echo -e "AUTHENTIK_HOST_BROWSER=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
     echo -e "AUTHENTIK_BOOTSTRAP_EMAIL=${GN}${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}${CL}"
     if [ "${AUTHENTIK_BOOTSTRAP_PASSWORD_MODE:-auto}" == "custom" ]; then
@@ -4135,7 +4340,8 @@ function show_clean_final_summary() {
     final_line "Files URL" "$(https_url_or_not_configured "${FILEBROWSER_HOST:-}")"
     final_line "VS Code URL" "$(https_url_or_not_configured "${VSCODE_HOST:-}")"
     echo ""
-    final_line "Authentik URL" "$(https_url_or_not_configured "${AUTHENTIK_HOST_VALUE:-${AUTHENTIK_HOST:-}}")"
+    refresh_authentik_route_url_values
+    final_line "Authentik URL" "$(https_url_or_not_configured "${AUTHENTIK_EXTERNAL_URL_VALUE:-${AUTHENTIK_HOST_VALUE:-${AUTHENTIK_HOST:-}}}")"
     final_line "SMTP relay" "$smtp_summary"
 
     echo ""
