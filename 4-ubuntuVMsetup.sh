@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.6"
-SCRIPT_UPDATED="2026-06-05"
-SCRIPT_BUILD="answer-color-scope-fix"
+SCRIPT_VERSION="v2.1.7"
+SCRIPT_UPDATED="2026-06-06"
+SCRIPT_BUILD="post-reboot-verify-mode"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -48,6 +48,11 @@ REBOOT_T=30
 LOG_FILE="/var/log/ubuntu-vm-setup.log"
 RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/ubuntu-vm-setup-verify.log"
+VERIFY_DISPLAY_LOG="/var/log/ubuntu-vm-setup-verify-display.log"
+POST_REBOOT_VERIFY_HOOK="/etc/profile.d/circl8-script4-post-reboot-verify.sh"
+POST_REBOOT_VERIFY_HELPER="/usr/local/sbin/circl8-script4-post-reboot-verify"
+POST_REBOOT_VERIFY_MARKER=""
+VERIFY_ONLY_MODE="no"
 VERIFY_STATUS="not-run"
 VERIFY_PASS_COUNT="0"
 VERIFY_WARN_COUNT="0"
@@ -775,6 +780,56 @@ function show_previous_marker_compact_summary() {
     echo -e "  ${BL}Verify log:${CL} ${GN}$(marker_value_or_unknown_for_display "Verify Log" "$marker_file")${CL}"
 }
 
+function marker_key_value_or_empty() {
+    local key="$1"
+    local file="$2"
+    local value=""
+
+    if root_file_exists "$file"; then
+        value="$(root_cat_file "$file" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | xargs || true)"
+    fi
+
+    echo "$value"
+}
+
+function previous_marker_action_menu() {
+    local action=""
+    local action_label=""
+
+    while true; do
+        tty_println "  ${YW}1)${CL} Verify existing setup"
+        tty_println "  ${YW}2)${CL} Re-run Ubuntu VM setup"
+        tty_println "  ${YW}3)${CL} Exit"
+        tty_println ""
+        tty_print "${YW}Select action [default: 1]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -r action < /dev/tty || action=""
+        else
+            IFS= read -r action || action=""
+        fi
+
+        action="$(printf '%s' "$action" | tr -d '
+' | xargs || true)"
+        [ -z "$action" ] && action="1"
+
+        case "$action" in
+            1) action_label="Verify existing setup" ;;
+            2) action_label="Re-run Ubuntu VM setup" ;;
+            3) action_label="Exit" ;;
+            *)
+                tty_println "${WARN} ${YW}Invalid action. Choose 1, 2, or 3.${CL}"
+                tty_println ""
+                continue
+                ;;
+        esac
+
+        tty_println "${CM} ${GN}Selected action:${CL} ${ANS}${action_label}${CL}"
+        echo "$action"
+        return 0
+    done
+}
+
 function build_ssh_hint_from_marker() {
     local marker="/root/.ubuntu-autoinstall-seed-completed"
     local marker_text=""
@@ -894,7 +949,7 @@ function init_script() {
 
 # --- 27. PREVIOUS MARKER CHECK ---
 function check_previous_marker() {
-    local continue_yn=""
+    local marker_action=""
 
     if root_file_exists "$COMPLETED_MARKER"; then
         section "PREVIOUS UBUNTU VM SETUP MARKER DETECTED"
@@ -903,8 +958,23 @@ function check_previous_marker() {
         echo ""
         echo -e "${YW}Action:${CL}"
 
-        continue_yn="$(timed_yes_no "Continue anyway?" "n")"
-        [[ "$continue_yn" =~ ^[Nn] ]] && exit 0
+        marker_action="$(previous_marker_action_menu)"
+
+        case "$marker_action" in
+            1)
+                run_verify_only_mode
+                exit 0
+                ;;
+            2)
+                return 0
+                ;;
+            3)
+                exit 0
+                ;;
+            *)
+                return 0
+                ;;
+        esac
     fi
 
     return 0
@@ -1641,6 +1711,19 @@ UFW: $UFW_ENABLED
 SSH Hardened: $SSH_HARDENING_APPLIED
 System Cleaned: $SYSTEM_CLEANED
 Verify Log: $VERIFY_LOG
+SCRIPT4_STATUS=completed
+SCRIPT4_VERSION=$SCRIPT_VERSION
+SCRIPT4_BUILD=$SCRIPT_BUILD
+SCRIPT4_VERIFY_STATUS=$VERIFY_STATUS
+SCRIPT4_VERIFY_LOG=$VERIFY_LOG
+SCRIPT4_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
+SCRIPT4_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
+SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-displayed
+SCRIPT4_USERNAME=$USERNAME
+SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
+SCRIPT4_UFW_ENABLED=$UFW_ENABLED
+SCRIPT4_QEMU_AGENT=$QEMU_AGENT_INSTALLED
+SCRIPT4_SSH_HARDENED=$SSH_HARDENING_APPLIED
 EOF_MARKER
     else
         cat > "$COMPLETED_MARKER" <<EOF_MARKER
@@ -1665,6 +1748,19 @@ UFW: $UFW_ENABLED
 SSH Hardened: $SSH_HARDENING_APPLIED
 System Cleaned: $SYSTEM_CLEANED
 Verify Log: $VERIFY_LOG
+SCRIPT4_STATUS=completed
+SCRIPT4_VERSION=$SCRIPT_VERSION
+SCRIPT4_BUILD=$SCRIPT_BUILD
+SCRIPT4_VERIFY_STATUS=$VERIFY_STATUS
+SCRIPT4_VERIFY_LOG=$VERIFY_LOG
+SCRIPT4_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
+SCRIPT4_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
+SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-displayed
+SCRIPT4_USERNAME=$USERNAME
+SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
+SCRIPT4_UFW_ENABLED=$UFW_ENABLED
+SCRIPT4_QEMU_AGENT=$QEMU_AGENT_INSTALLED
+SCRIPT4_SSH_HARDENED=$SSH_HARDENING_APPLIED
 EOF_MARKER
     fi
 
@@ -1673,7 +1769,9 @@ EOF_MARKER
 
 # --- 44. VERIFICATION REPORT ---
 function create_verification_report() {
-    apply_group_header "Marker / verification"
+    if [ "${VERIFY_ONLY_MODE:-no}" != "yes" ]; then
+        apply_group_header "Marker / verification"
+    fi
 
     msg_info "Creating verification report"
 
@@ -1878,6 +1976,260 @@ EOF_VERIFY
     msg_ok "VERIFICATION REPORT CREATED"
 }
 
+
+function load_state_from_completion_marker() {
+    local marker_file="$COMPLETED_MARKER"
+    local marker_username=""
+    local value=""
+
+    marker_username="$(marker_value_or_unknown_for_display "Username" "$marker_file")"
+    if [ -n "$marker_username" ] && [ "$marker_username" != "unknown" ]; then
+        USERNAME="$marker_username"
+    elif [ -n "${SUDO_USER:-}" ]; then
+        USERNAME="$SUDO_USER"
+    elif [ -n "${USER:-}" ] && [ "${USER:-}" != "root" ]; then
+        USERNAME="$USER"
+    else
+        USERNAME="$DEFAULT_USERNAME"
+    fi
+
+    value="$(marker_value_or_unknown_for_display "Virt Type" "$marker_file")"; [ "$value" != "unknown" ] && VIRT_TYPE="$value"
+    value="$(marker_value_or_unknown_for_display "Container" "$marker_file")"; [ "$value" != "unknown" ] && IS_CONTAINER="$value"
+    value="$(marker_value_or_unknown_for_display "LXC" "$marker_file")"; [ "$value" != "unknown" ] && IS_LXC="$value"
+    value="$(marker_value_or_unknown_for_display "VM" "$marker_file")"; [ "$value" != "unknown" ] && IS_VM="$value"
+    value="$(marker_value_or_unknown_for_display "SSH Hardened" "$marker_file")"; [ "$value" != "unknown" ] && SSH_HARDENING_APPLIED="$value"
+    value="$(marker_value_or_unknown_for_display "UFW" "$marker_file")"; [ "$value" != "unknown" ] && UFW_ENABLED="$value"
+    value="$(marker_value_or_unknown_for_display "QEMU Agent" "$marker_file")"; [ "$value" != "unknown" ] && QEMU_AGENT_INSTALLED="$value"
+    value="$(marker_value_or_unknown_for_display "Root Expanded" "$marker_file")"; [ "$value" != "unknown" ] && ROOT_EXPANDED="$value"
+    value="$(marker_value_or_unknown_for_display "Ubuntu Pro Attached" "$marker_file")"; [ "$value" != "unknown" ] && UBUNTU_PRO_ATTACHED="$value"
+    value="$(marker_value_or_unknown_for_display "System Updated" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_UPDATED="$value"
+    value="$(marker_value_or_unknown_for_display "System Cleaned" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_CLEANED="$value"
+
+    if [ "$SSH_HARDENING_APPLIED" == "yes" ]; then APPLY_SSH_HARDENING="y"; else APPLY_SSH_HARDENING="n"; fi
+    if [ "$UFW_ENABLED" == "yes" ]; then CONFIGURE_UFW="y"; else CONFIGURE_UFW="n"; fi
+    if [ "$QEMU_AGENT_INSTALLED" == "yes" ]; then INSTALL_QEMU_AGENT="y"; else INSTALL_QEMU_AGENT="n"; fi
+    if [ "$UBUNTU_PRO_ATTACHED" == "yes" ] || [ "$UBUNTU_PRO_ATTACHED" == "already-attached" ]; then ATTACH_UBUNTU_PRO="y"; else ATTACH_UBUNTU_PRO="n"; fi
+    if [ "$SYSTEM_UPDATED" == "yes" ]; then RUN_SYSTEM_UPDATE="y"; else RUN_SYSTEM_UPDATE="n"; fi
+    if [ "$SYSTEM_CLEANED" == "yes" ]; then RUN_SYSTEM_CLEANUP="y"; else RUN_SYSTEM_CLEANUP="n"; fi
+
+    ROOT_FS_BEFORE_GB="$(get_root_filesystem_size_gb)"
+    ROOT_FS_AFTER_GB="$ROOT_FS_BEFORE_GB"
+    POST_REBOOT_VERIFY_MARKER="/home/${USERNAME}/.ubuntu-vm-setup-verify-displayed"
+
+    return 0
+}
+
+function write_verify_display_log() {
+    local display_tmp=""
+    local result_lines=""
+    local user_lines=""
+    local system_lines=""
+    local other_lines=""
+
+    display_tmp="$(mktemp)"
+    TEMP_FILES+=("$display_tmp")
+
+    if root_file_exists "$VERIFY_LOG"; then
+        result_lines="$(root_cat_file "$VERIFY_LOG" 2>/dev/null | awk '/^Results:/{flag=1; next} flag {print}' || true)"
+    fi
+
+    user_lines="$(printf '%s
+' "$result_lines" | grep -E 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled' || true)"
+    system_lines="$(printf '%s
+' "$result_lines" | grep -E 'IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists' || true)"
+    other_lines="$(printf '%s
+' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists' || true)"
+
+    {
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "SCRIPT 4 POST-REBOOT VERIFICATION"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "User / SSH:"
+        if [ -n "$user_lines" ]; then printf '%s
+' "$user_lines" | sed 's/^/  /'; else echo "  - INFO - No User / SSH verification lines recorded"; fi
+        echo ""
+        echo "System:"
+        if [ -n "$system_lines" ]; then printf '%s
+' "$system_lines" | sed 's/^/  /'; else echo "  - INFO - No System verification lines recorded"; fi
+        if [ -n "$other_lines" ]; then printf '%s
+' "$other_lines" | sed 's/^/  /'; fi
+        echo ""
+        echo "Storage:"
+        echo "  Root filesystem: ${ROOT_FS_AFTER_GB}"
+        echo "  Root expansion: ${ROOT_EXPANDED}"
+        echo ""
+        echo "Verification:"
+        echo "  Status: ${VERIFY_STATUS}"
+        echo "  Passed checks: ${VERIFY_PASS_COUNT}"
+        echo "  Warnings: ${VERIFY_WARN_COUNT}"
+        echo "  Failed checks: ${VERIFY_FAIL_COUNT}"
+        echo "  Verify log: ${VERIFY_LOG}"
+        echo ""
+        echo "Next Step:"
+        echo "  Run Script 5."
+    } > "$display_tmp"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp "$display_tmp" "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+    else
+        cp "$display_tmp" "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+        chmod 0644 "$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+    fi
+
+    rm -f "$display_tmp"
+}
+
+function install_post_reboot_verify_hook() {
+    local helper_tmp=""
+    local hook_tmp=""
+    local display_marker="/home/${USERNAME}/.ubuntu-vm-setup-verify-displayed"
+
+    POST_REBOOT_VERIFY_MARKER="$display_marker"
+
+    helper_tmp="$(mktemp)"
+    hook_tmp="$(mktemp)"
+    TEMP_FILES+=("$helper_tmp" "$hook_tmp")
+
+    cat > "$helper_tmp" <<EOF_HELPER
+#!/usr/bin/env bash
+set +e
+COMPLETED_MARKER="$COMPLETED_MARKER"
+VERIFY_DISPLAY_LOG="$VERIFY_DISPLAY_LOG"
+DISPLAY_MARKER="$display_marker"
+TARGET_USER="$USERNAME"
+
+if [ -f "\$COMPLETED_MARKER" ]; then
+    :
+elif command -v sudo >/dev/null 2>&1 && sudo -n test -f "\$COMPLETED_MARKER" >/dev/null 2>&1; then
+    :
+else
+    [ -f "\$VERIFY_DISPLAY_LOG" ] || exit 0
+fi
+
+[ -f "\$VERIFY_DISPLAY_LOG" ] || exit 0
+[ -n "\${SSH_CONNECTION:-}" ] || exit 0
+[ "\${USER:-}" = "\$TARGET_USER" ] || exit 0
+[ -f "\$DISPLAY_MARKER" ] && exit 0
+
+cat "\$VERIFY_DISPLAY_LOG" 2>/dev/null || true
+mkdir -p "\$(dirname "\$DISPLAY_MARKER")" 2>/dev/null || true
+touch "\$DISPLAY_MARKER" 2>/dev/null || true
+exit 0
+EOF_HELPER
+
+    cat > "$hook_tmp" <<'EOF_HOOK'
+case "$-" in
+  *i*) ;;
+  *) return 0 2>/dev/null || exit 0 ;;
+esac
+
+[ -n "${SSH_CONNECTION:-}" ] || return 0 2>/dev/null || exit 0
+
+/usr/local/sbin/circl8-script4-post-reboot-verify 2>/dev/null || true
+return 0 2>/dev/null || exit 0
+EOF_HOOK
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp "$helper_tmp" "$POST_REBOOT_VERIFY_HELPER" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0755 "$POST_REBOOT_VERIFY_HELPER" 2>/dev/null || true
+        "$SUDO_CMD" cp "$hook_tmp" "$POST_REBOOT_VERIFY_HOOK" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$POST_REBOOT_VERIFY_HOOK" 2>/dev/null || true
+    else
+        cp "$helper_tmp" "$POST_REBOOT_VERIFY_HELPER" 2>/dev/null || true
+        chmod 0755 "$POST_REBOOT_VERIFY_HELPER" 2>/dev/null || true
+        cp "$hook_tmp" "$POST_REBOOT_VERIFY_HOOK" 2>/dev/null || true
+        chmod 0644 "$POST_REBOOT_VERIFY_HOOK" 2>/dev/null || true
+    fi
+
+    rm -f "$helper_tmp" "$hook_tmp"
+}
+
+function update_completion_marker_script4_fields() {
+    local marker_tmp=""
+    local existing_marker=""
+    local display_marker="/home/${USERNAME}/.ubuntu-vm-setup-verify-displayed"
+
+    POST_REBOOT_VERIFY_MARKER="$display_marker"
+    marker_tmp="$(mktemp)"
+    TEMP_FILES+=("$marker_tmp")
+
+    if root_file_exists "$COMPLETED_MARKER"; then
+        existing_marker="$(root_cat_file "$COMPLETED_MARKER" 2>/dev/null | grep -Ev '^SCRIPT4_' || true)"
+    fi
+
+    {
+        [ -n "$existing_marker" ] && printf '%s
+' "$existing_marker"
+        echo "SCRIPT4_STATUS=completed"
+        echo "SCRIPT4_VERSION=$SCRIPT_VERSION"
+        echo "SCRIPT4_BUILD=$SCRIPT_BUILD"
+        echo "SCRIPT4_VERIFY_STATUS=$VERIFY_STATUS"
+        echo "SCRIPT4_VERIFY_LOG=$VERIFY_LOG"
+        echo "SCRIPT4_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG"
+        echo "SCRIPT4_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK"
+        echo "SCRIPT4_POST_REBOOT_DISPLAY_MARKER=$display_marker"
+        echo "SCRIPT4_USERNAME=$USERNAME"
+        echo "SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED"
+        echo "SCRIPT4_UFW_ENABLED=$UFW_ENABLED"
+        echo "SCRIPT4_QEMU_AGENT=$QEMU_AGENT_INSTALLED"
+        echo "SCRIPT4_SSH_HARDENED=$SSH_HARDENING_APPLIED"
+    } > "$marker_tmp"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp "$marker_tmp" "$COMPLETED_MARKER" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$COMPLETED_MARKER" 2>/dev/null || true
+    else
+        cp "$marker_tmp" "$COMPLETED_MARKER" 2>/dev/null || true
+        chmod 0644 "$COMPLETED_MARKER" 2>/dev/null || true
+    fi
+
+    rm -f "$marker_tmp"
+}
+
+function show_verify_only_summary() {
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+
+    echo -e "${YW}Verification:${CL}"
+    case "$VERIFY_STATUS" in
+        PASS) echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}" ;;
+        PASS_WITH_WARNINGS) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}" ;;
+        FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
+        *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
+    esac
+    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+    echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+    echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+    echo -e "  ${BL}Display log:${CL} ${GN}${VERIFY_DISPLAY_LOG}${CL}"
+
+    if [ -n "$VERIFY_FIRST_ISSUE_TYPE" ]; then
+        echo ""
+        echo -e "${YW}${VERIFY_FIRST_ISSUE_TYPE} 1:${CL}"
+        echo -e "  ${BL}Check:${CL} ${GN}${VERIFY_FIRST_ISSUE_CHECK}${CL}"
+        echo -e "  ${BL}Reason:${CL} ${YW}${VERIFY_FIRST_ISSUE_REASON}${CL}"
+        echo -e "  ${BL}Fix:${CL} ${GN}${VERIFY_FIRST_ISSUE_FIX}${CL}"
+    fi
+
+    echo ""
+    echo -e "${BL}Next Step:${CL}"
+    echo -e "  ${YW}Run ${ANS}Script 5${YW}.${CL}"
+    echo ""
+}
+
+function run_verify_only_mode() {
+    VERIFY_ONLY_MODE="yes"
+
+    load_state_from_completion_marker
+    create_verification_report
+    write_verify_display_log
+    update_completion_marker_script4_fields
+    show_verify_only_summary
+
+    exit 0
+}
+
 # --- 45. FINAL SUMMARY ---
 function show_final_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
@@ -2002,6 +2354,9 @@ function main() {
     # Phase 3: verify, summarize and reboot.
     write_completion_marker
     create_verification_report
+    write_verify_display_log
+    install_post_reboot_verify_hook
+    update_completion_marker_script4_fields
     show_final_summary
     reboot_prompt
 
