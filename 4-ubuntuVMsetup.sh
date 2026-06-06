@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.7"
+SCRIPT_VERSION="v2.1.8"
 SCRIPT_UPDATED="2026-06-06"
-SCRIPT_BUILD="post-reboot-verify-mode"
+SCRIPT_BUILD="post-reboot-display-colors"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -2025,6 +2025,7 @@ function write_verify_display_log() {
     local user_lines=""
     local system_lines=""
     local other_lines=""
+    local status_color="$YW"
 
     display_tmp="$(mktemp)"
     TEMP_FILES+=("$display_tmp")
@@ -2040,34 +2041,57 @@ function write_verify_display_log() {
     other_lines="$(printf '%s
 ' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists' || true)"
 
+    case "$VERIFY_STATUS" in
+        PASS) status_color="$GN" ;;
+        PASS_WITH_WARNINGS) status_color="$YW" ;;
+        FAIL) status_color="$RD" ;;
+        *) status_color="$YW" ;;
+    esac
+
+    display_colorize_lines() {
+        local lines="$1"
+        local fallback="$2"
+
+        if [ -n "$lines" ]; then
+            while IFS= read -r line; do
+                case "$line" in
+                    "✓ PASS - "*) echo -e "  ${GN}${line}${CL}" ;;
+                    "! WARN - "*) echo -e "  ${YW}${line}${CL}" ;;
+                    "✗ FAIL - "*) echo -e "  ${RD}${line}${CL}" ;;
+                    "- INFO - "*) echo -e "  ${BL}${line}${CL}" ;;
+                    *) echo -e "  ${DGN}${line}${CL}" ;;
+                esac
+            done <<< "$lines"
+        else
+            echo -e "  ${BL}- INFO - ${fallback}${CL}"
+        fi
+    }
+
     {
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "SCRIPT 4 POST-REBOOT VERIFICATION"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+        echo -e "${BL}SCRIPT 4 POST-REBOOT VERIFICATION${CL}"
+        echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
         echo ""
-        echo "User / SSH:"
-        if [ -n "$user_lines" ]; then printf '%s
-' "$user_lines" | sed 's/^/  /'; else echo "  - INFO - No User / SSH verification lines recorded"; fi
+        echo -e "${YW}User / SSH:${CL}"
+        display_colorize_lines "$user_lines" "No User / SSH verification lines recorded"
         echo ""
-        echo "System:"
-        if [ -n "$system_lines" ]; then printf '%s
-' "$system_lines" | sed 's/^/  /'; else echo "  - INFO - No System verification lines recorded"; fi
-        if [ -n "$other_lines" ]; then printf '%s
-' "$other_lines" | sed 's/^/  /'; fi
+        echo -e "${YW}System:${CL}"
+        display_colorize_lines "$system_lines" "No System verification lines recorded"
+        if [ -n "$other_lines" ]; then display_colorize_lines "$other_lines" ""; fi
         echo ""
-        echo "Storage:"
-        echo "  Root filesystem: ${ROOT_FS_AFTER_GB}"
-        echo "  Root expansion: ${ROOT_EXPANDED}"
+        echo -e "${YW}Storage:${CL}"
+        echo -e "  ${BL}Root filesystem:${CL} ${GN}${ROOT_FS_AFTER_GB}${CL}"
+        echo -e "  ${BL}Root expansion:${CL} ${GN}${ROOT_EXPANDED}${CL}"
         echo ""
-        echo "Verification:"
-        echo "  Status: ${VERIFY_STATUS}"
-        echo "  Passed checks: ${VERIFY_PASS_COUNT}"
-        echo "  Warnings: ${VERIFY_WARN_COUNT}"
-        echo "  Failed checks: ${VERIFY_FAIL_COUNT}"
-        echo "  Verify log: ${VERIFY_LOG}"
+        echo -e "${YW}Verification:${CL}"
+        echo -e "  ${BL}Status:${CL} ${status_color}${VERIFY_STATUS}${CL}"
+        echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
+        echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
+        echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
+        echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
         echo ""
-        echo "Next Step:"
-        echo "  Run Script 5."
+        echo -e "${YW}Next Step:${CL}"
+        echo -e "  ${YW}Run ${ANS}Script 5${YW}.${CL}"
     } > "$display_tmp"
 
     if [ -n "$SUDO_CMD" ]; then
