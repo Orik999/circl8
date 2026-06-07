@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.19"
+SCRIPT_VERSION="v1.2.21"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="vm-side-proxmox-marker-handoff"
+SCRIPT_BUILD="standard-ui-flow-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -99,6 +99,7 @@ INSTALL_DURATION_TEXT=""
 INSTALLED_VM_STARTED_STATUS=""
 QEMU_IPV4_STATUS=""
 HOST_VERIFICATION_STATUS=""
+VM_SIDE_MARKER_UPDATE_STATUS="not-run"
 
 CLEANUP_INSTALLED_TOOLS="yes"
 CLEANUP_TEMP_WORKFILES="yes"
@@ -170,11 +171,32 @@ section_flash_success() {
     echo -e "${BORDER}"
 }
 
+ui_line() {
+    local label="$1"
+    local value="${2:-}"
+    local color="${3:-$GN}"
+    local width="${4:-18}"
+
+    if [ -n "$value" ]; then
+        printf "  ${BL}%-${width}s${CL} ${color}%s${CL}\n" "${label}:" "$value"
+    else
+        printf "  ${GN}%s${CL}\n" "$label"
+    fi
+}
+
+status_line() {
+    ui_line "$1" "${2:-}" "${3:-$GN}" "${4:-18}"
+}
+
+answer_line() {
+    ui_line "$1" "${2:-}" "$ANS" "${3:-18}"
+}
+
 detail_line() {
     if [ "$#" -ge 2 ]; then
-        echo -e "  ${DGN}━━━━━▶${CL} $1: ${GN}$2${CL}"
+        status_line "$1" "$2"
     else
-        echo -e "  ${DGN}━━━━━▶${CL} $1"
+        status_line "$1"
     fi
 }
 
@@ -815,6 +837,68 @@ build_vm_side_marker_base64() {
     base64 -w0 "$marker_file"
 }
 
+wait_for_vm_ssh_ready() {
+    local deadline=""
+    local now=""
+
+    [ -n "${ASSIGNED_IPV4:-}" ] || return 1
+    [ -n "${TARGET_USERNAME:-}" ] || return 1
+
+    deadline=$(( $(date +%s) + SSH_IP_DETECT_TIMEOUT_SECONDS ))
+
+    while true; do
+        if ssh \
+            -o BatchMode=yes \
+            -o ConnectTimeout=5 \
+            -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile=/root/.ssh/known_hosts \
+            "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
+            "true" >/dev/null 2>&1; then
+            return 0
+        fi
+
+        now=$(date +%s)
+        [ "$now" -ge "$deadline" ] && return 1
+        sleep "$SSH_IP_CHECK_INTERVAL_SECONDS"
+    done
+}
+
+update_vm_side_marker_assigned_ipv4() {
+    local marker_file=""
+    local marker_b64=""
+
+    if [ -z "${ASSIGNED_IPV4:-}" ]; then
+        VM_SIDE_MARKER_UPDATE_STATUS="skipped-no-ip"
+        return 0
+    fi
+
+    msg_info "Updating VM-side marker assigned IPv4"
+
+    if ! wait_for_vm_ssh_ready; then
+        VM_SIDE_MARKER_UPDATE_STATUS="ssh-not-ready"
+        msg_warn "VM-side marker IPv4 update skipped; SSH not ready."
+        return 0
+    fi
+
+    marker_file="$(mktemp)"
+    TEMP_FILES+=("$marker_file")
+    marker_b64="$(build_vm_side_marker_base64 "$marker_file")"
+
+    if printf '%s' "$marker_b64" | ssh \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile=/root/.ssh/known_hosts \
+        "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
+        "sudo -n sh -c 'base64 -d > ${VM_SIDE_MARKER_PATH} && chmod 0600 ${VM_SIDE_MARKER_PATH}'" >/dev/null 2>&1; then
+        VM_SIDE_MARKER_UPDATE_STATUS="yes"
+        msg_ok "VM-side marker assigned IPv4 updated."
+    else
+        VM_SIDE_MARKER_UPDATE_STATUS="failed"
+        msg_warn "VM-side marker IPv4 update failed; update manually if needed."
+    fi
+}
+
 # --- 23. SAFE HOSTNAME HELPER ---
 safe_hostname() {
     local value="$1"
@@ -948,10 +1032,10 @@ discover_proxmox_identity() {
 
 show_proxmox_identity_summary() {
     echo -e "${YW}Proxmox identity:${CL}"
-    echo -e "  ${BL}Hostname:${CL} ${GN}$(proxmox_identity_value_or_not_detected "$PROXMOX_HOSTNAME")${CL}"
-    echo -e "  ${BL}FQDN:${CL} ${GN}$(proxmox_identity_value_or_not_detected "$PROXMOX_FQDN")${CL}"
-    echo -e "  ${BL}Domain:${CL} ${GN}$(proxmox_identity_value_or_not_detected "$PROXMOX_DOMAIN")${CL}"
-    echo -e "  ${BL}LAN URL:${CL} ${GN}$(proxmox_identity_value_or_not_detected "$PROXMOX_LAN_URL")${CL}"
+    status_line "Hostname" "$(proxmox_identity_value_or_not_detected "$PROXMOX_HOSTNAME")" "$GN" 18
+    status_line "FQDN" "$(proxmox_identity_value_or_not_detected "$PROXMOX_FQDN")" "$GN" 18
+    status_line "Domain" "$(proxmox_identity_value_or_not_detected "$PROXMOX_DOMAIN")" "$GN" 18
+    status_line "LAN URL" "$(proxmox_identity_value_or_not_detected "$PROXMOX_LAN_URL")" "$GN" 18
 }
 
 # --- 23A. YES/NO DISPLAY HELPER ---
@@ -1012,7 +1096,7 @@ marker_yn_value_or_unknown() {
 previous_marker_line() {
     local label="$1"
     local value="${2:-unknown}"
-    echo -e "  ${BL}${label}:${CL} ${GN}${value:-unknown}${CL}"
+    status_line "$label" "${value:-unknown}" "$GN" 22
 }
 
 show_previous_marker_summary() {
@@ -1049,7 +1133,7 @@ show_previous_marker_summary() {
     previous_marker_line "completed on" "$completed"
     echo ""
 
-    echo -e "${YW}VM SUMMARY:${CL}"
+    echo -e "${YW}VM:${CL}"
     previous_marker_line "VM ID" "$vmid"
     previous_marker_line "VM NAME" "$vm_name"
     previous_marker_line "VM MAC" "$vm_mac"
@@ -1057,12 +1141,12 @@ show_previous_marker_summary() {
     previous_marker_line "SSH command" "$ssh_command"
     echo ""
 
-    echo -e "${YW}INSTALL SUMMARY:${CL}"
+    echo -e "${YW}Install:${CL}"
     previous_marker_line "Installed VM started" "$installed_started"
     previous_marker_line "Generated ISO deleted" "$generated_deleted"
     echo ""
 
-    echo -e "${YW}CLEANUP:${CL}"
+    echo -e "${YW}Cleanup:${CL}"
     previous_marker_line "ISO tools cleanup enabled" "$tools_cleanup_enabled"
     previous_marker_line "ISO tools cleanup done" "$tools_cleanup_done"
     previous_marker_line "Temporary workspace cleanup" "$temp_cleanup"
@@ -1454,6 +1538,7 @@ validate_dependencies() {
         sed
         sleep
         sort
+        ssh
         tee
         tr
         xargs
@@ -1723,7 +1808,7 @@ check_previous_marker() {
     local continue_yn=""
 
     if [ -f "$COMPLETED_MARKER" ]; then
-        section "PREVIOUS UBUNTU AUTOINSTALL DETECTED"
+        section "PREVIOUS AUTOINSTALL CHECK"
 
         show_previous_marker_summary "$COMPLETED_MARKER"
         echo ""
@@ -1824,9 +1909,9 @@ select_vm() {
     fi
 
     echo ""
-    echo -e "${YW}VM SUMMARY:${CL}"
-    echo -e "  ${BL}VM:${CL} ${ANS}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
-    echo -e "  ${BL}status:${CL} ${GN}${TARGET_VM_STATUS}${CL}"
+    echo -e "${YW}VM:${CL}"
+    answer_line "VM" "${TARGET_VM_NAME} (${TARGET_VMID})" 16
+    status_line "Status" "$TARGET_VM_STATUS" "$GN" 16
 }
 
 # --- 39A. VM SHUTDOWN DECISION PREFLIGHT ---
@@ -1903,9 +1988,9 @@ detect_vm_mac() {
 
     msg_ok "VM MAC DETECTED"
     echo ""
-    echo -e "${YW}NETWORK / DHCP:${CL}"
-    echo -e "  ${BL}VM MAC ADDRESS:${CL} ${GN}${TARGET_VM_MAC}${CL}"
-    echo -e "  ${YW}Reminder: reserve this MAC in your router if you want a fixed VM IP.${CL}"
+    echo -e "${YW}Network / DHCP:${CL}"
+    status_line "VM MAC" "$TARGET_VM_MAC" "$GN" 18
+    status_line "Router reminder" "yes" "$YW" 18
 }
 
 # --- 41. USER / LOCALE INPUTS ---
@@ -2343,59 +2428,61 @@ generate_autoinstall_iso() {
 show_apply_summary() {
     section "READY TO APPLY"
 
-    echo -e "${YW}VM SUMMARY:${CL}"
-    echo -e "  ${BL}VM:${CL} ${ANS}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
-    echo -e "  ${BL}MAC:${CL} ${GN}${TARGET_VM_MAC}${CL}"
-    echo -e "  ${BL}status before apply:${CL} ${GN}${VM_STATUS_AT_PREFLIGHT}${CL}"
-    echo -e "  ${BL}shutdown before apply:${CL} ${ANS}$(vm_shutdown_display)${CL}"
+    echo -e "${YW}VM:${CL}"
+    answer_line "VM" "${TARGET_VM_NAME} (${TARGET_VMID})" 22
+    status_line "MAC" "$TARGET_VM_MAC" "$GN" 22
+    status_line "Action" "wipe/install selected VM" "$YW" 22
+    status_line "Status before apply" "$VM_STATUS_AT_PREFLIGHT" "$GN" 22
+    answer_line "Shutdown before apply" "$(vm_shutdown_display)" 22
     echo ""
 
     show_proxmox_identity_summary
     echo ""
 
-    echo -e "${YW}VM-side marker:${CL}"
-    echo -e "  ${BL}path:${CL} ${GN}${VM_SIDE_MARKER_PATH}${CL}"
-    echo ""
-
-    echo -e "${YW}UBUNTU IDENTITY:${CL}"
-    echo -e "  ${BL}hostname:${CL} ${ANS}${TARGET_HOSTNAME}${CL}"
-    echo -e "  ${BL}user:${CL} ${ANS}${TARGET_USERNAME}${CL}"
-    echo -e "  ${BL}timezone:${CL} ${ANS}${TARGET_TIMEZONE}${CL}"
-    echo -e "  ${BL}locale:${CL} ${ANS}${TARGET_LOCALE}${CL}"
-    echo -e "  ${BL}keyboard:${CL} ${ANS}${TARGET_KEYBOARD_LAYOUT}${CL}"
+    echo -e "${YW}Ubuntu identity:${CL}"
+    answer_line "Hostname" "$TARGET_HOSTNAME" 22
+    answer_line "User" "$TARGET_USERNAME" 22
+    answer_line "Timezone" "$TARGET_TIMEZONE" 22
+    answer_line "Locale" "$TARGET_LOCALE" 22
+    answer_line "Keyboard" "$TARGET_KEYBOARD_LAYOUT" 22
     if [ -n "$TARGET_KEYBOARD_VARIANT" ]; then
-        echo -e "  ${BL}keyboard variant:${CL} ${ANS}${TARGET_KEYBOARD_VARIANT}${CL}"
+        answer_line "Keyboard variant" "$TARGET_KEYBOARD_VARIANT" 22
     fi
     echo ""
 
-    echo -e "${YW}NETWORK:${CL}"
-    echo -e "  ${BL}mode:${CL} ${ANS}${NETWORK_MODE}${CL}"
+    echo -e "${YW}Network:${CL}"
+    answer_line "Mode" "$NETWORK_MODE" 22
+    status_line "Router reminder" "yes" "$YW" 22
     if [ "$NETWORK_MODE" == "static" ]; then
-        echo -e "  ${BL}static IP/CIDR:${CL} ${ANS}${STATIC_IP_CIDR}${CL}"
-        echo -e "  ${BL}gateway:${CL} ${ANS}${STATIC_GATEWAY}${CL}"
-        echo -e "  ${BL}DNS:${CL} ${ANS}${STATIC_DNS}${CL}"
+        answer_line "Static IP/CIDR" "$STATIC_IP_CIDR" 22
+        answer_line "Gateway" "$STATIC_GATEWAY" 22
+        answer_line "DNS" "$STATIC_DNS" 22
     fi
     echo ""
 
     echo -e "${YW}ISO:${CL}"
-    echo -e "  ${BL}source:${CL} ${ANS}${INSTALL_ISO_REF}${CL}"
-    echo -e "  ${BL}generated:${CL} ${ANS}${AUTOINSTALL_ISO_REF}${CL}"
-    echo -e "  ${BL}generated ISO action:${CL} ${ANS}${GENERATED_ISO_ACTION}${CL}"
-    echo -e "  ${BL}missing ISO tools:${CL} ${GN}$(missing_iso_tools_display)${CL}"
-    echo -e "  ${BL}install missing ISO tools:${CL} ${ANS}$(install_missing_tools_display)${CL}"
+    answer_line "Source" "$INSTALL_ISO_REF" 22
+    answer_line "Generated" "$AUTOINSTALL_ISO_REF" 22
+    answer_line "Generated ISO action" "$GENERATED_ISO_ACTION" 22
+    status_line "Missing tools" "$(missing_iso_tools_display)" "$GN" 22
+    answer_line "Install missing tools" "$(install_missing_tools_display)" 22
     echo ""
 
-    echo -e "${YW}INSTALL:${CL}"
-    echo -e "  ${BL}timeout:${CL} ${ANS}${INSTALL_WAIT_MINUTES} minutes${CL}"
-    echo -e "  ${BL}start VM after cleanup:${CL} ${ANS}$(yn_word "$POST_INSTALL_START_VM")${CL}"
-    echo -e "  ${BL}IP detection timeout:${CL} ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
-    echo -e "  ${BL}start unattended Ubuntu install:${CL} ${ANS}$(attach_start_display)${CL}"
+    echo -e "${YW}Install:${CL}"
+    answer_line "Timeout" "${INSTALL_WAIT_MINUTES} minutes" 22
+    answer_line "Start VM after cleanup" "$(yn_word "$POST_INSTALL_START_VM")" 22
+    status_line "IP detection" "${SSH_IP_DETECT_TIMEOUT_SECONDS}s" "$GN" 22
+    answer_line "Start unattended" "$(attach_start_display)" 22
     echo ""
 
-    echo -e "${YW}CLEANUP:${CL}"
-    echo -e "  ${BL}delete generated ISO after install:${CL} ${ANS}$(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")${CL}"
-    echo -e "  ${BL}remove temporary workspace:${CL} ${ANS}$(yn_word "$CLEANUP_TEMP_WORKFILES")${CL}"
-    echo -e "  ${BL}remove ISO generation tools after finish:${CL} ${ANS}$(yn_word "$CLEANUP_INSTALLED_TOOLS")${CL}"
+    echo -e "${YW}Cleanup:${CL}"
+    answer_line "Delete generated ISO" "$(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")" 22
+    answer_line "Remove tools" "$(yn_word "$CLEANUP_INSTALLED_TOOLS")" 22
+    answer_line "Workspace" "$(yn_word "$CLEANUP_TEMP_WORKFILES")" 22
+    echo ""
+
+    echo -e "${YW}VM marker:${CL}"
+    status_line "Path" "$VM_SIDE_MARKER_PATH" "$GN" 22
 }
 # --- 58. ATTACH AND START INSTALL ---
 attach_iso_and_start_install() {
@@ -2510,6 +2597,7 @@ Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
 Verify Log: $VERIFY_LOG
 VM Side Marker: $VM_SIDE_MARKER_PATH
+VM Side Marker Updated: $VM_SIDE_MARKER_UPDATE_STATUS
 SCRIPT35_STATUS=completed
 SCRIPT35_VERSION="$SCRIPT_VERSION"
 SCRIPT35_BUILD="$SCRIPT_BUILD"
@@ -2550,6 +2638,8 @@ Post Install Start VM: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
 VM Side Marker: $VM_SIDE_MARKER_PATH
+VM Side Marker Updated: $VM_SIDE_MARKER_UPDATE_STATUS
+VM Marker Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 Proxmox Hostname: ${PROXMOX_HOSTNAME:-not-detected}
 Proxmox FQDN: ${PROXMOX_FQDN:-not-detected}
 Proxmox Domain: ${PROXMOX_DOMAIN:-not-detected}
@@ -2585,6 +2675,7 @@ EOF
         fi
 
         if [ -f "$COMPLETED_MARKER" ]; then PASS "Completion marker exists"; else WARN "Completion marker missing at verification time"; fi
+        if [ "$VM_SIDE_MARKER_UPDATE_STATUS" == "yes" ]; then PASS "VM-side marker assigned IPv4 updated: ${ASSIGNED_IPV4}"; else WARN "VM-side marker assigned IPv4 update status: ${VM_SIDE_MARKER_UPDATE_STATUS}"; fi
     } >> "$VERIFY_LOG"
 
     HOST_VERIFICATION_STATUS="Host verification report created."
@@ -2595,9 +2686,9 @@ EOF
 show_generated_iso_only_summary() {
     section "GENERATED ISO READY"
 
-    detail_line "VM: ${TARGET_VMID} / ${TARGET_VM_NAME}"
-    detail_line "Generated ISO: ${AUTOINSTALL_ISO_REF}"
-    detail_line "Host path: ${AUTOINSTALL_ISO_PATH}"
+    status_line "VM" "${TARGET_VMID} / ${TARGET_VM_NAME}" "$GN" 16
+    status_line "Generated ISO" "${AUTOINSTALL_ISO_REF}" "$GN" 16
+    status_line "Host path" "${AUTOINSTALL_ISO_PATH}" "$GN" 16
     echo ""
     echo -e "${YW}The ISO was generated and verified but was not attached or started.${CL}"
     echo -e "${YW}Run this script again when you are ready to attach it and start autoinstall.${CL}"
@@ -2606,45 +2697,58 @@ show_generated_iso_only_summary() {
 
 # --- 64. FINAL OUTPUT ---
 show_final_output() {
-    local autoinstall_completed="no"
-    local ipv4_detected="no"
+    local autoinstall_status="not-completed"
+    local installed_vm_status="not-started"
+    local qemu_agent_ip="not detected"
+    local generated_iso_status="kept"
+    local workspace_status="kept"
+    local tools_status="kept"
+    local marker_status="${VM_SIDE_MARKER_UPDATE_STATUS:-not-run}"
 
-    [ "$INSTALL_POWERED_OFF" == "yes" ] && autoinstall_completed="yes"
-    [ -n "$ASSIGNED_IPV4" ] && ipv4_detected="yes"
+    [ "$INSTALL_POWERED_OFF" == "yes" ] && autoinstall_status="completed"
+    [ "$POST_INSTALL_START_VM" == "y" ] && installed_vm_status="started"
+    [ -n "$ASSIGNED_IPV4" ] && qemu_agent_ip="$ASSIGNED_IPV4"
+    [ "$DELETE_GENERATED_ISO_AFTER_INSTALL" == "y" ] && generated_iso_status="deleted"
+    [ "$TEMP_WORKSPACE_CLEANUP_DONE" == "yes" ] && workspace_status="cleaned"
+    [ "$ISO_TOOL_CLEANUP_DONE" == "yes" ] && tools_status="yes"
 
-    section_flash_success "  ━━━━━━━━━━━━━━━━    INSTALL COMPLETE    ━━━━━━━━━━━━━━━━"
+    section_flash_success "FINISHED"
 
-    echo -e "${YW}VM SUMMARY:${CL}"
-    echo -e "  ${BL}VM:${CL} ${ANS}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
-    echo -e "  ${BL}IP:${CL} ${GN}${ASSIGNED_IPV4:-not-detected}${CL}"
-    echo -e "  ${BL}MAC:${CL} ${GN}${TARGET_VM_MAC}${CL}"
-    echo -e "  ${BL}VM marker:${CL} ${GN}${VM_SIDE_MARKER_PATH}${CL}"
-
+    echo -e "${YW}VM:${CL}"
+    answer_line "VM" "${TARGET_VM_NAME} (${TARGET_VMID})" 18
+    status_line "Hostname" "$TARGET_HOSTNAME" "$GN" 18
+    status_line "MAC" "$TARGET_VM_MAC" "$GN" 18
+    status_line "IP" "${ASSIGNED_IPV4:-not-detected}" "$GN" 18
     if [ -n "$SSH_COMMAND" ]; then
-        echo -e "  ${BL}SSH:${CL} ${GN}${SSH_COMMAND}${CL}"
+        status_line "SSH" "$SSH_COMMAND" "$GN" 18
     else
-        echo -e "  ${BL}SSH:${CL} ${GN}ssh ${TARGET_USERNAME}@<assigned-ip>${CL}"
+        status_line "SSH" "ssh ${TARGET_USERNAME}@<assigned-ip>" "$GN" 18
     fi
     echo ""
 
-    show_proxmox_identity_summary
+    echo -e "${YW}Proxmox:${CL}"
+    status_line "Hostname" "$(proxmox_identity_value_or_not_detected "$PROXMOX_HOSTNAME")" "$GN" 18
+    status_line "FQDN" "$(proxmox_identity_value_or_not_detected "$PROXMOX_FQDN")" "$GN" 18
+    status_line "Domain" "$(proxmox_identity_value_or_not_detected "$PROXMOX_DOMAIN")" "$GN" 18
+    status_line "LAN URL" "$(proxmox_identity_value_or_not_detected "$PROXMOX_LAN_URL")" "$GN" 18
     echo ""
 
-    echo -e "${YW}INSTALL SUMMARY:${CL}"
-    echo -e "  ${BL}Ubuntu autoinstall completed:${CL} ${GN}${autoinstall_completed}${CL}"
-    echo -e "  ${BL}VM powered off after install:${CL} ${GN}$(yn_word "$INSTALL_POWERED_OFF")${CL}"
-    echo -e "  ${BL}Installed VM started:${CL} ${GN}$(yn_word "$POST_INSTALL_START_VM")${CL}"
-    echo -e "  ${BL}QEMU Guest Agent IPv4 detected:${CL} ${GN}${ipv4_detected}${CL}"
+    echo -e "${YW}Install:${CL}"
+    status_line "Autoinstall" "$autoinstall_status" "$GN" 18
+    status_line "VM powered off" "$(yn_word "$INSTALL_POWERED_OFF")" "$GN" 18
+    status_line "Installed VM" "$installed_vm_status" "$GN" 18
+    status_line "QEMU agent IP" "$qemu_agent_ip" "$GN" 18
     if [ -n "${INSTALL_DURATION_TEXT:-}" ]; then
-        echo -e "  ${BL}install duration:${CL} ${GN}${INSTALL_DURATION_TEXT}${CL}"
+        status_line "Duration" "$INSTALL_DURATION_TEXT" "$GN" 18
     fi
     echo ""
 
-    echo -e "${YW}CLEANUP:${CL}"
-    echo -e "  ${BL}Installer media detached:${CL} ${GN}yes${CL}"
-    echo -e "  ${BL}Generated autoinstall ISO deleted:${CL} ${GN}$(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")${CL}"
-    echo -e "  ${BL}Temporary workspace removed:${CL} ${GN}$(yn_word "$TEMP_WORKSPACE_CLEANUP_DONE")${CL}"
-    echo -e "  ${BL}ISO generation tools removed:${CL} ${GN}$(yn_word "$ISO_TOOL_CLEANUP_DONE")${CL}"
+    echo -e "${YW}Files / cleanup:${CL}"
+    status_line "Generated ISO" "$generated_iso_status" "$GN" 18
+    status_line "Tools cleanup" "$tools_status" "$GN" 18
+    status_line "Workspace" "$workspace_status" "$GN" 18
+    status_line "VM marker" "${marker_status} / ${VM_SIDE_MARKER_PATH}" "$GN" 18
+    status_line "Verify log" "$VERIFY_LOG" "$GN" 18
     echo ""
 
     if [ -n "${HOST_VERIFICATION_STATUS:-}" ]; then
@@ -2652,14 +2756,14 @@ show_final_output() {
         echo ""
     fi
 
-    echo -e "${YW}NEXT STEP:${CL}"
+    echo -e "${YW}Next Step:${CL}"
     if [ -n "$SSH_COMMAND" ]; then
-        echo -e "  ${BL}SSH into Ubuntu:${CL} ${GN}${SSH_COMMAND}${CL}"
+        status_line "SSH into Ubuntu" "$SSH_COMMAND" "$GN" 22
     else
-        echo -e "  ${BL}SSH into Ubuntu:${CL} ${GN}ssh ${TARGET_USERNAME}@<assigned-ip>${CL}"
+        status_line "SSH into Ubuntu" "ssh ${TARGET_USERNAME}@<assigned-ip>" "$GN" 22
     fi
-    echo -e "  ${BL}Run inside Ubuntu:${CL} ${GN}4-ubuntuVMsetup.sh${CL}"
-    echo -e "  ${BL}Reserve MAC in router:${CL} ${GN}${TARGET_VM_MAC} for fixed VM IP.${CL}"
+    status_line "Run inside Ubuntu" "4-ubuntuVMsetup.sh" "$GN" 22
+    status_line "Reserve MAC in router" "${TARGET_VM_MAC} for fixed VM IP" "$GN" 22
     echo ""
     echo -e "${FLASH_ON}${RD}DO NOT RUN 4-ubuntuVMsetup.sh ON THE PROXMOX HOST.${FLASH_OFF}${CL}"
     echo ""
@@ -2694,7 +2798,7 @@ setup_ui_demo_sample_data() {
     VM_STATUS_AT_PREFLIGHT="running"
     VM_SHUTDOWN_APPROVED="yes"
     ATTACH_START_APPROVED="yes"
-    ASSIGNED_IPV4="192.168.1.108"
+    ASSIGNED_IPV4="192.0.2.108"
     TARGET_USERNAME="orik"
     TARGET_HOSTNAME="circl8-ubuntu"
     TARGET_TIMEZONE="Europe/London"
@@ -2716,14 +2820,14 @@ setup_ui_demo_sample_data() {
     INSTALL_POWERED_OFF="yes"
     INSTALL_DURATION_TEXT="6m 34s"
     INSTALLED_VM_STARTED_STATUS="Installed Ubuntu VM started."
-    QEMU_IPV4_STATUS="QEMU Guest Agent reported IPv4 address: 192.168.1.108"
+    QEMU_IPV4_STATUS="QEMU Guest Agent reported IPv4 address: 192.0.2.108"
     HOST_VERIFICATION_STATUS="Host verification report created."
-    SSH_COMMAND="ssh orik@192.168.1.108"
+    SSH_COMMAND="ssh orik@192.0.2.108"
 }
 
 # --- 67. UI DEMO RENDER HELPERS ---
 demo_line() {
-    echo -e "  ${DGN}━━━━━▶${CL} $1"
+    status_line "$1"
 }
 
 demo_section_note() {
@@ -2787,7 +2891,7 @@ demo_ubuntu_pro_note() {
 }
 
 demo_preflight_questions() {
-    section "AUTOINSTALL PREFLIGHT"
+    section "SETUP PLAN"
     demo_line "generated ISO action: ${GENERATED_ISO_ACTION}"
     demo_line "missing ISO tools: $(missing_iso_tools_display)"
     demo_line "install missing ISO tools: $(install_missing_tools_display)"
@@ -2798,7 +2902,7 @@ demo_preflight_questions() {
 }
 
 demo_autoinstall_iso_preparation() {
-    section "AUTOINSTALL BUILD / APPLY"
+    section "APPLY CHANGES"
     msg_ok "Existing generated ISO check complete."
     msg_ok "Required ISO tools available."
     msg_ok "Autoinstall configuration created."
@@ -2811,7 +2915,7 @@ demo_autoinstall_iso_preparation() {
 demo_ready_to_apply() {
     section "READY TO APPLY"
 
-    echo -e "${YW}VM SUMMARY:${CL}"
+    echo -e "${YW}VM:${CL}"
     echo -e "  ${GN}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
     echo -e "  MAC: ${GN}${TARGET_VM_MAC}${CL}"
     echo -e "  status before apply: ${GN}${VM_STATUS_AT_PREFLIGHT}${CL}"
@@ -2845,7 +2949,7 @@ demo_ready_to_apply() {
     echo -e "  start unattended Ubuntu install: ${GN}$(attach_start_display)${CL}"
     echo ""
 
-    echo -e "${YW}CLEANUP:${CL}"
+    echo -e "${YW}Cleanup:${CL}"
     echo -e "  delete generated ISO after install: ${GN}$(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")${CL}"
     echo -e "  remove temporary workspace: ${GN}$(yn_word "$CLEANUP_TEMP_WORKFILES")${CL}"
     echo -e "  remove ISO generation tools after finish: ${GN}$(yn_word "$CLEANUP_INSTALLED_TOOLS")${CL}"
@@ -2919,6 +3023,7 @@ main() {
     init_script
 
     check_previous_marker
+    section "START"
     show_start_warning
     start_yn="$(timed_yes_no "Start Ubuntu Auto Install ISO Creator?" "y")"
 
@@ -2937,7 +3042,7 @@ main() {
     select_ubuntu_iso
     show_ubuntu_pro_note
 
-    section "AUTOINSTALL PREFLIGHT"
+    section "SETUP PLAN"
     collect_vm_shutdown_decision
     collect_generated_iso_action
     collect_missing_iso_tools_decision
@@ -2945,7 +3050,7 @@ main() {
 
     show_apply_summary
 
-    section "AUTOINSTALL BUILD / APPLY"
+    section "APPLY CHANGES"
     ISO_PREP_GROUPED_OUTPUT="yes"
     precheck_generated_iso_reuse
 
@@ -2964,6 +3069,7 @@ main() {
     attach_iso_and_start_install
     post_install_cleanup
     start_installed_vm_and_detect_ip
+    update_vm_side_marker_assigned_ipv4
     write_completion_marker
     create_host_verification_report
     show_final_output
