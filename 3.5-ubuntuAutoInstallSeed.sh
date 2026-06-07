@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.18"
+SCRIPT_VERSION="v1.2.19"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="proxmox-identity-marker-handoff"
+SCRIPT_BUILD="vm-side-proxmox-marker-handoff"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -38,6 +38,7 @@ T=15
 LOG_FILE="/var/log/ubuntu-autoinstall-seed.log"
 VERIFY_LOG="/var/log/ubuntu-autoinstall-seed-verify.log"
 COMPLETED_MARKER="/root/.ubuntu-autoinstall-seed-completed"
+VM_SIDE_MARKER_PATH="/root/.ubuntu-autoinstall-seed-completed"
 
 DEFAULT_USERNAME="orik"
 DEFAULT_TIMEZONE="Europe/London"
@@ -84,6 +85,7 @@ SSH_KEYS=""
 KEY_SOURCE=""
 SSH_KEYS_YAML=""
 VERIFIER_B64=""
+VM_MARKER_B64=""
 RANDOM_PASSWORD_HASH=""
 
 NETWORK_MODE="dhcp"
@@ -775,6 +777,44 @@ yaml_quote() {
     printf '"%s"' "$value"
 }
 
+marker_kv_quote() {
+    local value="${1:-}"
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '\"%s\"' "$value"
+}
+build_vm_side_marker_payload() {
+    local assigned_ipv4="${ASSIGNED_IPV4:-not-detected}"
+
+    [ -n "$assigned_ipv4" ] || assigned_ipv4="not-detected"
+
+    cat <<EOF
+SCRIPT35_STATUS=completed
+SCRIPT35_VERSION=$(marker_kv_quote "$SCRIPT_VERSION")
+SCRIPT35_BUILD=$(marker_kv_quote "$SCRIPT_BUILD")
+SCRIPT35_MARKER_SCOPE=vm
+SCRIPT35_MARKER_SOURCE=$(marker_kv_quote "$SCRIPT_SOURCE")
+SCRIPT35_VM_HOSTNAME=$(marker_kv_quote "$TARGET_HOSTNAME")
+SCRIPT35_VM_USERNAME=$(marker_kv_quote "$TARGET_USERNAME")
+SCRIPT35_VM_NETWORK_MODE=$(marker_kv_quote "$NETWORK_MODE")
+SCRIPT35_VM_ASSIGNED_IPV4=$(marker_kv_quote "$assigned_ipv4")
+SCRIPT35_VM_MAC=$(marker_kv_quote "$TARGET_VM_MAC")
+PROXMOX_HOSTNAME=$(marker_kv_quote "$PROXMOX_HOSTNAME")
+PROXMOX_FQDN=$(marker_kv_quote "$PROXMOX_FQDN")
+PROXMOX_DOMAIN=$(marker_kv_quote "$PROXMOX_DOMAIN")
+PROXMOX_LAN_IP=$(marker_kv_quote "$PROXMOX_LAN_IP")
+PROXMOX_LAN_URL=$(marker_kv_quote "$PROXMOX_LAN_URL")
+EOF
+}
+
+build_vm_side_marker_base64() {
+    local marker_file="$1"
+
+    build_vm_side_marker_payload > "$marker_file"
+    base64 -w0 "$marker_file"
+}
+
 # --- 23. SAFE HOSTNAME HELPER ---
 safe_hostname() {
     local value="$1"
@@ -1366,6 +1406,8 @@ late-commands:
   - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*AddressFamily.*/AddressFamily inet/" /etc/ssh/sshd_config'
   - curtin in-target --target=/target -- bash -c 'grep -q "^AddressFamily" /etc/ssh/sshd_config || echo "AddressFamily inet" >> /etc/ssh/sshd_config'
   - curtin in-target --target=/target -- bash -c 'date > /var/log/ubuntu-autoinstall-completed'
+  - curtin in-target --target=/target -- bash -c 'echo "${VM_MARKER_B64}" | base64 -d > /root/.ubuntu-autoinstall-seed-completed'
+  - curtin in-target --target=/target -- chmod 0600 /root/.ubuntu-autoinstall-seed-completed
   - curtin in-target --target=/target -- bash -c 'echo "${VERIFIER_B64}" | base64 -d > /etc/profile.d/ubuntu-autoinstall-verify-display.sh'
   - curtin in-target --target=/target -- chmod +x /etc/profile.d/ubuntu-autoinstall-verify-display.sh
 shutdown: poweroff
@@ -2148,6 +2190,7 @@ write_autoinstall_config() {
     RANDOM_PASSWORD_HASH="$(openssl passwd -6 "$(openssl rand -base64 48)")"
     build_ssh_key_yaml
     VERIFIER_B64="$(build_verifier_base64 "${WORK_DIR}/ubuntu-autoinstall-verify-display.sh")"
+    VM_MARKER_B64="$(build_vm_side_marker_base64 "${WORK_DIR}/ubuntu-autoinstall-seed-marker")"
 
     write_direct_autoinstall_yaml "${WORK_DIR}/autoinstall.yaml"
     write_cloud_config_user_data "${WORK_DIR}/autoinstall.yaml" "${WORK_DIR}/nocloud/user-data"
@@ -2310,6 +2353,10 @@ show_apply_summary() {
     show_proxmox_identity_summary
     echo ""
 
+    echo -e "${YW}VM-side marker:${CL}"
+    echo -e "  ${BL}path:${CL} ${GN}${VM_SIDE_MARKER_PATH}${CL}"
+    echo ""
+
     echo -e "${YW}UBUNTU IDENTITY:${CL}"
     echo -e "  ${BL}hostname:${CL} ${ANS}${TARGET_HOSTNAME}${CL}"
     echo -e "  ${BL}user:${CL} ${ANS}${TARGET_USERNAME}${CL}"
@@ -2462,6 +2509,17 @@ Start Installed VM After Cleanup: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
 Verify Log: $VERIFY_LOG
+VM Side Marker: $VM_SIDE_MARKER_PATH
+SCRIPT35_STATUS=completed
+SCRIPT35_VERSION="$SCRIPT_VERSION"
+SCRIPT35_BUILD="$SCRIPT_BUILD"
+SCRIPT35_MARKER_SCOPE=host
+SCRIPT35_MARKER_SOURCE="$SCRIPT_SOURCE"
+SCRIPT35_VM_HOSTNAME="$TARGET_HOSTNAME"
+SCRIPT35_VM_USERNAME="$TARGET_USERNAME"
+SCRIPT35_VM_NETWORK_MODE="$NETWORK_MODE"
+SCRIPT35_VM_ASSIGNED_IPV4="${ASSIGNED_IPV4:-not-detected}"
+SCRIPT35_VM_MAC="$TARGET_VM_MAC"
 PROXMOX_HOSTNAME="${PROXMOX_HOSTNAME}"
 PROXMOX_FQDN="${PROXMOX_FQDN}"
 PROXMOX_DOMAIN="${PROXMOX_DOMAIN}"
@@ -2491,6 +2549,7 @@ Install Duration: ${INSTALL_DURATION_TEXT:-not-recorded}
 Post Install Start VM: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
+VM Side Marker: $VM_SIDE_MARKER_PATH
 Proxmox Hostname: ${PROXMOX_HOSTNAME:-not-detected}
 Proxmox FQDN: ${PROXMOX_FQDN:-not-detected}
 Proxmox Domain: ${PROXMOX_DOMAIN:-not-detected}
@@ -2559,6 +2618,7 @@ show_final_output() {
     echo -e "  ${BL}VM:${CL} ${ANS}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
     echo -e "  ${BL}IP:${CL} ${GN}${ASSIGNED_IPV4:-not-detected}${CL}"
     echo -e "  ${BL}MAC:${CL} ${GN}${TARGET_VM_MAC}${CL}"
+    echo -e "  ${BL}VM marker:${CL} ${GN}${VM_SIDE_MARKER_PATH}${CL}"
 
     if [ -n "$SSH_COMMAND" ]; then
         echo -e "  ${BL}SSH:${CL} ${GN}${SSH_COMMAND}${CL}"
@@ -2630,7 +2690,7 @@ setup_ui_demo_sample_data() {
     SCRIPT35_UI_DEMO_ACTIVE="yes"
     TARGET_VM_NAME="circl8-ubuntu"
     TARGET_VMID="108"
-    TARGET_VM_MAC="BC:24:11:12:B1:8B"
+    TARGET_VM_MAC="demo-vm-mac"
     VM_STATUS_AT_PREFLIGHT="running"
     VM_SHUTDOWN_APPROVED="yes"
     ATTACH_START_APPROVED="yes"
