@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.6.13"
-SCRIPT_UPDATED="2026-06-06"
-SCRIPT_BUILD="service-host-prefix-input"
+SCRIPT_VERSION="v1.6.14"
+SCRIPT_UPDATED="2026-06-07"
+SCRIPT_BUILD="traefik-acme-email-handoff"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -76,6 +76,7 @@ CF_ZONE_ID_VALUE=""
 CF_API_TOKEN_VALUE=""
 CF_AUTH_MODE=""
 CF_EMAIL_REQUIRED=""
+TRAEFIK_ACME_EMAIL_VALUE=""
 
 EXISTING_SETUP="no"
 REGENERATE_SECRETS="n"
@@ -1677,11 +1678,13 @@ function render_traefik_template() {
     content="$(cat "$src")"
     proxmox_block="$(build_proxmox_route_block)"
 
+    validate_email "${TRAEFIK_ACME_EMAIL_VALUE:-}" || msg_error "Traefik ACME email is missing or invalid. Re-run Script 6 email setup."
+
     content="${content//\{\{DOCKER_DIR\}\}/$DOCKER_DIR}"
     content="${content//\{\{DOMAIN\}\}/$DOMAIN_VALUE}"
     content="${content//\{\{CF_API_EMAIL\}\}/$CF_API_EMAIL_VALUE}"
     content="${content//\{\{TRAEFIK_DASHBOARD_HOST\}\}/$TRAEFIK_DASHBOARD_HOST}"
-    content="${content//\{\{TRAEFIK_ACME_EMAIL\}\}/$CF_API_EMAIL_VALUE}"
+    content="${content//\{\{TRAEFIK_ACME_EMAIL\}\}/$TRAEFIK_ACME_EMAIL_VALUE}"
     content="${content//\{\{CF_API_TOKEN_SECRET_PATH\}\}//run/secrets/cf_api_token}"
     content="${content//\{\{HTPASSWD_SECRET_PATH\}\}//run/secrets/htpasswd}"
     content="${content//\{\{PROXMOX_ROUTE_BLOCK\}\}/$proxmox_block}"
@@ -2235,6 +2238,75 @@ function read_existing_env_value() {
     printf '%s' "$value"
 }
 
+
+function email_input() {
+    local prompt="$1"
+    local default="$2"
+    local value=""
+
+    while true; do
+        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
+        value="$(timed_text_input "$prompt" "$default")"
+        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
+        value="$(printf '%s' "$value" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+        if validate_email "$value"; then
+            printf '%s' "$value"
+            return 0
+        fi
+
+        tty_println "${WARN} ${YW}Invalid email format. Use an address such as admin@${DOMAIN_VALUE}.${CL}"
+    done
+}
+
+function collect_traefik_authentik_email_inputs() {
+    local default_admin_email="admin@${DOMAIN_VALUE}"
+    local default_acme_email="certs@${DOMAIN_VALUE}"
+    local existing_acme_email=""
+    local existing_authentik_email=""
+    local admin_email=""
+    local split_default="n"
+    local split_yn=""
+
+    setup_options_group_header "Traefik / Authentik"
+
+    existing_acme_email="$(read_existing_env_value "TRAEFIK_ACME_EMAIL")"
+    existing_authentik_email="$(read_existing_env_value "AUTHENTIK_BOOTSTRAP_EMAIL")"
+
+    if validate_email "$existing_authentik_email"; then
+        default_admin_email="$existing_authentik_email"
+    elif validate_email "$existing_acme_email"; then
+        default_admin_email="$existing_acme_email"
+    fi
+
+    if validate_email "$existing_acme_email"; then
+        default_acme_email="$existing_acme_email"
+    elif validate_email "$existing_authentik_email"; then
+        default_acme_email="$existing_authentik_email"
+    fi
+
+    if validate_email "$existing_acme_email" && validate_email "$existing_authentik_email" && [ "$existing_acme_email" != "$existing_authentik_email" ]; then
+        split_default="y"
+    fi
+
+    admin_email="$(email_input "Enter admin email" "$default_admin_email")"
+    TRAEFIK_ACME_EMAIL_VALUE="$admin_email"
+    AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$admin_email"
+
+    split_yn="$(timed_yes_no "Use separate ACME and Authentik emails?" "$split_default")"
+    if [[ "$split_yn" =~ ^[Yy]$ ]]; then
+        TRAEFIK_ACME_EMAIL_VALUE="$(email_input "Enter ACME email" "$default_acme_email")"
+        AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(email_input "Enter Authentik bootstrap email" "${existing_authentik_email:-$default_admin_email}")"
+
+        aligned_value_line "ACME email" "$TRAEFIK_ACME_EMAIL_VALUE" "$ANS" 18
+        aligned_value_line "Authentik email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 18
+    else
+        aligned_value_line "Email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 18
+    fi
+
+    return 0
+}
+
 function prepare_existing_verify_state_from_paths() {
     local value=""
 
@@ -2406,6 +2478,8 @@ function collect_domain_cloudflare_inputs() {
     aligned_check_line "Cloudflare token" "$cf_token_summary" "$GN" 19
     if [ "$CF_EMAIL_REQUIRED" == "yes" ]; then
         aligned_check_line "Cloudflare email" "$cf_email_summary" "$ANS" 19
+    else
+        aligned_check_line "Cloudflare email" "not used" "$GN" 19
     fi
 
     return 0
@@ -2851,27 +2925,13 @@ function collect_authentik_inputs() {
         AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
     fi
 
-    while true; do
-        if [ -n "$CF_API_EMAIL_VALUE" ]; then
-            default_admin_email="$CF_API_EMAIL_VALUE"
-        else
-            default_admin_email="admin@${DOMAIN_VALUE}"
-        fi
-
-        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
-        AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(timed_text_input "Enter Authentik bootstrap admin email" "$default_admin_email")"
-        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
-
-        if validate_email "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"; then
-            break
-        fi
-
-        msg_warn "Invalid email format."
-    done
+    if ! validate_email "${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE:-}"; then
+        AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="admin@${DOMAIN_VALUE}"
+    fi
 
     aligned_value_line "External URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 18
     aligned_value_line "Browser URL" "$AUTHENTIK_HOST_BROWSER_VALUE" "$ANS" 18
-    aligned_value_line "Bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 18
+    aligned_value_line "Bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$GN" 18
 
     echo ""
     echo -e "${YW}Authentik bootstrap password:${CL}"
@@ -2956,7 +3016,7 @@ function collect_authentik_inputs() {
     echo -e "${YW}Authentik bootstrap:${CL}"
     aligned_value_line "External URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 18
     aligned_value_line "Browser URL" "$AUTHENTIK_HOST_BROWSER_VALUE" "$ANS" 18
-    aligned_value_line "Bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 18
+    aligned_value_line "Bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$GN" 18
     aligned_value_line "Password" "$password_summary" "$GN" 18
     aligned_value_line "Bootstrap token" "$token_summary" "$GN" 18
     aligned_value_line "API token" "$api_summary" "$GN" 18
@@ -3144,11 +3204,14 @@ function show_ready_summary_and_confirm() {
     echo -e "${YW}Domain / routing:${CL}"
     aligned_value_line "Domain" "$DOMAIN_VALUE" "$ANS" 17
     aligned_value_line "Cloudflare auth" "$cloudflare_auth_summary" "$GN" 17
+    aligned_value_line "Cloudflare email" "$([ "$CF_EMAIL_REQUIRED" == "yes" ] && echo "${CF_API_EMAIL_VALUE}" || echo "not used")" "$GN" 17
     aligned_value_line "Proxmox route" "$(yes_no_label "$PROXMOX_ROUTE_ENABLED")" "$GN" 17
     echo ""
     echo -e "${YW}Applications:${CL}"
     aligned_value_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$ANS" 15
     aligned_value_line "Authentik URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 15
+    aligned_value_line "ACME email" "$TRAEFIK_ACME_EMAIL_VALUE" "$GN" 15
+    aligned_value_line "Authentik email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$GN" 15
     aligned_value_line "SMTP relay" "$smtp_summary" "$GN" 15
     echo ""
     echo -e "${YW}Secrets:${CL}"
@@ -3396,6 +3459,8 @@ function write_env_file() {
     : "${DOCKER_DIR:?DOCKER_DIR is required before writing .env}"
     : "${DOCKER_SECRETS_DIR:?DOCKER_SECRETS_DIR is required before writing .env}"
     : "${USERDIR:?USERDIR is required before writing .env}"
+    validate_email "${TRAEFIK_ACME_EMAIL_VALUE:-}" || msg_error "TRAEFIK_ACME_EMAIL_VALUE is required before writing .env"
+    validate_email "${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE:-}" || msg_error "AUTHENTIK_BOOTSTRAP_EMAIL_VALUE is required before writing .env"
 
     write_root_file "${DOCKER_DIR}/.env" <<EOF
 # =========================================================
@@ -3431,6 +3496,7 @@ TRAEFIK_DASHBOARD_HOST="${TRAEFIK_DASHBOARD_HOST}"
 TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_STATIC_CONFIG_FILE}"
 TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DYNAMIC_CONFIG_FILE}"
 TRAEFIK_ACME_STORAGE="${TRAEFIK_ACME_DIR}/acme.json"
+TRAEFIK_ACME_EMAIL="${TRAEFIK_ACME_EMAIL_VALUE}"
 
 # --- Service hostnames (set by collect_service_hostnames) ---
 LANDING_HOST="${LANDING_HOST}"
@@ -3871,6 +3937,8 @@ Cloudflare token file: $CF_API_TOKEN_FILE
 Traefik static config: $TRAEFIK_STATIC_CONFIG_FILE
 Traefik dynamic config: $TRAEFIK_DYNAMIC_CONFIG_FILE
 Traefik ACME storage: ${TRAEFIK_ACME_DIR}/acme.json
+Traefik ACME email: $TRAEFIK_ACME_EMAIL_VALUE
+Authentik bootstrap email: $AUTHENTIK_BOOTSTRAP_EMAIL_VALUE
 Traefik dashboard host: $TRAEFIK_DASHBOARD_HOST
 Proxmox route enabled: $PROXMOX_ROUTE_ENABLED
 Htpasswd mode: $HTPASSWD_MODE
@@ -3911,6 +3979,8 @@ Cloudflare token file: $CF_API_TOKEN_FILE
 Traefik static config: $TRAEFIK_STATIC_CONFIG_FILE
 Traefik dynamic config: $TRAEFIK_DYNAMIC_CONFIG_FILE
 Traefik ACME storage: ${TRAEFIK_ACME_DIR}/acme.json
+Traefik ACME email: $TRAEFIK_ACME_EMAIL_VALUE
+Authentik bootstrap email: $AUTHENTIK_BOOTSTRAP_EMAIL_VALUE
 Traefik dashboard host: $TRAEFIK_DASHBOARD_HOST
 Proxmox route enabled: $PROXMOX_ROUTE_ENABLED
 Htpasswd mode: $HTPASSWD_MODE
@@ -3970,6 +4040,8 @@ function update_completion_marker_script6_fields() {
         echo "SCRIPT6_SECRETS_DIR=$DOCKER_SECRETS_DIR"
         echo "SCRIPT6_DOMAIN=$DOMAIN_VALUE"
         echo "SCRIPT6_ADMIN_UI=$ADMIN_UI"
+        echo "SCRIPT6_TRAEFIK_ACME_EMAIL=$TRAEFIK_ACME_EMAIL_VALUE"
+        echo "SCRIPT6_AUTHENTIK_EMAIL=$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
         echo "SCRIPT6_TRAEFIK_CONFIG=$traefik_config_ready"
         echo "SCRIPT6_SECRETS_READY=$secrets_ready"
         echo "SCRIPT6_ENV_FILE_READY=$env_file_ready"
@@ -4188,6 +4260,7 @@ function show_secrets_once_without_logging() {
     echo -e "TRAEFIK_STATIC_CONFIG=${GN}${TRAEFIK_STATIC_CONFIG_FILE}${CL}"
     echo -e "TRAEFIK_DYNAMIC_CONFIG=${GN}${TRAEFIK_DYNAMIC_CONFIG_FILE}${CL}"
     echo -e "TRAEFIK_ACME_STORAGE=${GN}${TRAEFIK_ACME_DIR}/acme.json${CL}"
+    echo -e "TRAEFIK_ACME_EMAIL=${GN}${TRAEFIK_ACME_EMAIL_VALUE}${CL}"
 
     if [ -n "$CF_API_TOKEN_VALUE" ]; then
         echo -e "CF_API_TOKEN=${YW}<captured / not displayed>${CL}"
@@ -4325,6 +4398,7 @@ function show_clean_final_summary() {
     final_line "Static config" "$TRAEFIK_STATIC_CONFIG_FILE"
     final_line "Dynamic config" "$TRAEFIK_DYNAMIC_CONFIG_FILE"
     final_line "ACME storage" "${TRAEFIK_ACME_DIR}/acme.json"
+    final_line "ACME email" "$TRAEFIK_ACME_EMAIL_VALUE"
 
     echo ""
     echo -e "${YW}Applications:${CL}"
@@ -4342,6 +4416,7 @@ function show_clean_final_summary() {
     echo ""
     refresh_authentik_route_url_values
     final_line "Authentik URL" "$(https_url_or_not_configured "${AUTHENTIK_EXTERNAL_URL_VALUE:-${AUTHENTIK_HOST_VALUE:-${AUTHENTIK_HOST:-}}}")"
+    final_line "Authentik email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
     final_line "SMTP relay" "$smtp_summary"
 
     echo ""
@@ -4396,6 +4471,7 @@ function main() {
     collect_user_and_path_inputs
     detect_existing_setup
     collect_domain_cloudflare_inputs
+    collect_traefik_authentik_email_inputs
     collect_admin_ui_selection
     collect_service_hostnames
     collect_authentik_inputs

@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.57"
-SCRIPT_UPDATED="2026-06-06"
-SCRIPT_BUILD="authentik-empty-path-error-fix"
+SCRIPT_VERSION="v1.3.58"
+SCRIPT_UPDATED="2026-06-07"
+SCRIPT_BUILD="traefik-acme-email-validation"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -159,6 +159,8 @@ CF_API_TOKEN_FILE=""
 TRAEFIK_STATIC_CONFIG_FILE=""
 TRAEFIK_DYNAMIC_CONFIG_FILE=""
 TRAEFIK_ACME_STORAGE=""
+TRAEFIK_ACME_EMAIL_VALUE=""
+TRAEFIK_ACME_EMAIL_STATUS="unknown"
 TRAEFIK_DASHBOARD_HOST=""
 PROXMOX_ROUTE_ENABLED="n"
 PROXMOX_HOST=""
@@ -370,6 +372,7 @@ function readiness_status_summary() {
     setup_option_line "Project config" "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS:-unknown}")"
     setup_option_line "Secrets" "${SCRIPT6_SECRETS_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_SECRETS_STATUS:-unknown}")"
     setup_option_line "Traefik config" "${TRAEFIK_CONFIG_PREFLIGHT_STATUS:-not selected}" "$(status_color_for_value "${TRAEFIK_CONFIG_PREFLIGHT_STATUS:-not selected}")"
+    setup_option_line "ACME email" "${TRAEFIK_ACME_EMAIL_STATUS:-unknown}" "$(status_color_for_value "${TRAEFIK_ACME_EMAIL_STATUS:-unknown}")"
     setup_option_line "Redis/sysctl" "${SYSCTL_REDIS_OK:-not selected}" "$(status_color_for_value "${SYSCTL_REDIS_OK:-not selected}")"
     setup_option_line "Authentik folders" "${AUTHENTIK_FOLDERS_OK:-not selected}" "$(status_color_for_value "${AUTHENTIK_FOLDERS_OK:-not selected}")"
     setup_option_line "SMTP env" "${AUTHENTIK_SMTP_ENV_OK:-not selected}" "$(status_color_for_value "${AUTHENTIK_SMTP_ENV_OK:-not selected}")"
@@ -913,6 +916,17 @@ function validate_url() {
     fi
 
     return 1
+}
+
+function is_email_like() {
+    local email="${1:-}"
+
+    [ -n "$email" ] || return 1
+    [[ "$email" != *[[:space:]]* ]] || return 1
+    [[ "$email" != '""' ]] || return 1
+    [[ "$email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || return 1
+
+    return 0
 }
 
 # --- 22. DEPENDENCY VALIDATION ---
@@ -1469,7 +1483,10 @@ function render_traefik_template() {
     content="${content//\{\{DOMAIN\}\}/$DOMAIN_VALUE}"
     content="${content//\{\{CF_API_EMAIL\}\}/$CF_API_EMAIL_VALUE}"
     content="${content//\{\{TRAEFIK_DASHBOARD_HOST\}\}/$TRAEFIK_DASHBOARD_HOST}"
-    content="${content//\{\{TRAEFIK_ACME_EMAIL\}\}/$CF_API_EMAIL_VALUE}"
+    : "${TRAEFIK_ACME_EMAIL_VALUE:?TRAEFIK_ACME_EMAIL_VALUE is required before rendering Traefik config}"
+    is_email_like "$TRAEFIK_ACME_EMAIL_VALUE" || msg_error "TRAEFIK_ACME_EMAIL must be a valid email-like value before rendering Traefik config."
+
+    content="${content//\{\{TRAEFIK_ACME_EMAIL\}\}/$TRAEFIK_ACME_EMAIL_VALUE}"
     content="${content//\{\{CF_API_TOKEN_SECRET_PATH\}\}//run/secrets/cf_api_token}"
     content="${content//\{\{HTPASSWD_SECRET_PATH\}\}//run/secrets/htpasswd}"
     content="${content//\{\{PROXMOX_ROUTE_BLOCK\}\}/$proxmox_block}"
@@ -1791,6 +1808,7 @@ function validate_project_paths() {
     DOCKER_SECRETS_DIR="$(env_value DOCKER_SECRETS_DIR)"
     CF_API_TOKEN_FILE="$(env_value CF_API_TOKEN_FILE)"
     CF_API_EMAIL_VALUE="$(env_value CF_API_EMAIL)"
+    TRAEFIK_ACME_EMAIL_VALUE="$(env_value TRAEFIK_ACME_EMAIL)"
     TRAEFIK_DASHBOARD_HOST="$(env_value TRAEFIK_DASHBOARD_HOST)"
     [ -z "$TRAEFIK_DASHBOARD_HOST" ] && TRAEFIK_DASHBOARD_HOST="traefik.${DOMAIN_VALUE}"
     PROXMOX_ROUTE_ENABLED="$(env_value PROXMOX_ROUTE_ENABLED)"
@@ -1822,6 +1840,7 @@ function validate_project_paths() {
     env_status_line ".env file" "present"
     env_status_line "Secrets" "$SCRIPT6_SECRETS_STATUS"
     env_status_line "Traefik config" "ready"
+    env_status_line "ACME email" "${TRAEFIK_ACME_EMAIL_STATUS:-unknown}"
 }
 
 
@@ -1895,6 +1914,20 @@ function require_env_key_present() {
     return 0
 }
 
+function require_email_env_key() {
+    local key="$1"
+    local value=""
+
+    value="$(env_value "$key")"
+    value="$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+    if ! is_email_like "$value"; then
+        msg_error "Required Script 6 .env key ${key} is missing, empty, or not email-like. Rerun Script 6 v1.6.14+."
+    fi
+
+    printf '%s' "$value"
+}
+
 function require_bare_host_env_key() {
     local key="$1"
     local value=""
@@ -1915,6 +1948,26 @@ function require_url_env_key() {
     is_http_url "$value" || msg_error "${key} must be an http:// or https:// URL, got: ${value}"
     url_host="$(host_from_url "$value")"
     host_under_domain "$url_host" "$DOMAIN_VALUE" || msg_error "${key} host (${url_host}) is outside configured DOMAIN (${DOMAIN_VALUE}). Rerun Script 6 v1.6.13+."
+}
+
+function validate_rendered_traefik_acme_email() {
+    local rendered_email=""
+
+    root_path_exists "$TRAEFIK_STATIC_CONFIG_FILE" || msg_error "Traefik static config missing: ${TRAEFIK_STATIC_CONFIG_FILE}. Rerun Script 6."
+
+    rendered_email="$(root_read_file "$TRAEFIK_STATIC_CONFIG_FILE" 2>/dev/null | grep -E '^[[:space:]]*email:[[:space:]]*' | head -n1 | sed -e 's/^[[:space:]]*email:[[:space:]]*//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+
+    case "$rendered_email" in
+        ""|'${TRAEFIK_ACME_EMAIL}'|'{{TRAEFIK_ACME_EMAIL}}')
+            msg_error "Traefik ACME email is missing from rendered traefik.yml. Rerun Script 6 v1.6.14+."
+            ;;
+    esac
+
+    if ! is_email_like "$rendered_email"; then
+        msg_error "Traefik ACME email in rendered traefik.yml is not email-like. Rerun Script 6 v1.6.14+."
+    fi
+
+    TRAEFIK_ACME_EMAIL_STATUS="ready"
 }
 
 function validate_script6_marker() {
@@ -1986,6 +2039,7 @@ function validate_script6_env_file() {
         ADMIN_UI_URL
         AUTHENTIK_ROUTE_HOST
         AUTHENTIK_EXTERNAL_URL
+        TRAEFIK_ACME_EMAIL
         TRAEFIK_HOST
         POSTIZ_HOST
         FILEBROWSER_HOST
@@ -2008,6 +2062,9 @@ function validate_script6_env_file() {
     for key in "${required_keys[@]}"; do
         require_env_key_present "$key"
     done
+
+    TRAEFIK_ACME_EMAIL_VALUE="$(require_email_env_key "TRAEFIK_ACME_EMAIL")"
+    TRAEFIK_ACME_EMAIL_STATUS="ready"
 
     require_bare_host_env_key "ADMIN_UI_HOST"
     require_bare_host_env_key "AUTHENTIK_ROUTE_HOST"
@@ -2127,6 +2184,8 @@ function validate_traefik_config_files_predeploy() {
         msg_error "Unresolved template placeholders remain in Traefik config files. Rerun Script 6."
     fi
 
+    validate_rendered_traefik_acme_email
+
     acme_mode="$(root_stat_mode "$TRAEFIK_ACME_STORAGE")"
     [ "$acme_mode" == "600" ] || msg_error "Traefik acme.json mode is ${acme_mode:-unknown}; expected 600. Rerun Script 6."
 
@@ -2134,11 +2193,21 @@ function validate_traefik_config_files_predeploy() {
 }
 
 function validate_cf_companion_predeploy() {
+    local cf_auth_mode=""
+    local cf_email_required=""
     local cf_zone_id=""
     local cf_token_path=""
 
+    cf_auth_mode="$(env_value CF_AUTH_MODE)"
+    cf_email_required="$(env_value CF_EMAIL_REQUIRED)"
     cf_zone_id="$(env_value CF_ZONE_ID)"
     cf_token_path="${CF_API_TOKEN_FILE:-$(env_value CF_API_TOKEN_FILE)}"
+
+    # Script 6 v1.6.14+ keeps Cloudflare token mode email-free.
+    # cf-companion must use token + Zone ID and must not require CF_API_EMAIL.
+    if [ "$cf_auth_mode" == "api_token" ] || [ "$cf_auth_mode" == "api_token_file_reuse" ] || [ "$cf_email_required" == "no" ]; then
+        :
+    fi
 
     [ -n "$cf_zone_id" ] || msg_error "Cloudflare Companion selected but CF_ZONE_ID is missing from .env. Rerun Script 6 and provide the Cloudflare Zone ID, or skip cf-companion."
     [ -n "$cf_token_path" ] || msg_error "Cloudflare Companion selected but CF_API_TOKEN_FILE is missing from .env. Rerun Script 6."
@@ -2211,6 +2280,7 @@ function verify_traefik_rendered_configs() {
     if grep -R '{{[^}]*}}' "$TRAEFIK_STATIC_CONFIG_FILE" "$TRAEFIK_DYNAMIC_CONFIG_FILE" >/dev/null 2>&1; then
         msg_error "Unrendered {{PLACEHOLDER}} values remain in Traefik config. Fix Script 6 render logic/templates."
     fi
+    validate_rendered_traefik_acme_email
     TRAEFIK_PLACEHOLDERS_OK="yes"
 
     if grep -q 'delayBefore''Checks' "$TRAEFIK_STATIC_CONFIG_FILE" && ! grep -q 'delayBefore''Check:' "$TRAEFIK_STATIC_CONFIG_FILE"; then
@@ -4606,6 +4676,7 @@ function write_verify_outputs() {
         status_verify_from_value "URLs" "${SCRIPT6_ENV_URLS_STATUS}"
         status_verify_from_value "Secrets" "${SCRIPT6_SECRETS_STATUS}"
         status_verify_from_value "Traefik config" "${TRAEFIK_CONFIG_PREFLIGHT_STATUS}"
+        status_verify_from_value "ACME email" "${TRAEFIK_ACME_EMAIL_STATUS}"
         status_verify_from_value "Networks created" "${NETWORKS_CREATED}"
         status_verify_from_value "Networks verified" "${NETWORKS_VERIFIED}"
         status_verify_from_value "Socket proxy deployed" "${SOCKET_PROXY_DEPLOYED}"
@@ -4660,6 +4731,7 @@ function write_verify_outputs() {
         echo "  Secrets: ${SCRIPT6_SECRETS_STATUS}"
         echo "  Optional htpasswd: ${SCRIPT6_HTPASSWD_STATUS}"
         echo "  Traefik config: ${TRAEFIK_CONFIG_PREFLIGHT_STATUS}"
+        echo "  ACME email: ${TRAEFIK_ACME_EMAIL_STATUS}"
         echo ""
         echo "Runtime:"
         echo "  Networks: ${NETWORKS_VERIFIED}"
@@ -4838,6 +4910,7 @@ function show_ready_to_apply() {
     group_heading "Readiness"
     plan_line "Required checks" "$required_status" "$(status_color_for_value "$required_status")"
     plan_line "Optional htpasswd" "$SCRIPT6_HTPASSWD_STATUS" "$(status_color_for_value "$SCRIPT6_HTPASSWD_STATUS")"
+    plan_line "ACME email" "${TRAEFIK_ACME_EMAIL_STATUS:-unknown}" "$(status_color_for_value "${TRAEFIK_ACME_EMAIL_STATUS:-unknown}")"
     echo ""
 
     group_heading "Safety"
