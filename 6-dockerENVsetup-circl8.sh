@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.6.14"
+SCRIPT_VERSION="v1.6.15"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="traefik-acme-email-handoff"
+SCRIPT_BUILD="email-prompt-order-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -2260,11 +2260,12 @@ function email_input() {
 }
 
 function collect_traefik_authentik_email_inputs() {
-    local default_admin_email="admin@${DOMAIN_VALUE}"
+    local default_shared_email="admin@${DOMAIN_VALUE}"
     local default_acme_email="certs@${DOMAIN_VALUE}"
+    local default_authentik_email="admin@${DOMAIN_VALUE}"
     local existing_acme_email=""
     local existing_authentik_email=""
-    local admin_email=""
+    local shared_email=""
     local split_default="n"
     local split_yn=""
 
@@ -2273,35 +2274,38 @@ function collect_traefik_authentik_email_inputs() {
     existing_acme_email="$(read_existing_env_value "TRAEFIK_ACME_EMAIL")"
     existing_authentik_email="$(read_existing_env_value "AUTHENTIK_BOOTSTRAP_EMAIL")"
 
-    if validate_email "$existing_authentik_email"; then
-        default_admin_email="$existing_authentik_email"
-    elif validate_email "$existing_acme_email"; then
-        default_admin_email="$existing_acme_email"
-    fi
-
-    if validate_email "$existing_acme_email"; then
-        default_acme_email="$existing_acme_email"
+    if validate_email "$existing_acme_email" && validate_email "$existing_authentik_email"; then
+        if [ "$existing_acme_email" == "$existing_authentik_email" ]; then
+            default_shared_email="$existing_acme_email"
+            default_acme_email="$existing_acme_email"
+            default_authentik_email="$existing_authentik_email"
+            split_default="n"
+        else
+            default_acme_email="$existing_acme_email"
+            default_authentik_email="$existing_authentik_email"
+            split_default="y"
+        fi
     elif validate_email "$existing_authentik_email"; then
-        default_acme_email="$existing_authentik_email"
+        default_shared_email="$existing_authentik_email"
+        default_authentik_email="$existing_authentik_email"
+    elif validate_email "$existing_acme_email"; then
+        default_shared_email="$existing_acme_email"
+        default_acme_email="$existing_acme_email"
     fi
-
-    if validate_email "$existing_acme_email" && validate_email "$existing_authentik_email" && [ "$existing_acme_email" != "$existing_authentik_email" ]; then
-        split_default="y"
-    fi
-
-    admin_email="$(email_input "Enter admin email" "$default_admin_email")"
-    TRAEFIK_ACME_EMAIL_VALUE="$admin_email"
-    AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$admin_email"
 
     split_yn="$(timed_yes_no "Use separate ACME and Authentik emails?" "$split_default")"
     if [[ "$split_yn" =~ ^[Yy]$ ]]; then
         TRAEFIK_ACME_EMAIL_VALUE="$(email_input "Enter ACME email" "$default_acme_email")"
-        AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(email_input "Enter Authentik bootstrap email" "${existing_authentik_email:-$default_admin_email}")"
+        AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(email_input "Enter Authentik email" "$default_authentik_email")"
 
         aligned_value_line "ACME email" "$TRAEFIK_ACME_EMAIL_VALUE" "$ANS" 18
         aligned_value_line "Authentik email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 18
     else
-        aligned_value_line "Email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 18
+        shared_email="$(email_input "Enter Traefik/AuthentiK email" "$default_shared_email")"
+        TRAEFIK_ACME_EMAIL_VALUE="$shared_email"
+        AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$shared_email"
+
+        aligned_value_line "Email" "$shared_email" "$ANS" 18
     fi
 
     return 0
