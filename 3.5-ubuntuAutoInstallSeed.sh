@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.17"
-SCRIPT_UPDATED="2026-05-30"
-SCRIPT_BUILD="final-next-step-router-reminder"
+SCRIPT_VERSION="v1.2.18"
+SCRIPT_UPDATED="2026-06-07"
+SCRIPT_BUILD="proxmox-identity-marker-handoff"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -116,6 +116,12 @@ ISO_PREP_GROUPED_OUTPUT="no"
 SCRIPT35_UI_DEMO_ACTIVE="no"
 
 BOOT_PARAM='autoinstall ds=nocloud\;s=/cdrom/nocloud/ subiquity.autoinstallpath=cdrom/autoinstall.yaml'
+
+PROXMOX_HOSTNAME=""
+PROXMOX_FQDN=""
+PROXMOX_DOMAIN=""
+PROXMOX_LAN_IP=""
+PROXMOX_LAN_URL=""
 
 # =========================================================
 #  OUTPUT / LOGGING FUNCTIONS
@@ -705,6 +711,58 @@ validate_dns_list() {
     return 0
 }
 
+validate_hostname_label() {
+    local value="${1:-}"
+
+    [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+    [[ "$value" != localhost ]] || return 1
+
+    return 0
+}
+
+validate_fqdn() {
+    local value="${1:-}"
+    local first_label=""
+
+    [[ "$value" == *.* ]] || return 1
+    [[ "$value" != localhost.* ]] || return 1
+    [[ "$value" != *.localdomain ]] || return 1
+
+    first_label="${value%%.*}"
+    validate_hostname_label "$first_label" || return 1
+    [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || return 1
+
+    return 0
+}
+
+fqdn_matches_short_hostname() {
+    local fqdn="${1:-}"
+    local short="${2:-}"
+
+    [ -n "$short" ] || return 1
+    [ "${fqdn%%.*}" == "$short" ] || return 1
+
+    return 0
+}
+
+is_rfc1918_ipv4() {
+    local ip="${1:-}"
+    local second=""
+
+    validate_ipv4 "$ip" || return 1
+
+    case "$ip" in
+        10.*|192.168.*) return 0 ;;
+    esac
+
+    if [[ "$ip" =~ ^172\.([0-9]{1,3})\. ]]; then
+        second="${BASH_REMATCH[1]}"
+        [ "$second" -ge 16 ] && [ "$second" -le 31 ] && return 0
+    fi
+
+    return 1
+}
+
 # =========================================================
 #  GENERAL HELPERS
 # =========================================================
@@ -729,6 +787,131 @@ safe_hostname() {
     fi
 
     echo "$value"
+}
+
+proxmox_identity_value_or_not_detected() {
+    local value="${1:-}"
+
+    [ -n "$value" ] && printf '%s' "$value" || printf 'not detected'
+}
+
+discover_proxmox_short_hostname() {
+    local value=""
+
+    if command -v hostname >/dev/null 2>&1; then
+        value="$(hostname -s 2>/dev/null | head -n1 | xargs || true)"
+    fi
+
+    if ! validate_hostname_label "$value" && command -v hostnamectl >/dev/null 2>&1; then
+        value="$(hostnamectl --static 2>/dev/null | head -n1 | xargs || true)"
+    fi
+
+    if ! validate_hostname_label "$value" && [ -r /etc/hostname ]; then
+        value="$(head -n1 /etc/hostname 2>/dev/null | xargs || true)"
+    fi
+
+    if validate_hostname_label "$value"; then
+        printf '%s' "$value"
+    else
+        printf ''
+    fi
+}
+
+discover_proxmox_fqdn_from_hosts() {
+    local short_hostname="${1:-}"
+    local value=""
+
+    [ -n "$short_hostname" ] || { printf ''; return 0; }
+    [ -r /etc/hosts ] || { printf ''; return 0; }
+
+    value="$(awk -v short="$short_hostname" '
+        $1 !~ /^#/ {
+            found_short=0
+            found_fqdn=""
+            for (i=2; i<=NF; i++) {
+                if ($i == short) found_short=1
+                if ($i ~ /^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$/ && $i !~ /^localhost[.]/) found_fqdn=$i
+            }
+            if (found_short && found_fqdn != "") { print found_fqdn; exit }
+        }
+    ' /etc/hosts 2>/dev/null | head -n1 | xargs || true)"
+
+    if validate_fqdn "$value" && fqdn_matches_short_hostname "$value" "$short_hostname"; then
+        printf '%s' "$value"
+    else
+        printf ''
+    fi
+}
+
+discover_proxmox_fqdn() {
+    local short_hostname="${1:-}"
+    local value=""
+
+    if command -v hostname >/dev/null 2>&1; then
+        value="$(hostname -f 2>/dev/null | head -n1 | xargs || true)"
+    fi
+
+    if validate_fqdn "$value" && fqdn_matches_short_hostname "$value" "$short_hostname"; then
+        printf '%s' "$value"
+        return 0
+    fi
+
+    discover_proxmox_fqdn_from_hosts "$short_hostname"
+}
+
+derive_domain_from_fqdn() {
+    local fqdn="${1:-}"
+
+    if validate_fqdn "$fqdn"; then
+        printf '%s' "${fqdn#*.}"
+    else
+        printf ''
+    fi
+}
+
+detect_proxmox_lan_ip() {
+    local ip=""
+    local candidate=""
+
+    if command -v ip >/dev/null 2>&1; then
+        ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}' | xargs || true)"
+        if is_rfc1918_ipv4 "$ip"; then
+            printf '%s' "$ip"
+            return 0
+        fi
+    fi
+
+    if command -v hostname >/dev/null 2>&1; then
+        while IFS= read -r candidate; do
+            if is_rfc1918_ipv4 "$candidate"; then
+                printf '%s' "$candidate"
+                return 0
+            fi
+        done < <(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || true)
+    fi
+
+    printf ''
+}
+
+discover_proxmox_identity() {
+    PROXMOX_HOSTNAME="$(discover_proxmox_short_hostname)"
+    PROXMOX_FQDN="$(discover_proxmox_fqdn "$PROXMOX_HOSTNAME")"
+    PROXMOX_DOMAIN="$(derive_domain_from_fqdn "$PROXMOX_FQDN")"
+    PROXMOX_LAN_IP="$(detect_proxmox_lan_ip)"
+
+    if [ -n "$PROXMOX_LAN_IP" ]; then
+        PROXMOX_LAN_URL="https://${PROXMOX_LAN_IP}:8006"
+    else
+        PROXMOX_LAN_URL=""
+    fi
+}
+
+show_proxmox_identity_summary() {
+    echo -e "${YW}Proxmox identity:${CL}"
+    echo -e "  ${BL}Hostname:${CL} ${GN}$(proxmox_identity_value_or_not_detected "$PROXMOX_HOSTNAME")${CL}"
+    echo -e "  ${BL}FQDN:${CL} ${GN}$(proxmox_identity_value_or_not_detected "$PROXMOX_FQDN")${CL}"
+    echo -e "  ${BL}Domain:${CL} ${GN}$(proxmox_identity_value_or_not_detected "$PROXMOX_DOMAIN")${CL}"
+    echo -e "  ${BL}LAN URL:${CL} ${GN}$(proxmox_identity_value_or_not_detected "$PROXMOX_LAN_URL")${CL}"
 }
 
 # --- 23A. YES/NO DISPLAY HELPER ---
@@ -1529,6 +1712,7 @@ init_script() {
 
     validate_dependencies
     validate_proxmox
+    discover_proxmox_identity
 }
 
 # =========================================================
@@ -2123,6 +2307,9 @@ show_apply_summary() {
     echo -e "  ${BL}shutdown before apply:${CL} ${ANS}$(vm_shutdown_display)${CL}"
     echo ""
 
+    show_proxmox_identity_summary
+    echo ""
+
     echo -e "${YW}UBUNTU IDENTITY:${CL}"
     echo -e "  ${BL}hostname:${CL} ${ANS}${TARGET_HOSTNAME}${CL}"
     echo -e "  ${BL}user:${CL} ${ANS}${TARGET_USERNAME}${CL}"
@@ -2275,6 +2462,11 @@ Start Installed VM After Cleanup: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
 Verify Log: $VERIFY_LOG
+PROXMOX_HOSTNAME="${PROXMOX_HOSTNAME}"
+PROXMOX_FQDN="${PROXMOX_FQDN}"
+PROXMOX_DOMAIN="${PROXMOX_DOMAIN}"
+PROXMOX_LAN_IP="${PROXMOX_LAN_IP}"
+PROXMOX_LAN_URL="${PROXMOX_LAN_URL}"
 Tools Installed By Script: ${INSTALLED_TOOL_PACKAGES[*]:-none}
 ISO Generation Tools Cleanup Enabled: $(yn_word "$CLEANUP_INSTALLED_TOOLS")
 ISO Generation Tools Cleanup Done: $(yn_word "$ISO_TOOL_CLEANUP_DONE")
@@ -2299,6 +2491,11 @@ Install Duration: ${INSTALL_DURATION_TEXT:-not-recorded}
 Post Install Start VM: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
+Proxmox Hostname: ${PROXMOX_HOSTNAME:-not-detected}
+Proxmox FQDN: ${PROXMOX_FQDN:-not-detected}
+Proxmox Domain: ${PROXMOX_DOMAIN:-not-detected}
+Proxmox LAN IP: ${PROXMOX_LAN_IP:-not-detected}
+Proxmox LAN URL: ${PROXMOX_LAN_URL:-not-detected}
 
 Results:
 EOF
@@ -2368,6 +2565,9 @@ show_final_output() {
     else
         echo -e "  ${BL}SSH:${CL} ${GN}ssh ${TARGET_USERNAME}@<assigned-ip>${CL}"
     fi
+    echo ""
+
+    show_proxmox_identity_summary
     echo ""
 
     echo -e "${YW}INSTALL SUMMARY:${CL}"

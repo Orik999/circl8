@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.6.15"
+SCRIPT_VERSION="v1.6.16"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="email-prompt-order-polish"
+SCRIPT_BUILD="proxmox-marker-prefix-route"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -89,6 +89,14 @@ SCRIPT5_VERIFY_LOG="/var/log/docker-setup-verify.log"
 SCRIPT5_MARKER_STATE="missing"
 SCRIPT5_VERIFY_LOG_STATE="missing"
 SCRIPT5_VERIFY_STATUS="missing"
+SCRIPT35_MARKER="/root/.ubuntu-autoinstall-seed-completed"
+PROXMOX_MARKER_STATE="missing"
+PROXMOX_MARKER_SOURCE="no"
+PROXMOX_MARKER_HOSTNAME=""
+PROXMOX_MARKER_FQDN=""
+PROXMOX_MARKER_DOMAIN=""
+PROXMOX_MARKER_LAN_IP=""
+PROXMOX_MARKER_LAN_URL=""
 
 POSTGRES_PASSWORD=""
 REDIS_PASSWORD=""
@@ -149,8 +157,11 @@ TRAEFIK_TEMPLATE_TMP_DIR=""
 
 TRAEFIK_DASHBOARD_HOST=""
 PROXMOX_ROUTE_ENABLED="n"
+PROXMOX_PREFIX=""
 PROXMOX_HOST=""
 PROXMOX_URL=""
+PROXMOX_URL_SOURCE="not-detected"
+PROXMOX_ROUTE_SOURCE="not-configured"
 
 TEMP_FILES=()
 TEMP_DIRS=()
@@ -1382,6 +1393,88 @@ function validate_domain() {
     return 1
 }
 
+function validate_ipv4() {
+    local ip="$1"
+    local a="" b="" c="" d=""
+
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -r a b c d <<< "$ip"
+
+    for octet in "$a" "$b" "$c" "$d"; do
+        [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+        [ "$octet" -ge 0 ] && [ "$octet" -le 255 ] || return 1
+    done
+
+    return 0
+}
+
+function validate_proxmox_lan_url() {
+    local url="${1:-}"
+    local host=""
+
+    [[ "$url" =~ ^https?://[^/[:space:]]+:8006/?$ ]] || return 1
+    host="${url#http://}"
+    host="${host#https://}"
+    host="${host%%:*}"
+    validate_ipv4 "$host" || return 1
+    return 0
+}
+
+function derive_domain_from_fqdn() {
+    local fqdn="${1:-}"
+
+    if validate_domain "$fqdn"; then
+        printf '%s' "${fqdn#*.}"
+    fi
+}
+
+function script35_marker_key_value() {
+    local key="$1"
+    local value=""
+
+    if root_path_exists "$SCRIPT35_MARKER"; then
+        value="$(root_read_file "$SCRIPT35_MARKER" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+    fi
+
+    printf '%s' "$value"
+}
+
+function load_script35_proxmox_marker() {
+    local derived_domain=""
+
+    if ! root_path_exists "$SCRIPT35_MARKER"; then
+        PROXMOX_MARKER_STATE="missing"
+        PROXMOX_MARKER_SOURCE="no"
+        return 0
+    fi
+
+    PROXMOX_MARKER_STATE="present"
+    PROXMOX_MARKER_HOSTNAME="$(script35_marker_key_value "PROXMOX_HOSTNAME")"
+    PROXMOX_MARKER_FQDN="$(script35_marker_key_value "PROXMOX_FQDN")"
+    PROXMOX_MARKER_DOMAIN="$(script35_marker_key_value "PROXMOX_DOMAIN")"
+    PROXMOX_MARKER_LAN_IP="$(script35_marker_key_value "PROXMOX_LAN_IP")"
+    PROXMOX_MARKER_LAN_URL="$(script35_marker_key_value "PROXMOX_LAN_URL")"
+
+    validate_subdomain_prefix "$PROXMOX_MARKER_HOSTNAME" || PROXMOX_MARKER_HOSTNAME=""
+    validate_domain "$PROXMOX_MARKER_FQDN" || PROXMOX_MARKER_FQDN=""
+    validate_domain "$PROXMOX_MARKER_DOMAIN" || PROXMOX_MARKER_DOMAIN=""
+    validate_ipv4 "$PROXMOX_MARKER_LAN_IP" || PROXMOX_MARKER_LAN_IP=""
+    validate_proxmox_lan_url "$PROXMOX_MARKER_LAN_URL" || PROXMOX_MARKER_LAN_URL=""
+
+    if [ -z "$PROXMOX_MARKER_DOMAIN" ] && [ -n "$PROXMOX_MARKER_FQDN" ]; then
+        derived_domain="$(derive_domain_from_fqdn "$PROXMOX_MARKER_FQDN")"
+        validate_domain "$derived_domain" && PROXMOX_MARKER_DOMAIN="$derived_domain"
+    fi
+
+    if [ -n "$PROXMOX_MARKER_HOSTNAME" ] || [ -n "$PROXMOX_MARKER_FQDN" ] || [ -n "$PROXMOX_MARKER_DOMAIN" ] || [ -n "$PROXMOX_MARKER_LAN_IP" ] || [ -n "$PROXMOX_MARKER_LAN_URL" ]; then
+        PROXMOX_MARKER_SOURCE="yes"
+    else
+        PROXMOX_MARKER_SOURCE="no"
+    fi
+
+    return 0
+}
+
 # --- 33. EMAIL VALIDATION HELPER ---
 # Simple email format validation for Cloudflare email.
 function validate_email() {
@@ -1637,32 +1730,105 @@ function detect_proxmox_internal_url_default() {
     local existing_env_url=""
     local discovered_url=""
 
-    if [ -n "${PROXMOX_URL_DEFAULT:-}" ]; then
+    if [ -n "${PROXMOX_URL_DEFAULT:-}" ] && validate_proxmox_lan_url "$PROXMOX_URL_DEFAULT"; then
+        PROXMOX_URL_SOURCE="environment"
         printf '%s' "$PROXMOX_URL_DEFAULT"
         return 0
     fi
 
-    if [ -n "${PROXMOX_URL:-}" ]; then
+    if [ -n "${PROXMOX_URL:-}" ] && validate_proxmox_lan_url "$PROXMOX_URL"; then
+        PROXMOX_URL_SOURCE="existing"
         printf '%s' "$PROXMOX_URL"
         return 0
     fi
 
     if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
         existing_env_url="$(grep -E '^PROXMOX_URL=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        if [ -n "$existing_env_url" ]; then
+        if [ -n "$existing_env_url" ] && validate_proxmox_lan_url "$existing_env_url"; then
+            PROXMOX_URL_SOURCE="existing-env"
             printf '%s' "$existing_env_url"
             return 0
         fi
     fi
 
+    if [ -n "${PROXMOX_MARKER_LAN_URL:-}" ] && validate_proxmox_lan_url "$PROXMOX_MARKER_LAN_URL"; then
+        PROXMOX_URL_SOURCE="marker"
+        printf '%s' "$PROXMOX_MARKER_LAN_URL"
+        return 0
+    fi
+
+    if [ -n "${PROXMOX_MARKER_LAN_IP:-}" ] && validate_ipv4 "$PROXMOX_MARKER_LAN_IP"; then
+        PROXMOX_URL_SOURCE="marker"
+        printf 'https://%s:8006' "$PROXMOX_MARKER_LAN_IP"
+        return 0
+    fi
+
     discovered_url="$(discover_proxmox_url_from_lan || true)"
-    if [ -n "$discovered_url" ]; then
+    if [ -n "$discovered_url" ] && validate_proxmox_lan_url "$discovered_url"; then
+        PROXMOX_URL_SOURCE="discovered"
         printf '%s' "$discovered_url"
         return 0
     fi
 
+    PROXMOX_URL_SOURCE="not-detected"
     printf ''
     return 0
+}
+
+function proxmox_domain_default() {
+    local existing_domain=""
+    local derived_domain=""
+
+    existing_domain="$(read_existing_env_value "DOMAIN")"
+    if validate_domain "$existing_domain"; then
+        printf '%s' "$existing_domain"
+        return 0
+    fi
+
+    if validate_domain "${PROXMOX_MARKER_DOMAIN:-}"; then
+        printf '%s' "$PROXMOX_MARKER_DOMAIN"
+        return 0
+    fi
+
+    if validate_domain "${PROXMOX_MARKER_FQDN:-}"; then
+        derived_domain="$(derive_domain_from_fqdn "$PROXMOX_MARKER_FQDN")"
+        if validate_domain "$derived_domain"; then
+            printf '%s' "$derived_domain"
+            return 0
+        fi
+    fi
+
+    printf '%s' "$DEFAULT_DOMAIN"
+}
+
+function proxmox_prefix_default() {
+    local existing_host=""
+    local marker_prefix=""
+    local fqdn_prefix=""
+
+    existing_host="$(read_existing_env_value "PROXMOX_HOST")"
+    if [ -n "$existing_host" ]; then
+        marker_prefix="$(prefix_from_hostname "$existing_host" "$DOMAIN_VALUE" "" "Proxmox")"
+        if validate_subdomain_prefix "$marker_prefix"; then
+            printf '%s' "$marker_prefix"
+            return 0
+        fi
+    fi
+
+    if validate_subdomain_prefix "${PROXMOX_MARKER_HOSTNAME:-}"; then
+        printf '%s' "$PROXMOX_MARKER_HOSTNAME"
+        return 0
+    fi
+
+    if [ -n "${PROXMOX_MARKER_FQDN:-}" ]; then
+        fqdn_prefix="$(prefix_from_hostname "$PROXMOX_MARKER_FQDN" "$DOMAIN_VALUE" "" "Proxmox")"
+        if validate_subdomain_prefix "$fqdn_prefix"; then
+            printf '%s' "$fqdn_prefix"
+            return 0
+        fi
+    fi
+
+    printf 'proxmox'
 }
 
 # --- 39B. TRAEFIK TEMPLATE RENDER HELPER ---
@@ -1776,6 +1942,7 @@ function init_script() {
     show_script_version
 
     validate_dependencies
+    load_script35_proxmox_marker
 }
 
 # --- 41. PREVIOUS MARKER CHECK ---
@@ -2408,13 +2575,17 @@ function collect_domain_cloudflare_inputs() {
 
     setup_options_group_header "Domain / Cloudflare"
 
+    local domain_default=""
+
+    domain_default="$(proxmox_domain_default)"
+
     SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
     TZ_VALUE="$(timed_text_input "Enter timezone" "$DEFAULT_TZ")"
     unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
     while true; do
         SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
-        DOMAIN_VALUE="$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")"
+        DOMAIN_VALUE="$(timed_text_input "Enter domain" "$domain_default")"
         unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
         if validate_domain "$DOMAIN_VALUE"; then
@@ -2690,7 +2861,7 @@ function collect_service_hostnames() {
 function collect_traefik_inputs() {
     local default_traefik_host="traefik.${DOMAIN_VALUE}"
     local proxmox_yn=""
-    local default_proxmox_host="proxmox.${DOMAIN_VALUE}"
+    local default_proxmox_prefix=""
     local default_proxmox_url=""
     local detected_primary_ip=""
     local detected_gateway_ip=""
@@ -2715,6 +2886,7 @@ function collect_traefik_inputs() {
     echo -e "${YW}Network / Proxmox:${CL}"
     [ -n "$detected_primary_ip" ] && aligned_value_line "System IPv4" "$detected_primary_ip" "$GN" 17
     [ -n "$detected_gateway_ip" ] && aligned_value_line "Default gateway" "$detected_gateway_ip" "$GN" 17
+    aligned_value_line "Proxmox marker" "$([ "$PROXMOX_MARKER_SOURCE" == "yes" ] && echo detected || echo not detected)" "$GN" 17
     if [ -n "$default_proxmox_url" ]; then
         aligned_value_line "Proxmox LAN URL" "$default_proxmox_url" "$GN" 17
     else
@@ -2726,17 +2898,25 @@ function collect_traefik_inputs() {
 
     if [[ "$proxmox_yn" =~ ^[Yy] ]]; then
         PROXMOX_ROUTE_ENABLED="y"
+        default_proxmox_prefix="$(proxmox_prefix_default)"
+        validate_subdomain_prefix "$default_proxmox_prefix" || default_proxmox_prefix="proxmox"
 
-        while true; do
-            PROXMOX_HOST="$(editable_input_loop "Enter Proxmox hostname" "$default_proxmox_host" "")"
-            [ -z "$PROXMOX_HOST" ] && PROXMOX_HOST="$default_proxmox_host"
+        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
+        PROXMOX_PREFIX="$(prompt_subdomain_prefix "Enter Proxmox subdomain" "$default_proxmox_prefix")"
+        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
+        PROXMOX_HOST="$(hostname_from_prefix "$PROXMOX_PREFIX" "$DOMAIN_VALUE")"
 
-            if validate_domain "$PROXMOX_HOST"; then
-                break
+        if [ "$PROXMOX_PREFIX" == "$default_proxmox_prefix" ]; then
+            if [ -n "$(read_existing_env_value "PROXMOX_HOST")" ]; then
+                PROXMOX_ROUTE_SOURCE="existing-env"
+            elif [ -n "${PROXMOX_MARKER_HOSTNAME:-}" ] || [ -n "${PROXMOX_MARKER_FQDN:-}" ]; then
+                PROXMOX_ROUTE_SOURCE="marker/default"
+            else
+                PROXMOX_ROUTE_SOURCE="default"
             fi
-
-            msg_warn "Invalid Proxmox hostname. Use a bare hostname such as proxmox.${DOMAIN_VALUE}."
-        done
+        else
+            PROXMOX_ROUTE_SOURCE="user"
+        fi
 
         if [ -n "$default_proxmox_url" ]; then
             PROXMOX_URL="$default_proxmox_url"
@@ -2745,21 +2925,25 @@ function collect_traefik_inputs() {
                 PROXMOX_URL="$(editable_input_loop "Enter Proxmox LAN URL" "" "")"
                 PROXMOX_URL="$(printf '%s' "$PROXMOX_URL" | xargs || true)"
 
-                if [[ "$PROXMOX_URL" =~ ^https?://.+ ]]; then
+                if validate_proxmox_lan_url "$PROXMOX_URL"; then
+                    PROXMOX_URL_SOURCE="user"
                     break
                 fi
 
-                msg_warn "Invalid Proxmox LAN URL. Use http:// or https:// URL format."
+                msg_warn "Invalid Proxmox LAN URL. Use http:// or https:// URL format with port 8006."
             done
         fi
 
         msg_ok "Proxmox route enabled"
-        aligned_value_line "Host" "$PROXMOX_HOST" "$ANS" 17
+        aligned_value_line "Host" "$PROXMOX_HOST" "$GN" 17
         aligned_value_line "LAN URL" "$PROXMOX_URL" "$GN" 17
+        aligned_value_line "Source" "$PROXMOX_ROUTE_SOURCE" "$GN" 17
     else
         PROXMOX_ROUTE_ENABLED="n"
+        PROXMOX_PREFIX=""
         PROXMOX_HOST=""
         PROXMOX_URL=""
+        PROXMOX_ROUTE_SOURCE="skipped"
         msg_skip "Proxmox route skipped"
     fi
 
@@ -3210,6 +3394,10 @@ function show_ready_summary_and_confirm() {
     aligned_value_line "Cloudflare auth" "$cloudflare_auth_summary" "$GN" 17
     aligned_value_line "Cloudflare email" "$([ "$CF_EMAIL_REQUIRED" == "yes" ] && echo "${CF_API_EMAIL_VALUE}" || echo "not used")" "$GN" 17
     aligned_value_line "Proxmox route" "$(yes_no_label "$PROXMOX_ROUTE_ENABLED")" "$GN" 17
+    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
+        aligned_value_line "Proxmox host" "$PROXMOX_HOST" "$GN" 17
+        aligned_value_line "Proxmox LAN URL" "$PROXMOX_URL" "$GN" 17
+    fi
     echo ""
     echo -e "${YW}Applications:${CL}"
     aligned_value_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$ANS" 15
@@ -3494,8 +3682,11 @@ CF_API_TOKEN_FILE="${CF_API_TOKEN_FILE}"
 CF_TOKEN_FILE="${CF_API_TOKEN_FILE}"
 CF_TOKEN_SECRET_NAME="cf_token"
 PROXMOX_ROUTE_ENABLED="${PROXMOX_ROUTE_ENABLED}"
+PROXMOX_PREFIX="${PROXMOX_PREFIX}"
 PROXMOX_HOST="${PROXMOX_HOST}"
 PROXMOX_URL="${PROXMOX_URL}"
+PROXMOX_ROUTE_SOURCE="${PROXMOX_ROUTE_SOURCE}"
+PROXMOX_URL_SOURCE="${PROXMOX_URL_SOURCE}"
 TRAEFIK_DASHBOARD_HOST="${TRAEFIK_DASHBOARD_HOST}"
 TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_STATIC_CONFIG_FILE}"
 TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DYNAMIC_CONFIG_FILE}"
@@ -3945,6 +4136,9 @@ Traefik ACME email: $TRAEFIK_ACME_EMAIL_VALUE
 Authentik bootstrap email: $AUTHENTIK_BOOTSTRAP_EMAIL_VALUE
 Traefik dashboard host: $TRAEFIK_DASHBOARD_HOST
 Proxmox route enabled: $PROXMOX_ROUTE_ENABLED
+Proxmox route host: ${PROXMOX_HOST:-}
+Proxmox LAN URL: ${PROXMOX_URL:-}
+Proxmox marker source: $PROXMOX_MARKER_SOURCE
 Htpasswd mode: $HTPASSWD_MODE
 Docker ready: $DOCKER_READY
 Docker Compose ready: $DOCKER_COMPOSE_READY
@@ -3963,6 +4157,9 @@ SCRIPT6_SECRETS_DIR=$DOCKER_SECRETS_DIR
 SCRIPT6_DOMAIN=$DOMAIN_VALUE
 SCRIPT6_ADMIN_UI=$ADMIN_UI
 SCRIPT6_TRAEFIK_CONFIG=$([ -n "$TRAEFIK_STATIC_CONFIG_FILE" ] && [ -n "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] && echo yes || echo no)
+SCRIPT6_PROXMOX_HOST=${PROXMOX_HOST:-}
+SCRIPT6_PROXMOX_LAN_URL=${PROXMOX_URL:-}
+SCRIPT6_PROXMOX_MARKER_SOURCE=$PROXMOX_MARKER_SOURCE
 SCRIPT6_SECRETS_READY=unknown
 SCRIPT6_ENV_FILE_READY=unknown
 SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS
@@ -3987,6 +4184,9 @@ Traefik ACME email: $TRAEFIK_ACME_EMAIL_VALUE
 Authentik bootstrap email: $AUTHENTIK_BOOTSTRAP_EMAIL_VALUE
 Traefik dashboard host: $TRAEFIK_DASHBOARD_HOST
 Proxmox route enabled: $PROXMOX_ROUTE_ENABLED
+Proxmox route host: ${PROXMOX_HOST:-}
+Proxmox LAN URL: ${PROXMOX_URL:-}
+Proxmox marker source: $PROXMOX_MARKER_SOURCE
 Htpasswd mode: $HTPASSWD_MODE
 Docker ready: $DOCKER_READY
 Docker Compose ready: $DOCKER_COMPOSE_READY
@@ -4005,6 +4205,9 @@ SCRIPT6_SECRETS_DIR=$DOCKER_SECRETS_DIR
 SCRIPT6_DOMAIN=$DOMAIN_VALUE
 SCRIPT6_ADMIN_UI=$ADMIN_UI
 SCRIPT6_TRAEFIK_CONFIG=$([ -n "$TRAEFIK_STATIC_CONFIG_FILE" ] && [ -n "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] && echo yes || echo no)
+SCRIPT6_PROXMOX_HOST=${PROXMOX_HOST:-}
+SCRIPT6_PROXMOX_LAN_URL=${PROXMOX_URL:-}
+SCRIPT6_PROXMOX_MARKER_SOURCE=$PROXMOX_MARKER_SOURCE
 SCRIPT6_SECRETS_READY=unknown
 SCRIPT6_ENV_FILE_READY=unknown
 SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS
@@ -4046,6 +4249,9 @@ function update_completion_marker_script6_fields() {
         echo "SCRIPT6_ADMIN_UI=$ADMIN_UI"
         echo "SCRIPT6_TRAEFIK_ACME_EMAIL=$TRAEFIK_ACME_EMAIL_VALUE"
         echo "SCRIPT6_AUTHENTIK_EMAIL=$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
+        echo "SCRIPT6_PROXMOX_HOST=${PROXMOX_HOST:-}"
+        echo "SCRIPT6_PROXMOX_LAN_URL=${PROXMOX_URL:-}"
+        echo "SCRIPT6_PROXMOX_MARKER_SOURCE=$PROXMOX_MARKER_SOURCE"
         echo "SCRIPT6_TRAEFIK_CONFIG=$traefik_config_ready"
         echo "SCRIPT6_SECRETS_READY=$secrets_ready"
         echo "SCRIPT6_ENV_FILE_READY=$env_file_ready"
@@ -4399,6 +4605,7 @@ function show_clean_final_summary() {
     final_line "Proxmox route" "$(yes_no_label "$PROXMOX_ROUTE_ENABLED")"
     final_line "Proxmox host" "${PROXMOX_HOST:-skipped}"
     final_line "Proxmox LAN URL" "${PROXMOX_URL:-skipped}"
+    final_line "Proxmox source" "${PROXMOX_ROUTE_SOURCE:-not configured}"
     final_line "Static config" "$TRAEFIK_STATIC_CONFIG_FILE"
     final_line "Dynamic config" "$TRAEFIK_DYNAMIC_CONFIG_FILE"
     final_line "ACME storage" "${TRAEFIK_ACME_DIR}/acme.json"
