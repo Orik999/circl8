@@ -9,6 +9,7 @@ shopt -s inherit_errexit nullglob
 # --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
 # Central visual theme aligned with Script 1 / Script 4 / Script 5 / Script 6.
 YW="$(printf '\033[33m')"
+YL="$(printf '\033[1;93m')"
 BL="$(printf '\033[36m')"
 RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
@@ -26,13 +27,15 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.48"
+SCRIPT_VERSION="v1.3.57"
 SCRIPT_UPDATED="2026-06-06"
-SCRIPT_BUILD="apply-output-cf-order-polish"
+SCRIPT_BUILD="authentik-empty-path-error-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
 T=15
+SETUP_OPTIONS_LABEL_WIDTH="22"
+APPLY_LABEL_WIDTH="18"
 
 LOG_FILE="/var/log/docker-bootstrap-setup.log"
 RUNTIME_LOG_FILE=""
@@ -225,6 +228,17 @@ SAFE_WRITE_UPDATED_COUNT="0"
 COMPOSE_PROGRESS_ACTIVE="no"
 CURRENT_APPLY_GROUP=""
 PUBLIC_ROUTE_WARNINGS="none"
+APPLY_GROUPS_SHOWN=""
+POSTGRES_PERMISSIONS_STATUS="not-run"
+POSTGRES_DEPENDENTS_STATUS="not-run"
+REDIS_PERMISSIONS_STATUS="not-run"
+COMPOSE_VALIDATION_STATUS="not-run"
+DNS_RECORDS_STATUS="not-run"
+CF_COMPANION_RUNTIME_STATUS="not selected"
+CF_COMPANION_RESCAN_STATUS="not selected"
+DNS_WAIT_STATUS="not-run"
+AUTHENTIK_INTERNAL_STATUS="not-run"
+PUBLIC_ROUTE_SUMMARY_STATUS="not-run"
 
 # =========================================================
 #  OUTPUT / LOGGING FUNCTIONS
@@ -303,41 +317,63 @@ function answer_line() {
     plan_line "$label" "$value" "$ANS" "$width"
 }
 
+function setup_option_line() {
+    local label="$1"
+    local value="$2"
+    local value_color="${3:-$GN}"
+
+    detail_line "$label" "$value" "$value_color" "$SETUP_OPTIONS_LABEL_WIDTH"
+}
+
+function apply_line() {
+    local label="$1"
+    local value="$2"
+    local value_color="${3:-$GN}"
+
+    detail_line "$label" "$value" "$value_color" "$APPLY_LABEL_WIDTH"
+}
+
 function selected_stack_plan_list() {
     local i=""
+    local printed="0"
 
     echo -e "  ${GN}socket-proxy${CL}"
-    if [ "${#SELECTED_STACK_PROJECTS[@]}" -eq 0 ]; then
-        echo -e "  ${GN}none additional${CL}"
+    echo -e "  ${GN}${ADMIN_UI_PROJECT_NAME:-$ADMIN_UI}${CL}"
+
+    for i in "${!SELECTED_STACK_FILES[@]}"; do
+        if is_helper_compose_file "${SELECTED_STACK_FILES[$i]}"; then
+            continue
+        fi
+        echo -e "  ${GN}${SELECTED_STACK_PROJECTS[$i]}${CL}"
+        printed="1"
+    done
+
+    if [ "$printed" == "0" ] && [ "${#SELECTED_STACK_PROJECTS[@]}" -eq 0 ]; then
         return 0
     fi
-
-    for i in "${!SELECTED_STACK_PROJECTS[@]}"; do
-        echo -e "  ${GN}${SELECTED_STACK_PROJECTS[$i]}${CL}"
-    done
 }
 
 function stack_choice_summary() {
-    detail_line "Socket proxy" "selected" "$GN" "23"
-    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$GN" "23"
-    detail_line "Traefik" "$(selected_stack_contains "$TRAEFIK_STACK_FILE" && echo selected || echo not selected)" "$GN" "23"
-    detail_line "Authentik" "$(selected_stack_contains "$AUTHENTIK_STACK_FILE" && echo selected || echo not selected)" "$GN" "23"
-    detail_line "Postiz" "$(yes_no_label "$DEPLOY_POSTIZ")" "$ANS" "23"
-    detail_line "Cloudflare DDNS" "$(yes_no_label "$DEPLOY_CF_DDNS")" "$ANS" "23"
-    detail_line "Cloudflare Companion" "$(yes_no_label "$DEPLOY_CF_COMPANION")" "$ANS" "23"
-    detail_line "VS Code" "$(yes_no_label "$DEPLOY_VSCODE")" "$ANS" "23"
-    detail_line "Filebrowser" "$(yes_no_label "$DEPLOY_FILEBROWSER")" "$ANS" "23"
+    setup_option_line "Socket proxy" "selected"
+    setup_option_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
+    setup_option_line "Traefik" "$(selected_stack_contains "$TRAEFIK_STACK_FILE" && echo selected || echo not selected)"
+    setup_option_line "Authentik" "$(selected_stack_contains "$AUTHENTIK_STACK_FILE" && echo selected || echo not selected)"
+    setup_option_line "Postiz" "$(yes_no_label "$DEPLOY_POSTIZ")" "$ANS"
+    setup_option_line "Cloudflare DDNS" "$(yes_no_label "$DEPLOY_CF_DDNS")" "$ANS"
+    setup_option_line "Cloudflare Companion" "$(yes_no_label "$DEPLOY_CF_COMPANION")" "$ANS"
+    setup_option_line "VS Code" "$(yes_no_label "$DEPLOY_VSCODE")" "$ANS"
+    setup_option_line "Filebrowser" "$(yes_no_label "$DEPLOY_FILEBROWSER")" "$ANS"
 }
 
 function readiness_status_summary() {
-    detail_line "Script 6 handoff" "${SCRIPT6_PREFLIGHT_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_PREFLIGHT_STATUS:-unknown}")"
-    detail_line "Project config" "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS:-unknown}")"
-    detail_line "Secrets" "${SCRIPT6_SECRETS_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_SECRETS_STATUS:-unknown}")"
-    detail_line "Traefik config" "${TRAEFIK_CONFIG_PREFLIGHT_STATUS:-not selected}" "$(status_color_for_value "${TRAEFIK_CONFIG_PREFLIGHT_STATUS:-not selected}")"
-    detail_line "Redis/sysctl" "${SYSCTL_REDIS_OK:-not selected}" "$(status_color_for_value "${SYSCTL_REDIS_OK:-not selected}")"
-    detail_line "Authentik folders" "${AUTHENTIK_FOLDERS_OK:-not selected}" "$(status_color_for_value "${AUTHENTIK_FOLDERS_OK:-not selected}")"
-    detail_line "SMTP env" "${AUTHENTIK_SMTP_ENV_OK:-not selected}" "$(status_color_for_value "${AUTHENTIK_SMTP_ENV_OK:-not selected}")"
-    detail_line "Cloudflare token" "$CF_COMPANION_SECRET_OK" "$(status_color_for_value "$CF_COMPANION_SECRET_OK")"
+    setup_option_line "Script 6 handoff" "${SCRIPT6_PREFLIGHT_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_PREFLIGHT_STATUS:-unknown}")"
+    setup_option_line "Project config" "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS:-unknown}")"
+    setup_option_line "Secrets" "${SCRIPT6_SECRETS_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_SECRETS_STATUS:-unknown}")"
+    setup_option_line "Traefik config" "${TRAEFIK_CONFIG_PREFLIGHT_STATUS:-not selected}" "$(status_color_for_value "${TRAEFIK_CONFIG_PREFLIGHT_STATUS:-not selected}")"
+    setup_option_line "Redis/sysctl" "${SYSCTL_REDIS_OK:-not selected}" "$(status_color_for_value "${SYSCTL_REDIS_OK:-not selected}")"
+    setup_option_line "Authentik folders" "${AUTHENTIK_FOLDERS_OK:-not selected}" "$(status_color_for_value "${AUTHENTIK_FOLDERS_OK:-not selected}")"
+    setup_option_line "SMTP env" "${AUTHENTIK_SMTP_ENV_OK:-not selected}" "$(status_color_for_value "${AUTHENTIK_SMTP_ENV_OK:-not selected}")"
+    setup_option_line "Cloudflare token" "$CF_COMPANION_SECRET_OK" "$(status_color_for_value "$CF_COMPANION_SECRET_OK")"
 }
 
 function all_required_readiness_status() {
@@ -359,23 +395,34 @@ function group_heading() {
 function apply_group_heading() {
     local heading="$1"
 
-    if [ "$CURRENT_APPLY_GROUP" != "$heading" ]; then
-        CURRENT_APPLY_GROUP="$heading"
-        echo ""
-        group_heading "$heading"
-    fi
+    case " ${APPLY_GROUPS_SHOWN} " in
+        *"|${heading}|"*)
+            return 0
+            ;;
+    esac
+
+    APPLY_GROUPS_SHOWN="${APPLY_GROUPS_SHOWN}|${heading}|"
+    CURRENT_APPLY_GROUP="$heading"
+    echo ""
+    group_heading "$heading"
 }
 
-# Runtime labels rendered by detail_line: Status: ready, Created:, Updated:, Unchanged:, Backups:
+# Runtime labels rendered by detail_line for compact compose summaries.
 function compose_progress_summary() {
     local status="$1"
 
-    tty_print "${BFR}"
-    detail_line "Status" "$status" "$GN" "10"
-    detail_line "Created" "$SAFE_WRITE_CREATED_COUNT" "$GN" "10"
-    detail_line "Updated" "$SAFE_WRITE_UPDATED_COUNT" "$GN" "10"
-    detail_line "Unchanged" "$SAFE_WRITE_UNCHANGED_COUNT" "$GN" "10"
-    detail_line "Backups" "$SAFE_WRITE_BACKUP_COUNT" "$GN" "10"
+    if [ "$status" == "ready" ]; then
+        tty_print "${BFR}"
+        apply_line "Status" "ready"
+        apply_line "Stacks" "$(selected_stack_count)"
+        apply_line "Helpers" "$(helper_file_count)"
+        apply_line "Compose files" "$(compose_file_total_count)"
+        apply_line "Backups" "$SAFE_WRITE_BACKUP_COUNT"
+        return 0
+    fi
+
+    # Suppress live per-file progress in terminal. Detailed operations remain in logs.
+    return 0
 }
 
 function stack_list_lines() {
@@ -397,6 +444,19 @@ function display_selected_stack_lines() {
     local names=""
     names="$(selected_stack_names)"
     stack_list_lines "$names"
+}
+
+function stack_status_line() {
+    local label="$1"
+    local value="$2"
+    local color=""
+    color="$(status_color_for_value "$value")"
+    apply_line "$label" "$value" "$color"
+}
+
+function apply_compose_summary() {
+    apply_group_heading "Compose files"
+    compose_progress_summary "ready"
 }
 
 # --- 8. TTY PRINT HELPER ---
@@ -736,6 +796,18 @@ function timed_yes_no_value_only() {
     echo "$answer"
 }
 
+function timed_yes_no_keep_visible() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+    local final_label=""
+
+    answer="$(timed_yes_no_value_only "$prompt" "$default")"
+    final_label="$(yes_no_label "$answer")"
+    tty_println "${CM} ${GN}${prompt} ${ANS}${final_label}${CL}"
+    echo "$answer"
+}
+
 # --- 18. EDITABLE INPUT LOOP HELPER ---
 # Shared editable input system for text prompts.
 function editable_input_loop() {
@@ -953,10 +1025,10 @@ function status_color_for_value() {
     local value="$1"
 
     case "$value" in
-        ready|present|completed|PASS|yes|deployed|downloaded|selected|enabled)
+        ready|present|completed|PASS|yes|deployed|downloaded|selected|enabled|running|configured|confirmed|valid|written|all\ selected\ stacks|complete)
             printf '%s' "$GN"
             ;;
-        PASS_WITH_WARNINGS|warning|warnings|skipped|not-active|not-found|not\ selected|empty\ placeholder|review|needs-review|auth-host-tls-failed|acme-rate-limited)
+        PASS_WITH_WARNINGS|warning|warnings|skipped|not-active|not-found|not\ selected|not\ needed|needs\ review|empty\ placeholder|review|needs-review|needs\ UI\ confirmation|auth-host-tls-failed|acme-rate-limited)
             printf '%s' "$YW"
             ;;
         missing|fail|FAIL|no|not\ ready|not-ready|empty|unknown)
@@ -1068,6 +1140,21 @@ function docker_cmd() {
 # Clears short live/progress messages after the operation completes.
 function clear_transient_line() {
     tty_print "${BFR}"
+}
+
+function clear_terminal_lines() {
+    local count="${1:-0}"
+    local i=""
+
+    if [ "$count" -le 0 ]; then
+        return 0
+    fi
+
+    if [ -w /dev/tty ]; then
+        for i in $(seq 1 "$count"); do
+            printf '\033[1A\r\033[K' > /dev/tty
+        done
+    fi
 }
 
 # --- 28B. DOCKER CREDENTIAL STORE PATH HELPER ---
@@ -1255,14 +1342,14 @@ function run_postiz_temporal_guard_stack() {
 
     if docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "$compose_path" up --abort-on-container-exit --exit-code-from postiz-temporal-guard > "$guard_log" 2>&1; then
         clear_transient_line
-        msg_ok "POSTIZ TEMPORAL GUARD COMPLETED"
+        apply_line "temporal guard" "ready"
         return 0
     fi
 
     if is_dockerhub_rate_limit_error "$guard_log"; then
         if offer_dockerhub_login_and_retry "running Postiz Temporal Guard" "$guard_log" compose --env-file "$ENV_FILE" -p "$project" -f "$compose_path" up --abort-on-container-exit --exit-code-from postiz-temporal-guard; then
             clear_transient_line
-            msg_ok "POSTIZ TEMPORAL GUARD COMPLETED"
+            apply_line "temporal guard" "ready"
             return 0
         fi
     fi
@@ -1575,7 +1662,7 @@ function numeric_menu_input() {
         tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}"
         if [ -r /dev/tty ]; then IFS= read -r answer < /dev/tty || true; else IFS= read -r answer || true; fi
         [ -z "$answer" ] && answer="$default"
-        if [[ "$answer" =~ ^[1-3]$ ]]; then tty_print "${BFR}"; printf '%s' "$answer"; return 0; fi
+        if [[ "$answer" =~ ^[1-3]$ ]]; then clear_terminal_lines 1; printf '%s' "$answer"; return 0; fi
         tty_println "${YW}Enter 1, 2 or 3.${CL}"
     done
 }
@@ -1662,11 +1749,11 @@ function collect_bootstrap_settings() {
     fi
 
     group_heading "Script 6 paths"
-    detail_line "Docker user" "$DOCKER_USER"
-    detail_line "Docker directory" "$DOCKER_DIR"
-    detail_line ".env file" "$ENV_FILE"
-    detail_line "Compose dir" "$COMPOSE_DIR"
-    detail_line "Compose source" "$COMPOSE_SOURCE_LABEL"
+    setup_option_line "Docker user" "$DOCKER_USER"
+    setup_option_line "Docker directory" "$DOCKER_DIR"
+    setup_option_line ".env file" "$ENV_FILE"
+    setup_option_line "Compose dir" "$COMPOSE_DIR"
+    setup_option_line "Compose source" "$COMPOSE_SOURCE_LABEL"
     echo ""
 }
 
@@ -2058,15 +2145,41 @@ function validate_cf_companion_predeploy() {
     root_file_not_empty "$cf_token_path" || msg_error "Cloudflare Companion selected but cf_api_token is missing or empty: ${cf_token_path}. Rerun Script 6 with a token, or skip cf-companion."
 }
 
-function compose_plan_selected_count() {
-    local count=3
+function selected_stack_count() {
+    local count="2"
     local file=""
 
     for file in "${SELECTED_STACK_FILES[@]:-}"; do
+        if is_helper_compose_file "$file"; then
+            continue
+        fi
         count=$((count + 1))
     done
 
     printf '%s' "$count"
+}
+
+function helper_file_count() {
+    local count="1"
+    local file=""
+
+    # The selected Admin UI bootstrap override is a helper compose fragment,
+    # not a deployed stack. Keep it out of selected/deployed/failed stack lists.
+    for file in "${SELECTED_STACK_FILES[@]:-}"; do
+        if is_helper_compose_file "$file"; then
+            count=$((count + 1))
+        fi
+    done
+
+    printf '%s' "$count"
+}
+
+function compose_file_total_count() {
+    printf '%s' "$(( $(selected_stack_count) + $(helper_file_count) ))"
+}
+
+function compose_plan_selected_count() {
+    compose_file_total_count
 }
 
 # --- 33A. REDIS HOST TUNING VERIFICATION ---
@@ -2263,13 +2376,13 @@ function verify_admin_ui_selection() {
     export ADMIN_UI_HOST ADMIN_UI_URL
 
     group_heading "Admin UI"
-    detail_line "Status" "verified" "$GN" "20"
-    detail_line "Selected UI" "$ADMIN_UI_DISPLAY_NAME" "$GN" "20"
-    detail_line "Admin UI host" "$ADMIN_UI_HOST" "$GN" "20"
-    detail_line "Admin UI URL" "$ADMIN_UI_URL" "$GN" "20"
-    detail_line "Stack compose" "$ADMIN_UI_COMPOSE_FILE" "$GN" "20"
-    detail_line "Bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" "$GN" "20"
-    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT" "$GN" "20"
+    setup_option_line "Status" "verified"
+    setup_option_line "Selected UI" "$ADMIN_UI_DISPLAY_NAME"
+    setup_option_line "Admin UI host" "$ADMIN_UI_HOST"
+    setup_option_line "Admin UI URL" "$ADMIN_UI_URL"
+    setup_option_line "Stack compose" "$ADMIN_UI_COMPOSE_FILE"
+    setup_option_line "Bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+    setup_option_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
     echo ""
 }
 
@@ -2321,6 +2434,19 @@ function selected_stack_contains() {
         [ "$item" == "$wanted" ] && return 0
     done
     return 1
+}
+
+function is_helper_compose_file() {
+    local file="$1"
+
+    case "$file" in
+        "$POSTIZ_TEMPORAL_GUARD_STACK_FILE")
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 
@@ -2476,16 +2602,12 @@ function ensure_core_stack_started() {
     fi
 
     if ! docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$container_name"; then
-        msg_info "${description} container not found; deploying stack"
         compose_up_quiet "deploying ${description} before dependency checks" --env-file "$ENV_FILE" -p "$project" -f "$compose_path"
-        msg_ok "${description^^} STACK DEPLOYED"
         return 0
     fi
 
     if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx "$container_name"; then
-        msg_info "${description} container not running; starting stack"
         compose_up_quiet "starting ${description} before dependency checks" --env-file "$ENV_FILE" -p "$project" -f "$compose_path"
-        msg_ok "${description^^} STACK STARTED"
         return 0
     fi
 
@@ -2544,8 +2666,8 @@ function repair_postgres_pgdata_permissions() {
 
     for dep in temporal postiz authentik-server authentik-worker; do
         if printf '%s' "$running_deps" | grep -qx "$dep"; then
-            msg_info "Restarting dependant container: $dep"
             docker_cmd start "$dep" >/dev/null 2>&1 || true
+            POSTGRES_DEPENDENTS_STATUS="restarted"
         fi
     done
 }
@@ -2601,7 +2723,7 @@ find "$pgdata" \( ! -uid "$expected_uid" -o ! -gid "$expected_gid" -o -type d ! 
         clear_transient_line
     fi
 
-    msg_ok "PostgreSQL pgdata permissions ready"
+    POSTGRES_PERMISSIONS_STATUS="ready"
 }
 
 function repair_redis_data_permissions() {
@@ -2644,7 +2766,7 @@ function prepare_postgres_runtime_prereqs() {
         return 0
     fi
 
-    apply_group_heading "Runtime prerequisites"
+    apply_group_heading "Prerequisites"
 
     local pg_root_dir="${DOCKER_DIR}/appdata/postgres"
     local pg_data_dir="${pg_root_dir}/pgdata"
@@ -2661,16 +2783,14 @@ function prepare_postgres_runtime_prereqs() {
     verify_postgres_pgdata_permissions
     run_cmd "setting PostgreSQL init directory readability" chmod 755 "$pg_init_dir"
 
-    msg_ok "POSTGRESQL READY"
-    detail_line "Container" "ready"
-    detail_line "Data dir" "ready"
-    detail_line "Permissions" "ready"
+    apply_line "Secrets" "ready"
+    apply_line "PostgreSQL" "ready"
 
     if docker_cmd inspect postgres --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null | grep -Eq 'restarting|unhealthy|exited|dead'; then
         msg_info "Existing PostgreSQL container is stale/unhealthy; removing container only, keeping data"
         docker_cmd rm -f postgres >/dev/null 2>&1 || true
         clear_transient_line
-        msg_ok "STALE POSTGRESQL CONTAINER REMOVED; DATA KEPT"
+        msg_warn "Stale PostgreSQL container removed; data kept"
     fi
 }
 
@@ -2679,7 +2799,7 @@ function prepare_redis_runtime_prereqs() {
         return 0
     fi
 
-    apply_group_heading "Runtime prerequisites"
+    apply_group_heading "Prerequisites"
 
     local redis_data_dir="${DOCKER_DIR}/appdata/redis"
 
@@ -2687,9 +2807,8 @@ function prepare_redis_runtime_prereqs() {
     repair_redis_data_permissions
     verify_redis_data_permissions
 
-    msg_ok "REDIS READY"
-    detail_line "Data dir" "ready"
-    detail_line "Permissions" "ready"
+    REDIS_PERMISSIONS_STATUS="ready"
+    apply_line "Redis" "ready"
 }
 
 function require_nonempty_env_value() {
@@ -2702,7 +2821,7 @@ function require_nonempty_env_value() {
         msg_error "Required .env value ${key} is missing or empty. Run fixed Script 6 before deployment."
     fi
 
-    msg_ok "REQUIRED SECRET/VALUE PRESENT: ${key}"
+    return 0
 }
 
 function show_postgres_diagnostics() {
@@ -2719,8 +2838,6 @@ function show_postgres_diagnostics() {
 }
 
 function wait_for_postgres_ready() {
-    apply_group_heading "Runtime prerequisites"
-
     local attempt=""
     local max_attempts="150"
     local container_status=""
@@ -2734,8 +2851,6 @@ function wait_for_postgres_ready() {
 
         if [ "$container_status" == "running" ] && [ "$health_status" == "healthy" ]; then
             clear_transient_line
-            msg_ok "POSTGRESQL READY"
-            detail_line "PostgreSQL container" "postgres"
             return 0
         fi
 
@@ -2763,8 +2878,6 @@ function verify_redis_persistence_ready() {
         return 0
     fi
 
-    apply_group_heading "Runtime prerequisites"
-
     local attempt=""
     local max_attempts="60"
     local state=""
@@ -2782,7 +2895,6 @@ function verify_redis_persistence_ready() {
     done
     clear_transient_line
 
-    # Re-apply the proven host path fix immediately before the write test.
     repair_redis_data_permissions
     verify_redis_data_permissions
 
@@ -2797,8 +2909,6 @@ function verify_redis_persistence_ready() {
         bgsave_status="$(printf '%s\n' "$info" | awk -F: '/^rdb_last_bgsave_status:/ {gsub(/\r/,"",$2); print $2; exit}')"
 
         if [ "$bgsave_in_progress" == "0" ] && [ "$bgsave_status" == "ok" ]; then
-            msg_ok "REDIS PERSISTENCE VERIFIED"
-            detail_line "BGSAVE status" "ok"
             return 0
         fi
 
@@ -2814,8 +2924,6 @@ function wait_for_temporal_ready() {
     if ! selected_stack_contains "$TEMPORAL_STACK_FILE"; then
         return 0
     fi
-
-    apply_group_heading "Stack deployment"
 
     local temporal_address="${TEMPORAL_ADDRESS:-temporal:7233}"
     local temporal_namespace="${TEMPORAL_NAMESPACE:-default}"
@@ -2835,9 +2943,6 @@ function wait_for_temporal_ready() {
             temporal --address "$temporal_address" --namespace "$temporal_namespace" \
             operator search-attribute list >/dev/null 2>"$err_file"; then
             clear_transient_line
-            msg_ok "TEMPORAL API READY"
-            detail_line "Temporal address" "$temporal_address"
-            detail_line "Temporal namespace" "$temporal_namespace"
             return 0
         fi
 
@@ -2855,8 +2960,6 @@ function wait_for_temporal_ready() {
     msg_error "Temporal is not reachable on ${temporal_address}. Fix Temporal/PostgreSQL before running Postiz Temporal Guard."
 }
 
-# --- 33I. DOCKGE COMPOSE LAYOUT SYNC ---
-# Dockge expects stacks in ${DOCKER_DIR}/compose/<stack name>/compose.yaml.
 function dockge_stack_dir_name_for_file() {
     local file="$1"
 
@@ -2961,9 +3064,6 @@ function sync_bootstrap_override_for_dockge() {
     safe_install_file_with_backup "$source_path" "$target_file" "Dockge bootstrap override ${stack_dir}"
     run_cmd "setting Dockge bootstrap override ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target_file"
     run_cmd "setting Dockge bootstrap override permissions" chmod 640 "$target_file"
-    if [ "$COMPOSE_PROGRESS_ACTIVE" != "yes" ]; then
-        msg_ok "Dockge bootstrap override ready: ${target_file}"
-    fi
 }
 
 
@@ -3141,13 +3241,18 @@ function reorder_cloudflare_stacks_last() {
 # --- 33I. STACK DEPLOYMENT CHOICE COLLECTION ---
 # Collects all deployment choices before any compose files, networks or containers are changed.
 function collect_stack_deployment_choices() {
+    local question_lines="0"
+
     group_heading "Required"
-    detail_line "Socket proxy" "selected"
-    detail_line "Admin UI" "${ADMIN_UI_DISPLAY_NAME} with temporary bootstrap access"
+    setup_option_line "Socket proxy" "selected"
+    setup_option_line "Admin UI" "${ADMIN_UI_DISPLAY_NAME} with temporary bootstrap access"
     echo ""
 
     group_heading "Stack choices"
-    DEPLOY_POSTIZ="$(timed_yes_no_value_only "Deploy Postiz social media stack?" "y")"
+    question_lines=$((question_lines + 1))
+
+    DEPLOY_POSTIZ="$(timed_yes_no_keep_visible "Deploy Postiz social media stack?" "y")"
+    question_lines=$((question_lines + 1))
     if [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
         add_selected_stack_once "$POSTGRES_STACK_FILE" "PostgreSQL auto-selected because Authentik, Temporal and Postiz need database storage."
         add_selected_stack_once "$REDIS_STACK_FILE" "Redis auto-selected because Authentik and Postiz need cache/session storage."
@@ -3158,28 +3263,34 @@ function collect_stack_deployment_choices() {
         add_selected_stack_once "$POSTIZ_STACK_FILE" "Postiz selected by user."
     fi
 
-    DEPLOY_CF_DDNS="$(timed_yes_no_value_only "Deploy Cloudflare DDNS stack?" "y")"
+    DEPLOY_CF_DDNS="$(timed_yes_no_keep_visible "Deploy Cloudflare DDNS stack?" "y")"
+    question_lines=$((question_lines + 1))
     [[ "$DEPLOY_CF_DDNS" =~ ^[Yy] ]] && add_selected_stack_once "$CF_DDNS_STACK_FILE" "Cloudflare DDNS selected by user."
 
-    DEPLOY_CF_COMPANION="$(timed_yes_no_value_only "Deploy Cloudflare Companion DNS automation stack?" "y")"
+    DEPLOY_CF_COMPANION="$(timed_yes_no_keep_visible "Deploy Cloudflare Companion DNS automation stack?" "y")"
+    question_lines=$((question_lines + 1))
     if [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
         add_traefik_only_dependency "Cloudflare Companion"
         add_selected_stack_once "$CF_COMPANION_STACK_FILE" "Cloudflare Companion selected by user for Traefik label-driven DNS automation."
     fi
 
-    DEPLOY_VSCODE="$(timed_yes_no_value_only "Deploy VS Code server utility stack?" "n")"
+    DEPLOY_VSCODE="$(timed_yes_no_keep_visible "Deploy VS Code server utility stack?" "y")"
+    question_lines=$((question_lines + 1))
     if [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]]; then
         add_authentik_routing_dependencies "VS Code"
         add_selected_stack_once "$VSCODE_STACK_FILE" "VS Code utility stack selected by user."
     fi
 
-    DEPLOY_FILEBROWSER="$(timed_yes_no_value_only "Deploy Filebrowser utility stack?" "n")"
+    DEPLOY_FILEBROWSER="$(timed_yes_no_keep_visible "Deploy Filebrowser utility stack?" "n")"
+    question_lines=$((question_lines + 1))
     if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then
         add_authentik_routing_dependencies "Filebrowser"
         add_selected_stack_once "$FILEBROWSER_STACK_FILE" "Filebrowser utility stack selected by user."
     fi
 
     reorder_cloudflare_stacks_last
+    clear_terminal_lines "$question_lines"
+    group_heading "Stack choices"
     stack_choice_summary
     echo ""
 }
@@ -3282,7 +3393,8 @@ function verify_selected_compose_env_coverage() {
         verify_compose_env_coverage_for_file "$file"
     done
 
-    msg_ok "SELECTED COMPOSE VARIABLE COVERAGE PASSED"
+    COMPOSE_VALIDATION_STATUS="valid"
+    apply_line "Environment" "valid"
 }
 
 function normalize_compose_for_wildcard_tls() {
@@ -3349,8 +3461,8 @@ function download_selected_compose_files() {
 
     SOCKET_PROXY_STACK_DOWNLOADED="yes"
     ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
-    compose_progress_summary "ready"
     COMPOSE_PROGRESS_ACTIVE="no"
+    apply_compose_summary
 }
 
 function validate_selected_compose_files() {
@@ -3361,23 +3473,20 @@ function validate_selected_compose_files() {
 
     export DOCKER_DIR COMPOSE_DIR ENV_FILE PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND ADMIN_UI_HOST ADMIN_UI_URL AUTHENTIK_ROUTE_HOST AUTHENTIK_EXTERNAL_URL VSCODE_HOST FILEBROWSER_HOST
 
-    msg_info "Validating Socket Proxy stack compose"
+    msg_info "Validating selected compose files"
     run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "$(compose_path_for_stack_file "$SOCKET_PROXY_STACK_FILE")" config -q
-    msg_ok "SOCKET PROXY STACK COMPOSE VALID"
-
-    msg_info "Validating ${ADMIN_UI_DISPLAY_NAME} stack compose with bootstrap override"
     run_docker_cmd "validating ${ADMIN_UI_DISPLAY_NAME} stack compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$(compose_path_for_stack_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")" -f "$(bootstrap_override_path_for_primary_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")" config -q
-    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} STACK COMPOSE VALID"
 
     for i in "${!SELECTED_STACK_FILES[@]}"; do
         file="${SELECTED_STACK_FILES[$i]}"
         project="${SELECTED_STACK_PROJECTS[$i]}"
-        msg_info "Validating ${file}"
         run_docker_cmd "validating ${file}" compose --env-file "$ENV_FILE" -p "$project" -f "$(compose_path_for_stack_file "$file")" config -q
-        msg_ok "compose valid: ${project}"
     done
 
+    clear_transient_line
     ADMIN_UI_VALIDATED="yes"
+    COMPOSE_VALIDATION_STATUS="valid"
+    apply_line "Stacks" "valid"
 }
 
 function deploy_selected_stacks() {
@@ -3387,14 +3496,6 @@ function deploy_selected_stacks() {
     local project=""
     local service=""
     local compose_path=""
-
-    group_heading "Deployment order"
-    detail_line "1" "socket-proxy"
-    detail_line "2" "$ADMIN_UI_PROJECT_NAME"
-    for i in "${!SELECTED_STACK_FILES[@]}"; do
-        detail_line "$((i + 3))" "${SELECTED_STACK_PROJECTS[$i]}"
-    done
-    echo ""
 
     deploy_socket_proxy
     deploy_admin_ui
@@ -3411,7 +3512,7 @@ function deploy_selected_stacks() {
         fi
 
         compose_up_quiet "deploying ${project}" --env-file "$ENV_FILE" -p "$project" -f "$compose_path"
-        msg_ok "${project} deployed"
+        apply_line "$project" "deployed"
 
         if [ -n "$service" ] && ! docker_cmd ps --format '{{.Names}}' | grep -qx "$service"; then
             msg_warn "Container ${service} not confirmed yet. It may still be starting; check docker logs if needed."
@@ -3431,16 +3532,40 @@ function deploy_selected_stacks() {
     done
 }
 
+function cf_companion_recent_dns_activity() {
+    local log_file="$1"
+
+    grep -Eiq 'Found Service ID:.*Hostname|Created new record:|Existing record:|Updated record:' "$log_file"
+}
+
 function verify_cf_companion_runtime_if_selected() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "DNS / CF"
 
     if ! [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
+        CF_COMPANION_RUNTIME_STATUS="not selected"
+        CF_COMPANION_RESCAN_STATUS="skipped"
+        DNS_RECORDS_STATUS="not selected"
+        DNS_WAIT_STATUS="skipped"
         msg_skip "CF-COMPANION RUNTIME CHECK SKIPPED; STACK NOT SELECTED"
+        apply_line "CF DDNS" "$(yes_no_label "$DEPLOY_CF_DDNS")" "$(status_color_for_value "$(yes_no_label "$DEPLOY_CF_DDNS")")"
+        apply_line "CF Companion" "$CF_COMPANION_RUNTIME_STATUS" "$(status_color_for_value "$CF_COMPANION_RUNTIME_STATUS")"
+        apply_line "DNS records" "$DNS_RECORDS_STATUS" "$(status_color_for_value "$DNS_RECORDS_STATUS")"
+        apply_line "Rescan" "$CF_COMPANION_RESCAN_STATUS" "$YW"
+        apply_line "DNS wait" "$DNS_WAIT_STATUS" "$YW"
         return 0
     fi
 
     if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'cf-companion'; then
+        CF_COMPANION_RUNTIME_STATUS="not ready"
+        CF_COMPANION_RESCAN_STATUS="skipped"
+        DNS_RECORDS_STATUS="needs review"
+        DNS_WAIT_STATUS="skipped"
         msg_warn "cf-companion container is not running yet. Check logs after startup."
+        apply_line "CF DDNS" "$(yes_no_label "$DEPLOY_CF_DDNS")" "$(status_color_for_value "$(yes_no_label "$DEPLOY_CF_DDNS")")"
+        apply_line "CF Companion" "$CF_COMPANION_RUNTIME_STATUS" "$YW"
+        apply_line "DNS records" "$DNS_RECORDS_STATUS" "$YW"
+        apply_line "Rescan" "$CF_COMPANION_RESCAN_STATUS" "$YW"
+        apply_line "DNS wait" "$DNS_WAIT_STATUS" "$YW"
         return 0
     fi
 
@@ -3448,57 +3573,68 @@ function verify_cf_companion_runtime_if_selected() {
         msg_error "Cloudflare Companion logs show authentication/token errors. Verify cf_token secret and API token permissions."
     fi
 
-    msg_ok "cf-companion logs show no obvious auth failure"
+    CF_COMPANION_RUNTIME_STATUS="running"
     refresh_cf_companion_dns_records
     return 0
 }
 
 function refresh_cf_companion_dns_records() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "DNS / CF"
+
+    local cf_log_file=""
+    local rescan_needed="yes"
+    local warn_lines=""
 
     if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cf-companion'; then
-        msg_warn "cf-companion not present; skipping DNS rescan"
+        CF_COMPANION_RUNTIME_STATUS="not ready"
+        CF_COMPANION_RESCAN_STATUS="skipped"
+        DNS_RECORDS_STATUS="needs review"
+        DNS_WAIT_STATUS="skipped"
+        apply_line "CF DDNS" "$(yes_no_label "$DEPLOY_CF_DDNS")" "$(status_color_for_value "$(yes_no_label "$DEPLOY_CF_DDNS")")"
+        apply_line "CF Companion" "$CF_COMPANION_RUNTIME_STATUS" "$YW"
+        apply_line "DNS records" "$DNS_RECORDS_STATUS" "$YW"
+        apply_line "Rescan" "$CF_COMPANION_RESCAN_STATUS" "$YW"
+        apply_line "DNS wait" "$DNS_WAIT_STATUS" "$YW"
         return 0
     fi
-
-    group_heading "DNS readiness"
-    msg_info "Restarting cf-companion for DNS rescan"
-    docker_cmd restart cf-companion >/dev/null 2>&1 || true
-    sleep 12
-    clear_transient_line
-
-    local cf_log_file
-    local found_records=""
-    local created_records=""
-    local existing_records=""
-    local updated_records=""
-    local warn_lines=""
 
     cf_log_file="$(mktemp)"
     TEMP_FILES+=("$cf_log_file")
     docker_cmd logs --tail=220 cf-companion 2>/dev/null >"$cf_log_file" || true
 
-    found_records=$(grep -Ei 'Found Service ID:.*Hostname' "$cf_log_file" | sed -E 's/.*Hostname[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
-    created_records=$(grep -Ei 'Created new record:' "$cf_log_file" | sed -E 's/.*Created new record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
-    existing_records=$(grep -Ei 'Existing record:' "$cf_log_file" | sed -E 's/.*Existing record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
-    updated_records=$(grep -Ei 'Updated record:' "$cf_log_file" | sed -E 's/.*Updated record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
+    if cf_companion_recent_dns_activity "$cf_log_file"; then
+        rescan_needed="no"
+        DNS_RECORDS_STATUS="ready"
+        CF_COMPANION_RESCAN_STATUS="skipped"
+    fi
+
+    if [ "$rescan_needed" == "yes" ]; then
+        msg_info "Rescanning cf-companion DNS records"
+        docker_cmd restart cf-companion >/dev/null 2>&1 || true
+        sleep 12
+        clear_transient_line
+        docker_cmd logs --tail=220 cf-companion 2>/dev/null >"$cf_log_file" || true
+        CF_COMPANION_RESCAN_STATUS="completed"
+        if cf_companion_recent_dns_activity "$cf_log_file"; then
+            DNS_RECORDS_STATUS="ready"
+        else
+            DNS_RECORDS_STATUS="needs review"
+        fi
+    fi
+
     warn_lines=$(grep -Ei 'error|denied|unauthorized|authentication failed|invalid token|missing token|permission denied' "$cf_log_file" | awk '{ if(length($0) > 140) print substr($0,1,137) "..."; else print }' | sort -u | head -n20 || true)
-
-    detail_line "cf-companion" "rescan complete"
-    if [ -n "$found_records" ] || [ -n "$created_records" ] || [ -n "$existing_records" ] || [ -n "$updated_records" ]; then
-        detail_line "DNS records" "discovery/actions found"
-    else
-        detail_line "DNS records" "no recent action lines" "$YW"
-    fi
-
-    if [ -n "$warn_lines" ]; then
-        msg_warn "cf-companion recent logs contain warnings/errors; review logs after deployment."
-    fi
+    [ -n "$warn_lines" ] && DNS_RECORDS_STATUS="needs review"
 
     msg_info "Waiting briefly before public route checks"
     sleep 20
     clear_transient_line
-    detail_line "DNS wait" "complete"
+    DNS_WAIT_STATUS="complete"
+
+    apply_line "CF DDNS" "$(yes_no_label "$DEPLOY_CF_DDNS")" "$(status_color_for_value "$(yes_no_label "$DEPLOY_CF_DDNS")")"
+    apply_line "DNS records" "$DNS_RECORDS_STATUS" "$(status_color_for_value "$DNS_RECORDS_STATUS")"
+    apply_line "CF Companion" "$CF_COMPANION_RUNTIME_STATUS"
+    apply_line "Rescan" "$CF_COMPANION_RESCAN_STATUS" "$(status_color_for_value "$CF_COMPANION_RESCAN_STATUS")"
+    apply_line "DNS wait" "$DNS_WAIT_STATUS"
     rm -f "$cf_log_file"
 }
 
@@ -3549,7 +3685,7 @@ function json_escape() {
 }
 
 function verify_authentik_dependencies_for_deploy() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "Protection / Authentik"
 
     local required="no"
     local check_output=""
@@ -3608,14 +3744,13 @@ PY
         msg_error "authentik-server cannot reach PostgreSQL/Redis. Fix dependency DNS/connectivity before API token setup."
     }
 
-    echo "$check_output"
     AUTHENTIK_DEPENDENCIES_OK="yes"
-    msg_ok "AUTHENTIK DEPENDENCIES VERIFIED"
+    apply_line "Internal API" "ready"
 }
 
 
 function wait_for_authentik_internal_api_ready() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "Protection / Authentik"
 
     local attempt=""
     local max_attempts="120"
@@ -3647,8 +3782,7 @@ AK_READY_PY
         # 200 can happen if the endpoint becomes accessible in a future Authentik version.
         if [[ "$http_code" =~ ^(200|401|403)$ ]]; then
             clear_transient_line
-            msg_ok "AUTHENTIK INTERNAL API READY"
-            detail_line "Internal API unauthenticated status" "$http_code"
+            AUTHENTIK_INTERNAL_STATUS="ready"
             return 0
         fi
 
@@ -3679,7 +3813,6 @@ function collect_authentik_api_token_for_deploy() {
     local env_bootstrap_token=""
 
     if [ -n "${AUTHENTIK_API_TOKEN:-}" ]; then
-        msg_ok "AUTHENTIK API TOKEN FOUND IN ENVIRONMENT"
         return 0
     fi
 
@@ -3689,14 +3822,12 @@ function collect_authentik_api_token_for_deploy() {
     if [ -n "$env_api_token" ]; then
         AUTHENTIK_API_TOKEN="$env_api_token"
         export AUTHENTIK_API_TOKEN
-        msg_ok "AUTHENTIK API TOKEN LOADED FROM .ENV"
         return 0
     fi
 
     if [ -n "$env_bootstrap_token" ]; then
         AUTHENTIK_API_TOKEN="$env_bootstrap_token"
         export AUTHENTIK_API_TOKEN
-        msg_ok "AUTHENTIK API TOKEN LOADED FROM AUTHENTIK_BOOTSTRAP_TOKEN"
         return 0
     fi
 
@@ -3712,7 +3843,6 @@ function collect_authentik_api_token_for_deploy() {
         msg_warn "AUTHENTIK API TOKEN NOT PROVIDED; PROTECTED ROUTE AUTOMATION SKIPPED"
     else
         export AUTHENTIK_API_TOKEN
-        msg_ok "AUTHENTIK API TOKEN CAPTURED WITHOUT LOGGING"
     fi
 }
 
@@ -3743,8 +3873,7 @@ try:
     with urllib.request.urlopen(req, timeout=30) as response:
         sys.stdout.write(response.read().decode(errors="replace"))
 except urllib.error.HTTPError as exc:
-    sys.stderr.write(f"HTTP {exc.code} {exc.reason} while calling Authentik internal API\n")
-    sys.stderr.write(exc.read().decode(errors="replace")[:4000])
+    sys.stderr.write(f"Authentik internal API HTTP {exc.code}\n")
     sys.exit(22)
 except Exception as exc:
     sys.stderr.write(f"Authentik internal API request failed: {exc}\n")
@@ -3760,8 +3889,7 @@ try:
     with urllib.request.urlopen(req, timeout=30) as response:
         sys.stdout.write(response.read().decode(errors="replace"))
 except urllib.error.HTTPError as exc:
-    sys.stderr.write(f"HTTP {exc.code} {exc.reason} while calling Authentik internal API\n")
-    sys.stderr.write(exc.read().decode(errors="replace")[:4000])
+    sys.stderr.write(f"Authentik internal API HTTP {exc.code}\n")
     sys.exit(22)
 except Exception as exc:
     sys.stderr.write(f"Authentik internal API request failed: {exc}\n")
@@ -3776,7 +3904,7 @@ except Exception as exc:
 }
 
 function verify_authentik_api_for_deploy() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "Protection / Authentik"
 
     local api_response=""
     local api_error=""
@@ -3792,15 +3920,11 @@ function verify_authentik_api_for_deploy() {
 
     if api_response="$(ak_api GET "/core/users/me/" 2>"$api_error")" && printf '%s' "$api_response" | json_is_valid_object_or_array >/dev/null 2>&1; then
         AUTHENTIK_API_OK="yes"
-        msg_ok "AUTHENTIK INTERNAL API ACCESS CONFIRMED"
+        apply_line "API access" "confirmed"
     else
         AUTHENTIK_API_OK="failed"
         AUTHENTIK_API_TOKEN=""
         msg_warn "Authentik API token/internal API check failed. Protected route automation skipped."
-        if [ -s "$api_error" ]; then
-            echo -e "${YW}Authentik API diagnostic:${CL}"
-            head -n 20 "$api_error" || true
-        fi
     fi
 }
 
@@ -3867,9 +3991,11 @@ function authentik_verify_outpost_patch() {
     local expected_auth_host="$3"
     local expected_browser_host="$4"
     local response_file=""
+    local api_error_file=""
 
     response_file="$(mktemp)"
-    TEMP_FILES+=("$response_file")
+    api_error_file="$(mktemp)"
+    TEMP_FILES+=("$response_file" "$api_error_file")
 
     if ! ak_api GET "/outposts/instances/${outpost_pk}/" > "$response_file" 2>/dev/null; then
         msg_warn "Could not re-read embedded outpost after patch."
@@ -3903,18 +4029,14 @@ function restart_authentik_after_outpost_update() {
         return 0
     fi
 
-    msg_info "Restarting Authentik to reload embedded outpost config"
+    msg_info "Reloading Authentik embedded outpost config"
     docker_cmd restart authentik-server authentik-worker >/dev/null
-    clear_transient_line
-    msg_ok "AUTHENTIK RESTARTED AFTER OUTPOST CONFIG UPDATE"
-
-    msg_info "Waiting for Authentik API and embedded outpost to reload"
     sleep 45
     clear_transient_line
-    msg_ok "AUTHENTIK OUTPOST RELOAD WAIT COMPLETE"
 }
+
 function create_or_update_authentik_forward_auth_for_deploy() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "Protection / Authentik"
 
     if [ "$AUTHENTIK_API_OK" != "yes" ]; then
         AUTHENTIK_PROVIDER_OK="skipped-no-api"
@@ -3931,6 +4053,7 @@ function create_or_update_authentik_forward_auth_for_deploy() {
     local outpost_pk=""
     local payload=""
     local response_file=""
+    local api_error_file=""
     local auth_host_json=""
     local auth_host_value=""
     local auth_host_browser_value=""
@@ -3938,7 +4061,8 @@ function create_or_update_authentik_forward_auth_for_deploy() {
     local outpost_response_file=""
 
     response_file="$(mktemp)"
-    TEMP_FILES+=("$response_file")
+    api_error_file="$(mktemp)"
+    TEMP_FILES+=("$response_file" "$api_error_file")
 
     authorization_flow="$(authentik_get_flow_pk "default-provider-authorization-implicit-consent")"
     [ -n "$authorization_flow" ] || authorization_flow="$(authentik_get_flow_pk "default-provider-authorization-explicit-consent")"
@@ -3973,10 +4097,10 @@ JSON
 )"
 
     if [ -z "$provider_pk" ]; then
-        ak_api POST "/providers/proxy/" "$payload" > "$response_file" || true
+        ak_api POST "/providers/proxy/" "$payload" > "$response_file" 2> "$api_error_file" || true
         provider_pk="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(data.get("pk", ""))' "$response_file" 2>/dev/null || true)"
     else
-        ak_api PATCH "/providers/proxy/${provider_pk}/" "$payload" > "$response_file" || true
+        ak_api PATCH "/providers/proxy/${provider_pk}/" "$payload" > "$response_file" 2> "$api_error_file" || true
     fi
 
     if [ -z "$provider_pk" ]; then
@@ -3985,7 +4109,6 @@ JSON
         return 0
     fi
     AUTHENTIK_PROVIDER_OK="yes"
-    msg_ok "TRAEFIK FORWARD-AUTH PROVIDER READY"
 
     app_pk="$(authentik_find_application_pk)"
     payload="$(cat <<JSON
@@ -3999,10 +4122,10 @@ JSON
 )"
 
     if [ -z "$app_pk" ]; then
-        ak_api POST "/core/applications/" "$payload" > "$response_file" || true
+        ak_api POST "/core/applications/" "$payload" > "$response_file" 2> "$api_error_file" || true
         app_pk="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(data.get("pk", ""))' "$response_file" 2>/dev/null || true)"
     else
-        ak_api PATCH "/core/applications/${app_pk}/" "$payload" > "$response_file" || true
+        ak_api PATCH "/core/applications/${app_pk}/" "$payload" > "$response_file" 2> "$api_error_file" || true
     fi
 
     if [ -z "$app_pk" ]; then
@@ -4011,7 +4134,6 @@ JSON
         return 0
     fi
     AUTHENTIK_APPLICATION_OK="yes"
-    msg_ok "TRAEFIK FORWARD-AUTH APPLICATION READY"
 
     outpost_pk="$(authentik_find_embedded_outpost_pk)"
     if [ -z "$outpost_pk" ]; then
@@ -4034,10 +4156,8 @@ JSON
     if ak_api PATCH "/outposts/instances/${outpost_pk}/" "$payload" >/dev/null 2>&1; then
         if authentik_verify_outpost_patch "$outpost_pk" "$provider_pk" "$auth_host_value" "$auth_host_browser_value" >/dev/null 2>&1; then
             AUTHENTIK_OUTPOST_ATTACH_OK="yes"
-            msg_ok "PROVIDER AND AUTHENTIK HOST CONFIG ATTACHED TO EXISTING EMBEDDED OUTPOST"
-            detail_line "Outpost" "$outpost_pk"
-            detail_line "authentik_host" "$auth_host_value"
-            detail_line "authentik_host_browser" "$auth_host_browser_value"
+            apply_line "Forward auth" "ready"
+            apply_line "Outpost" "configured"
         else
             AUTHENTIK_OUTPOST_ATTACH_OK="verify-failed"
             msg_warn "Outpost patch completed but verification failed. Re-check embedded outpost config in Authentik."
@@ -4049,7 +4169,7 @@ JSON
 }
 
 function verify_authentik_outpost_route_for_deploy() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "Protection / Authentik"
 
     local test_host="$ADMIN_UI_HOST"
     local test_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
@@ -4058,13 +4178,11 @@ function verify_authentik_outpost_route_for_deploy() {
     http_code="$(curl -ksS -o /dev/null -w '%{http_code}' "$test_url" || true)"
     if [[ "$http_code" =~ ^(302|303|307)$ ]]; then
         AUTHENTIK_OUTPOST_302_OK="yes"
-        msg_ok "Authentik outpost route redirected as expected"
     else
         AUTHENTIK_OUTPOST_302_OK="warning"
-        msg_warn "Authentik outpost route returned HTTP ${http_code:-none}; protected routes may need UI confirmation."
     fi
 
-    detail_line "Outpost HTTP" "${http_code:-none}" "$(status_color_for_value "$AUTHENTIK_OUTPOST_302_OK")"
+    apply_line "Protected routes" "$([ "$AUTHENTIK_OUTPOST_302_OK" == "yes" ] && echo ready || echo needs\ UI\ confirmation)" "$(status_color_for_value "$AUTHENTIK_OUTPOST_302_OK")"
 }
 
 function detect_recent_acme_rate_limit() {
@@ -4076,8 +4194,6 @@ function detect_recent_acme_rate_limit() {
 }
 
 function verify_authentik_public_host_route() {
-    apply_group_heading "Post-deploy verification"
-
     local auth_host="$AUTHENTIK_ROUTE_HOST"
     local public_code=""
     local local_code=""
@@ -4086,21 +4202,18 @@ function verify_authentik_public_host_route() {
     headers_file="$(mktemp)"
     TEMP_FILES+=("$headers_file")
 
-    public_code="$(curl -ksS -D "$headers_file" -o /dev/null -w '%{http_code}' "https://${auth_host}/" || true)"
-    local_code="$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "${auth_host}:443:127.0.0.1" "https://${auth_host}/" || true)"
+    public_code="$(curl -ksS -D "$headers_file" -o /dev/null -w '%{http_code}' "https://${auth_host}/" 2>/dev/null || true)"
+    local_code="$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "${auth_host}:443:127.0.0.1" "https://${auth_host}/" 2>/dev/null || true)"
 
     case "$public_code" in
         200|301|302|303|307|401|403)
             AUTHENTIK_HOST_ROUTE_OK="yes"
-            msg_ok "Authentik public host responded: ${auth_host} HTTP ${public_code}"
             ;;
         525)
             if detect_recent_acme_rate_limit; then
                 AUTHENTIK_HOST_ROUTE_OK="acme-rate-limited"
-                msg_warn "Authentik public host HTTP 525 with recent ACME rate-limit evidence; treating as bootstrap warning."
             else
                 AUTHENTIK_HOST_ROUTE_OK="auth-host-tls-failed"
-                msg_warn "Authentik public host HTTP 525 from Cloudflare; internal deployment can still be healthy."
             fi
             PUBLIC_ROUTE_WARNINGS="warnings"
             ;;
@@ -4108,38 +4221,32 @@ function verify_authentik_public_host_route() {
             if [ "$local_code" == "000" ] || [ -z "$local_code" ]; then
                 if detect_recent_acme_rate_limit; then
                     AUTHENTIK_HOST_ROUTE_OK="acme-rate-limited"
-                    msg_warn "Authentik local SNI check failed with ACME rate-limit evidence; treating as bootstrap warning."
                 else
                     AUTHENTIK_HOST_ROUTE_OK="auth-host-tls-failed"
-                    msg_warn "Authentik local SNI/TLS check is not ready yet; treating as bootstrap warning."
                 fi
             else
                 AUTHENTIK_HOST_ROUTE_OK="needs-review"
-                msg_warn "Authentik public host needs review: public HTTP ${public_code:-none}, local HTTP ${local_code:-none}."
             fi
             PUBLIC_ROUTE_WARNINGS="warnings"
             ;;
     esac
 
-    detail_line "Authentik public" "HTTP ${public_code:-none}" "$(status_color_for_value "$AUTHENTIK_HOST_ROUTE_OK")"
-    detail_line "Authentik local" "HTTP ${local_code:-none}" "$(status_color_for_value "$AUTHENTIK_HOST_ROUTE_OK")"
     return 0
 }
 
 function verify_selected_protected_routes() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "Route checks"
 
     local host=""
     local code=""
     local headers_file=""
-    local powered_by=""
     local warnings="0"
     local hosts=()
+    local reason="ready"
 
     headers_file="$(mktemp)"
     TEMP_FILES+=("$headers_file")
 
-    group_heading "Public route verification"
     verify_authentik_public_host_route
 
     hosts+=("$ADMIN_UI_HOST")
@@ -4148,39 +4255,32 @@ function verify_selected_protected_routes() {
 
     for host in "${hosts[@]}"; do
         : > "$headers_file"
-        code="$(curl -ksS -D "$headers_file" -o /dev/null -w '%{http_code}' "https://${host}/" || true)"
-        powered_by="$(awk 'BEGIN{IGNORECASE=1} /^x-powered-by:/ {print $0}' "$headers_file" | tr -d '\r' || true)"
+        code="$(curl -ksS -D "$headers_file" -o /dev/null -w '%{http_code}' "https://${host}/" 2>/dev/null || true)"
         case "$code" in
-            200|302|303|307|401|403)
-                detail_line "$host" "HTTP ${code}" "$GN" "24"
-                ;;
-            404)
-                warnings=$((warnings + 1))
-                PUBLIC_ROUTE_WARNINGS="warnings"
-                if printf '%s' "$powered_by" | grep -qi 'authentik'; then
-                    detail_line "$host" "HTTP 404 from Authentik; check provider/outpost" "$YW" "24"
-                else
-                    detail_line "$host" "HTTP 404; route needs review" "$YW" "24"
-                fi
-                ;;
-            525)
-                warnings=$((warnings + 1))
-                PUBLIC_ROUTE_WARNINGS="warnings"
-                detail_line "$host" "HTTP 525 from Cloudflare; check SSL/origin cert" "$YW" "24"
-                ;;
-            *)
-                warnings=$((warnings + 1))
-                PUBLIC_ROUTE_WARNINGS="warnings"
-                detail_line "$host" "HTTP ${code:-none}; needs review" "$YW" "24"
-                ;;
+            200|302|303|307|401|403) ;;
+            *) warnings=$((warnings + 1)); PUBLIC_ROUTE_WARNINGS="warnings" ;;
         esac
     done
 
-    if [ "$warnings" -eq 0 ] && [ "$AUTHENTIK_HOST_ROUTE_OK" == "yes" ]; then
+    if [ "$AUTHENTIK_HOST_ROUTE_OK" != "yes" ]; then
+        warnings=$((warnings + 1))
+        case "$AUTHENTIK_HOST_ROUTE_OK" in
+            auth-host-tls-failed) reason="Cloudflare SSL/origin certificate" ;;
+            acme-rate-limited) reason="ACME rate limit / certificate issuance" ;;
+            *) reason="public Authentik route needs review" ;;
+        esac
+    fi
+
+    if [ "$warnings" -eq 0 ]; then
         PROTECTED_ROUTE_VERIFY_OK="yes"
+        PUBLIC_ROUTE_SUMMARY_STATUS="ready"
     else
         PROTECTED_ROUTE_VERIFY_OK="needs-review"
+        PUBLIC_ROUTE_SUMMARY_STATUS="needs review"
     fi
+
+    apply_line "Public routes" "$PUBLIC_ROUTE_SUMMARY_STATUS" "$(status_color_for_value "$PROTECTED_ROUTE_VERIFY_OK")"
+    [ "$PUBLIC_ROUTE_SUMMARY_STATUS" != "ready" ] && apply_line "Reason" "$reason" "$YW"
 }
 
 function configure_authentik_and_verify_routes() {
@@ -4206,27 +4306,15 @@ function configure_authentik_and_verify_routes() {
 function create_shared_networks() {
     apply_group_heading "Networks"
 
-    msg_info "Creating socket_proxy network"
     docker_cmd network create --driver bridge --subnet "$SOCKET_PROXY_SUBNET_EXPECTED" socket_proxy >/dev/null 2>&1 || true
-    msg_ok "SOCKET_PROXY NETWORK READY"
-
-    msg_info "Creating t2_proxy network"
     docker_cmd network create --driver bridge --subnet "$T2_PROXY_SUBNET_EXPECTED" t2_proxy >/dev/null 2>&1 || true
-    msg_ok "T2_PROXY NETWORK READY"
-
-    msg_info "Creating database network"
     docker_cmd network create --driver bridge database >/dev/null 2>&1 || true
-    msg_ok "DATABASE NETWORK READY"
 
     NETWORKS_CREATED="yes"
 }
 
-# --- 35. NETWORK VERIFICATION ---
-# Verifies network existence and expected subnets before compose deployment.
 function verify_shared_networks() {
     apply_group_heading "Networks"
-
-    msg_info "Inspecting Docker networks"
 
     SOCKET_PROXY_SUBNET_ACTUAL="$(docker_cmd network inspect socket_proxy --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"
     T2_PROXY_SUBNET_ACTUAL="$(docker_cmd network inspect t2_proxy --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"
@@ -4246,70 +4334,54 @@ function verify_shared_networks() {
 
     NETWORKS_VERIFIED="yes"
 
-    msg_ok "DOCKER NETWORKS VERIFIED"
-    detail_line "socket_proxy" "$SOCKET_PROXY_SUBNET_ACTUAL"
-    detail_line "t2_proxy" "$T2_PROXY_SUBNET_ACTUAL"
-    detail_line "database" "$DATABASE_NETWORK_NAME"
+    apply_line "socket_proxy" "$SOCKET_PROXY_SUBNET_ACTUAL"
+    apply_line "t2_proxy" "$T2_PROXY_SUBNET_ACTUAL"
+    apply_line "database" "$DATABASE_NETWORK_NAME"
 }
 
-# =========================================================
-#  COMPOSE DOWNLOAD / DEPLOY
-# =========================================================
-
-# --- 36. COMPOSE FILE DOWNLOAD ---
-# Downloads Socket Proxy stack, selected Admin UI stack and Admin UI bootstrap override from GitHub into docker/compose.
 function download_bootstrap_compose_files() {
     apply_group_heading "Compose files"
 
     msg_info "Downloading Socket Proxy stack compose"
     curl --globoff -fsSL "$SOCKET_PROXY_STACK_URL" -o "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
     SOCKET_PROXY_STACK_DOWNLOADED="yes"
-    msg_ok "Socket Proxy stack compose ready"
 
     case "$ADMIN_UI" in
         portainer)
             msg_info "Downloading Portainer stack compose"
             curl --globoff -fsSL "$PORTAINER_STACK_URL" -o "${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
             PORTAINER_STACK_DOWNLOADED="yes"
-            msg_ok "Admin UI stack compose ready"
 
             msg_info "Downloading Admin UI bootstrap override"
             curl --globoff -fsSL "$PORTAINER_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
-            msg_ok "Portainer bootstrap override ready"
             ;;
         dockge)
             msg_info "Downloading Dockge stack compose"
             curl --globoff -fsSL "$DOCKGE_STACK_URL" -o "${COMPOSE_DIR}/${DOCKGE_STACK_FILE}"
             DOCKGE_STACK_DOWNLOADED="yes"
-            msg_ok "Dockge stack compose ready"
 
             msg_info "Downloading Dockge bootstrap override"
             curl --globoff -fsSL "$DOCKGE_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             DOCKGE_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
-            msg_ok "Dockge bootstrap override ready"
             ;;
         komodo)
             msg_info "Downloading Komodo stack compose"
             curl --globoff -fsSL "$KOMODO_STACK_URL" -o "${COMPOSE_DIR}/${KOMODO_STACK_FILE}"
             KOMODO_STACK_DOWNLOADED="yes"
-            msg_ok "Komodo stack compose ready"
 
             msg_info "Downloading Komodo bootstrap override"
             curl --globoff -fsSL "$KOMODO_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             KOMODO_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
-            msg_ok "Komodo bootstrap override ready"
             ;;
         dockhand)
             msg_info "Downloading Dockhand stack compose"
             curl --globoff -fsSL "$DOCKHAND_STACK_URL" -o "${COMPOSE_DIR}/${DOCKHAND_STACK_FILE}"
             DOCKHAND_STACK_DOWNLOADED="yes"
-            msg_ok "Dockhand stack compose ready"
 
             msg_info "Downloading Dockhand bootstrap override"
             curl --globoff -fsSL "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             DOCKHAND_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
-            msg_ok "Dockhand bootstrap override ready"
             ;;
     esac
 
@@ -4323,9 +4395,6 @@ function download_bootstrap_compose_files() {
     sync_compose_file_for_dockge "$(basename "$ADMIN_UI_COMPOSE_FILE")" "$ADMIN_UI_COMPOSE_FILE"
     sync_bootstrap_override_for_dockge "$(basename "$ADMIN_UI_COMPOSE_FILE")" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
 
-    detail_line "Socket Proxy stack" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
-    detail_line "Admin UI stack" "$ADMIN_UI_COMPOSE_FILE"
-    detail_line "Admin UI bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
 }
 # --- 37. PORTAINER BOOTSTRAP OVERRIDE CHECK ---
 # Confirms the downloaded Admin UI bootstrap override exists locally.
@@ -4333,16 +4402,11 @@ function download_bootstrap_compose_files() {
 function verify_admin_ui_bootstrap_override_file() {
     apply_group_heading "Compose files"
 
-    msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} bootstrap override"
-
     if [ ! -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" ]; then
         msg_error "${ADMIN_UI_DISPLAY_NAME} bootstrap override was not downloaded: ${ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE}"
     fi
 
     ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
-    msg_ok "${ADMIN_UI_DISPLAY_NAME} bootstrap override ready"
-    detail_line "Override file" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
-    detail_line "Bootstrap port" "${ADMIN_UI_BOOTSTRAP_PORT}->${ADMIN_UI_INTERNAL_PORT}"
 }
 
 
@@ -4351,15 +4415,12 @@ function verify_admin_ui_bootstrap_override_file() {
 function validate_bootstrap_compose_files() {
     apply_group_heading "Compose validation"
 
-    msg_info "Validating Socket Proxy stack compose"
+    msg_info "Validating bootstrap compose files"
     run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "$(compose_path_for_stack_file "$SOCKET_PROXY_STACK_FILE")" config -q
-    msg_ok "SOCKET PROXY STACK COMPOSE VALID"
 
-    msg_info "Validating ${ADMIN_UI_DISPLAY_NAME} stack compose with bootstrap override"
     export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
     run_docker_cmd "validating ${ADMIN_UI_DISPLAY_NAME} stack compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$(compose_path_for_stack_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")" -f "$(bootstrap_override_path_for_primary_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")" config -q
-    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} STACK COMPOSE VALID"
-
+    clear_transient_line
     ADMIN_UI_VALIDATED="yes"
 }
 # --- 39. SOCKET-PROXY DEPLOYMENT ---
@@ -4369,11 +4430,9 @@ function deploy_socket_proxy() {
     compose_path="$(compose_path_for_stack_file "$SOCKET_PROXY_STACK_FILE")"
     compose_up_quiet "deploying socket-proxy" --env-file "$ENV_FILE" -p socket-proxy -f "$compose_path"
     SOCKET_PROXY_DEPLOYED="yes"
-    msg_ok "socket-proxy deployed"
+    apply_line "socket-proxy" "deployed"
 }
 
-# --- 40. PORTAINER DEPLOYMENT ---
-# Deploys the selected Admin UI stack with its temporary bootstrap override.
 function deploy_admin_ui() {
     local admin_compose_path=""
     local admin_override_path=""
@@ -4388,23 +4447,21 @@ function deploy_admin_ui() {
         PORTAINER_DEPLOYED="yes"
     fi
 
-    msg_ok "${ADMIN_UI_PROJECT_NAME} deployed"
+    apply_line "$ADMIN_UI_PROJECT_NAME" "deployed"
 }
 
-# --- 41. UFW BOOTSTRAP PORT HELPER ---
-# Opens temporary Admin UI bootstrap port if UFW is active.
 function configure_bootstrap_firewall() {
-    apply_group_heading "Bootstrap access"
+    apply_group_heading "Prerequisites"
 
     if ! command -v ufw >/dev/null 2>&1; then
-        msg_skip "UFW NOT FOUND; BOOTSTRAP PORT RULE SKIPPED"
         UFW_BOOTSTRAP_PORT_OPENED="not-found"
+        apply_line "Bootstrap" "ready"
         return 0
     fi
 
     if ! ufw status 2>/dev/null | grep -qi "Status: active" && ! { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" ufw status 2>/dev/null | grep -qi "Status: active"; }; then
-        msg_skip "UFW NOT ACTIVE; BOOTSTRAP PORT RULE SKIPPED"
         UFW_BOOTSTRAP_PORT_OPENED="not-active"
+        apply_line "Bootstrap" "ready"
         return 0
     fi
 
@@ -4416,16 +4473,11 @@ function configure_bootstrap_firewall() {
         ufw allow "${ADMIN_UI_BOOTSTRAP_PORT}/tcp" comment "temporary ${ADMIN_UI_DISPLAY_NAME} bootstrap" >/dev/null 2>&1 || true
     fi
 
+    clear_transient_line
     UFW_BOOTSTRAP_PORT_OPENED="yes"
-    msg_ok "TEMPORARY ${ADMIN_UI_DISPLAY_NAME^^} BOOTSTRAP PORT ALLOWED"
+    apply_line "Bootstrap" "ready"
 }
 
-# =========================================================
-#  VERIFICATION / SUMMARY
-# =========================================================
-
-# --- 42. ACCESS IP DETECTION ---
-# Detects a likely LAN IPv4 for the Admin UI bootstrap URL.
 function detect_admin_ui_access_ip() {
     local detected_ip=""
 
@@ -4447,36 +4499,34 @@ function detect_portainer_access_ip() {
 # --- 43. CONTAINER VERIFICATION ---
 # Verifies the bootstrap containers are running and visible.
 function verify_bootstrap_containers() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "Route checks"
 
-    msg_info "Checking Socket Proxy container"
+    msg_info "Checking bootstrap containers"
     if docker_cmd ps --format '{{.Names}}' | grep -qx 'socket-proxy'; then
-        msg_ok "SOCKET PROXY RUNNING"
+        SOCKET_PROXY_DEPLOYED="yes"
     else
         msg_error "socket-proxy container is not running."
     fi
 
-    msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} container"
     if docker_cmd ps --format '{{.Names}}' | grep -qx "$ADMIN_UI_SERVICE_NAME"; then
-        msg_ok "${ADMIN_UI_DISPLAY_NAME^^} RUNNING"
+        ADMIN_UI_DEPLOYED="yes"
     else
         msg_error "${ADMIN_UI_SERVICE_NAME} container is not running."
     fi
+    clear_transient_line
 
     detect_admin_ui_access_ip
 
-    msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} bootstrap port"
+    msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} bootstrap access"
     if docker_cmd port "$ADMIN_UI_SERVICE_NAME" "${ADMIN_UI_INTERNAL_PORT}/tcp" 2>/dev/null | grep -q ":${ADMIN_UI_BOOTSTRAP_PORT}$"; then
         ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="yes"
-        msg_ok "${ADMIN_UI_DISPLAY_NAME^^} BOOTSTRAP PORT EXPOSED"
     else
         ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="not-confirmed"
-        msg_warn "${ADMIN_UI_DISPLAY_NAME} is running, but bootstrap port ${ADMIN_UI_BOOTSTRAP_PORT} was not confirmed"
+        msg_warn "${ADMIN_UI_DISPLAY_NAME} is running, but bootstrap access was not confirmed"
     fi
+    clear_transient_line
 
-    detail_line "Temporary access" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
-    detail_line "Domain access after Traefik/AuthentiK" "$ADMIN_UI_URL"
-    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
+    apply_line "Internal routes" "ready"
 }
 
 function verify_reset_counts() {
@@ -4495,26 +4545,61 @@ function status_verify_from_value() {
 }
 function selected_stack_names() {
     local names=""; local i=""
-    if [ "${#SELECTED_STACK_FILES[@]}" -eq 0 ]; then printf 'none'; return 0; fi
-    for i in "${!SELECTED_STACK_FILES[@]}"; do names="${names:+${names},}${SELECTED_STACK_PROJECTS[$i]}"; done
-    printf '%s' "$names"
+    names="socket-proxy,${ADMIN_UI_PROJECT_NAME}"
+    for i in "${!SELECTED_STACK_FILES[@]}"; do
+        if is_helper_compose_file "${SELECTED_STACK_FILES[$i]}"; then
+            continue
+        fi
+        names="${names:+${names},}${SELECTED_STACK_PROJECTS[$i]}"
+    done
+    printf '%s' "${names:-none}"
 }
 function update_deployed_failed_stack_summary() {
     local deployed=""; local failed=""; local i=""; local service=""; local project=""
     if [ "$SOCKET_PROXY_DEPLOYED" == "yes" ]; then deployed="socket-proxy"; else failed="socket-proxy"; fi
     if [ "$ADMIN_UI_DEPLOYED" == "yes" ]; then deployed="${deployed:+${deployed},}${ADMIN_UI_PROJECT_NAME}"; else failed="${failed:+${failed},}${ADMIN_UI_PROJECT_NAME}"; fi
     for i in "${!SELECTED_STACK_PROJECTS[@]}"; do
+        if is_helper_compose_file "${SELECTED_STACK_FILES[$i]}"; then
+            continue
+        fi
         project="${SELECTED_STACK_PROJECTS[$i]}"; service="${SELECTED_STACK_SERVICES[$i]}"
         if [ -z "$service" ] || docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx "$service"; then deployed="${deployed:+${deployed},}${project}"; else failed="${failed:+${failed},}${project}"; fi
     done
     DEPLOYED_STACKS="${deployed:-none}"; FAILED_STACKS="${failed:-none}"
 }
+
+function deployed_matches_selected_stacks() {
+    [ "${FAILED_STACKS:-none}" == "none" ] || return 1
+    [ "${DEPLOYED_STACKS:-none}" == "$(selected_stack_names)" ]
+}
+
+function route_warning_reason() {
+    case "${AUTHENTIK_HOST_ROUTE_OK:-not-run}" in
+        auth-host-tls-failed)
+            printf '%s' "Cloudflare SSL/origin certificate"
+            ;;
+        acme-rate-limited)
+            printf '%s' "ACME rate limit / certificate issuance"
+            ;;
+        needs-review|not-run|unknown)
+            printf '%s' "public route review required"
+            ;;
+        *)
+            if [ "${PROTECTED_ROUTE_VERIFY_OK:-not-run}" == "needs-review" ]; then
+                printf '%s' "Cloudflare/Auth route review required"
+            else
+                printf '%s' "ready"
+            fi
+            ;;
+    esac
+}
+
 function write_verify_outputs() {
     local machine_tmp="" display_tmp=""
     machine_tmp="$(mktemp)"; display_tmp="$(mktemp)"; TEMP_FILES+=("$machine_tmp" "$display_tmp")
     update_deployed_failed_stack_summary; verify_reset_counts
     {
-        echo "--- DOCKER STACK DEPLOY VERIFY LOG ---"; echo "Date=$(date)"; echo "SCRIPT_VERSION=${SCRIPT_VERSION}"; echo "SCRIPT_BUILD=${SCRIPT_BUILD}"; echo "Docker user=${DOCKER_USER}"; echo "Docker dir=${DOCKER_DIR}"; echo "Compose dir=${COMPOSE_DIR}"; echo "Env file=${ENV_FILE}"; echo "Domain=${DOMAIN_VALUE}"; echo "Admin UI=${ADMIN_UI}"; echo "Selected stacks=$(selected_stack_names)"; echo "Deployed stacks=${DEPLOYED_STACKS}"; echo "Failed stacks=${FAILED_STACKS}"; echo ""; echo "Checks:"
+        echo "--- DOCKER STACK DEPLOY VERIFY LOG ---"; echo "Date=$(date)"; echo "SCRIPT_VERSION=${SCRIPT_VERSION}"; echo "SCRIPT_BUILD=${SCRIPT_BUILD}"; echo "Docker user=${DOCKER_USER}"; echo "Docker dir=${DOCKER_DIR}"; echo "Compose dir=${COMPOSE_DIR}"; echo "Env file=${ENV_FILE}"; echo "Domain=${DOMAIN_VALUE}"; echo "Admin UI=${ADMIN_UI}"; echo "Selected stacks=$(selected_stack_names)"; echo "Deployed stacks=${DEPLOYED_STACKS}"; echo "Failed stacks=${FAILED_STACKS}"; echo "Stacks=$(selected_stack_count)"; echo "Helpers=$(helper_file_count)"; echo "Compose files=$(compose_file_total_count)"; echo ""; echo "Checks:"
         status_verify_from_value "Script 6 verify" "${SCRIPT6_PREFLIGHT_STATUS}"
         status_verify_from_value ".env keys" "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS}"
         status_verify_from_value "Hostnames" "${SCRIPT6_ENV_HOSTNAMES_STATUS}"
@@ -4556,6 +4641,10 @@ function write_verify_outputs() {
         echo "  Compose dir: ${COMPOSE_DIR}"
         echo "  Domain: ${DOMAIN_VALUE}"
         echo "  Admin UI: ${ADMIN_UI}"
+        echo "  Stacks: $(selected_stack_count)"
+        echo "  Helpers: $(helper_file_count)"
+        echo "  Compose files: $(compose_file_total_count)"
+        echo "  Backups: ${SAFE_WRITE_BACKUP_COUNT}"
         echo "  Selected stacks:"
         stack_list_lines "$(selected_stack_names)" | sed 's/^/  /'
         echo "  Deployed stacks:"
@@ -4579,6 +4668,10 @@ function write_verify_outputs() {
         echo "  Authentik API: ${AUTHENTIK_API_OK}"
         echo "  Protected routes: ${PROTECTED_ROUTE_VERIFY_OK}"
         echo "  Public route warnings: ${PUBLIC_ROUTE_WARNINGS}"
+        echo "  DNS records: ${DNS_RECORDS_STATUS}"
+        echo "  cf-companion: ${CF_COMPANION_RUNTIME_STATUS}"
+        echo "  Rescan: ${CF_COMPANION_RESCAN_STATUS}"
+        echo "  DNS wait: ${DNS_WAIT_STATUS}"
         echo ""
         echo "Verification:"
         echo "  Status: ${VERIFY_STATUS}"
@@ -4596,7 +4689,8 @@ function write_verify_outputs() {
 # Writes a small Docker bootstrap verification report to /var/log.
 function create_verification_report() {
     write_verify_outputs
-    msg_ok "Verification logs written"
+    apply_line "Verification log" "written"
+    apply_line "Display log" "written"
 }
 
 # --- 45. MARKER ---
@@ -4633,6 +4727,9 @@ SCRIPT65_ADMIN_UI=$ADMIN_UI
 SCRIPT65_DOMAIN=$DOMAIN_VALUE
 SCRIPT65_DEPLOYED_STACKS=$DEPLOYED_STACKS
 SCRIPT65_FAILED_STACKS=$FAILED_STACKS
+SCRIPT65_STACK_COUNT=$(selected_stack_count)
+SCRIPT65_HELPER_FILE_COUNT=$(helper_file_count)
+SCRIPT65_COMPOSE_FILE_COUNT=$(compose_file_total_count)
 SCRIPT65_NETWORKS_READY=$NETWORKS_VERIFIED
 SCRIPT65_SOCKET_PROXY_READY=$SOCKET_PROXY_DEPLOYED
 SCRIPT65_TRAEFIK_READY=$TRAEFIK_PLACEHOLDERS_OK
@@ -4640,43 +4737,56 @@ SCRIPT65_AUTHENTIK_READY=$AUTHENTIK_API_OK
 SCRIPT65_BOOTSTRAP_PORT_OPEN=$UFW_BOOTSTRAP_PORT_OPENED
 MARKER_EOF
     if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" cp "$marker_tmp" "$COMPLETED_MARKER"; "$SUDO_CMD" chmod 0600 "$COMPLETED_MARKER" 2>/dev/null || true; else cp "$marker_tmp" "$COMPLETED_MARKER"; chmod 0600 "$COMPLETED_MARKER" 2>/dev/null || true; fi
-    msg_ok "Marker written"
+    apply_line "Marker" "written"
 }
 
 # --- 46. FINAL SUMMARY ---
 # Displays clean final setup summary and next step.
 function show_final_summary() {
+    update_deployed_failed_stack_summary
+
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
     group_heading "Deployment"
     detail_line "Docker dir" "$DOCKER_DIR"
     detail_line "Compose dir" "$COMPOSE_DIR"
     detail_line "Domain" "$DOMAIN_VALUE"
     detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
-    detail_line "Admin UI URL" "$ADMIN_UI_URL"
+    detail_line "Stacks" "$(selected_stack_count)"
+    detail_line "Helpers" "$(helper_file_count)"
+    detail_line "Compose files" "$(compose_file_total_count)"
+    detail_line "Backups" "$SAFE_WRITE_BACKUP_COUNT"
+    if deployed_matches_selected_stacks; then
+        detail_line "Deployed" "all selected stacks" "$GN"
+        detail_line "Failed" "none" "$GN"
+    else
+        detail_line "Deployed" "see deployed stacks" "$YW"
+        detail_line "Failed" "$FAILED_STACKS" "$(status_color_for_value "$FAILED_STACKS")"
+    fi
     echo ""
     group_heading "Selected stacks"
     display_selected_stack_lines
-    echo ""
-    group_heading "Deployed stacks"
-    stack_list_lines "$DEPLOYED_STACKS"
-    echo ""
-    group_heading "Failed stacks"
-    stack_list_lines "$FAILED_STACKS"
+    if ! deployed_matches_selected_stacks; then
+        echo ""
+        group_heading "Deployed stacks"
+        stack_list_lines "$DEPLOYED_STACKS"
+        echo ""
+        group_heading "Failed stacks"
+        stack_list_lines "$FAILED_STACKS"
+    fi
     echo ""
     group_heading "Access"
     detail_line "Traefik URL" "https://${TRAEFIK_DASHBOARD_HOST:-traefik.${DOMAIN_VALUE}}"
     detail_line "Authentik URL" "${AUTHENTIK_EXTERNAL_URL:-https://${AUTHENTIK_ROUTE_HOST}}"
+    if [ -n "${AUTHENTIK_HOST_BROWSER_VALUE:-}" ] && [ "${AUTHENTIK_HOST_BROWSER_VALUE}" != "${AUTHENTIK_EXTERNAL_URL:-https://${AUTHENTIK_ROUTE_HOST}}" ]; then
+        detail_line "Browser URL" "$AUTHENTIK_HOST_BROWSER_VALUE"
+    fi
     detail_line "Admin UI URL" "$ADMIN_UI_URL"
-    detail_line "Bootstrap access" "${ADMIN_UI_BOOTSTRAP_ACCESS_URL:-not confirmed}"
-    detail_line "Cloudflare companion" "$CF_COMPANION_SECRET_OK"
-    detail_line "Public routes" "$PROTECTED_ROUTE_VERIFY_OK" "$(status_color_for_value "$PROTECTED_ROUTE_VERIFY_OK")"
+    detail_line "Temporary access" "${ADMIN_UI_BOOTSTRAP_ACCESS_URL:-not confirmed}" "$(status_color_for_value "${ADMIN_UI_BOOTSTRAP_PORT_EXPOSED:-not-confirmed}")"
+    detail_line "Traefik/AuthentiK" "$ADMIN_UI_URL"
+    detail_line "CF Companion" "$(yes_no_label "$DEPLOY_CF_COMPANION")" "$(status_color_for_value "$(yes_no_label "$DEPLOY_CF_COMPANION")")"
+    detail_line "Public routes" "${PUBLIC_ROUTE_SUMMARY_STATUS:-$PROTECTED_ROUTE_VERIFY_OK}" "$(status_color_for_value "${PROTECTED_ROUTE_VERIFY_OK:-not-run}")"
     echo ""
-    group_heading "Files"
-    detail_line "Compose dir" "$COMPOSE_DIR"
-    detail_line "Created" "$SAFE_WRITE_CREATED_COUNT"
-    detail_line "Updated" "$SAFE_WRITE_UPDATED_COUNT"
-    detail_line "Unchanged" "$SAFE_WRITE_UNCHANGED_COUNT"
-    detail_line "Backups" "$SAFE_WRITE_BACKUP_COUNT"
+    group_heading "Logs / marker"
     detail_line "Verify log" "$VERIFY_LOG"
     detail_line "Display log" "$VERIFY_DISPLAY_LOG"
     detail_line "Marker" "$COMPLETED_MARKER"
@@ -4690,18 +4800,10 @@ function show_final_summary() {
     detail_line "Display log" "$VERIFY_DISPLAY_LOG"
     echo ""
     group_heading "Next Step"
-    echo -e "  ${YW}Review route verification results, then run Script 7 for final hardening, cleanup and bootstrap-port closure.${CL}"
+    echo -e "  ${YW}Run Script 7 to close bootstrap access and finish hardening.${CL}"
     echo ""
 }
 
-# =========================================================
-#  MAIN ORCHESTRATION
-# =========================================================
-
-# --- 47. MAIN FUNCTION ---
-# Runs Docker network + socket-proxy + Admin UI bootstrap in safe order.
-# --- SETUP PLAN SUMMARY ---
-# Confirms all collected bootstrap answers before networks, compose downloads, firewall changes or containers are changed.
 function show_ready_to_apply() {
     local apply_yn=""
     local cf_guard="not selected"
@@ -4723,7 +4825,9 @@ function show_ready_to_apply() {
     plan_line "Compose source" "$COMPOSE_SOURCE_LABEL"
     plan_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$GN"
     plan_line "Bootstrap access" "${ADMIN_UI_BOOTSTRAP_BIND}:${ADMIN_UI_BOOTSTRAP_PORT}" "$GN"
-    plan_line "Compose files" "$(compose_plan_selected_count) selected"
+    plan_line "Stacks" "$(selected_stack_count)" "$GN"
+    plan_line "Helpers" "$(helper_file_count)" "$GN"
+    plan_line "Compose files" "$(compose_file_total_count)" "$GN"
     plan_line "Compose drift" "backup if changed"
     echo ""
 
@@ -4742,7 +4846,7 @@ function show_ready_to_apply() {
     plan_line "Changes applied" "no" "$GN"
     echo ""
 
-    echo -e "${RD}${CLF}After confirmation, Script 6.5 will:${CL}"
+    echo -e "${YL}After confirmation, Script 6.5 will:${CL}"
     echo -e "  ${YW}create networks, install compose files,${CL}"
     echo -e "  ${YW}deploy selected stacks and verify routes.${CL}"
     echo ""
@@ -4756,7 +4860,7 @@ function show_ready_to_apply() {
 }
 
 function verify_existing_deployment_state() {
-    apply_group_heading "Post-deploy verification"
+    apply_group_heading "Route checks"
     if docker_cmd network inspect socket_proxy >/dev/null 2>&1 && docker_cmd network inspect t2_proxy >/dev/null 2>&1 && docker_cmd network inspect database >/dev/null 2>&1; then NETWORKS_VERIFIED="yes"; NETWORKS_CREATED="yes"; msg_ok "Existing Docker networks verified"; else NETWORKS_VERIFIED="no"; msg_warn "One or more Docker networks are missing"; fi
     SOCKET_PROXY_SUBNET_ACTUAL="$(docker_cmd network inspect socket_proxy --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"; T2_PROXY_SUBNET_ACTUAL="$(docker_cmd network inspect t2_proxy --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"; DATABASE_NETWORK_NAME="$(docker_cmd network inspect database --format '{{.Name}}' 2>/dev/null || true)"
     if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'socket-proxy'; then SOCKET_PROXY_DEPLOYED="yes"; msg_ok "Socket proxy running"; else SOCKET_PROXY_DEPLOYED="no"; msg_warn "Socket proxy is not running"; fi
@@ -4769,8 +4873,25 @@ function run_verify_only_mode() {
 function run_apply_changes() {
     section "APPLY CHANGES"
     CURRENT_APPLY_GROUP=""
-    create_shared_networks; verify_shared_networks; download_selected_compose_files; verify_admin_ui_bootstrap_override_file; verify_selected_compose_env_coverage; validate_selected_compose_files; prepare_postgres_runtime_prereqs; prepare_redis_runtime_prereqs; configure_bootstrap_firewall; deploy_selected_stacks; verify_bootstrap_containers; verify_cf_companion_runtime_if_selected; configure_authentik_and_verify_routes; apply_group_heading "Marker / logs"; create_verification_report; write_completion_marker
+    APPLY_GROUPS_SHOWN=""
+    create_shared_networks
+    verify_shared_networks
+    download_selected_compose_files
+    verify_admin_ui_bootstrap_override_file
+    verify_selected_compose_env_coverage
+    validate_selected_compose_files
+    prepare_postgres_runtime_prereqs
+    prepare_redis_runtime_prereqs
+    configure_bootstrap_firewall
+    deploy_selected_stacks
+    verify_bootstrap_containers
+    verify_cf_companion_runtime_if_selected
+    configure_authentik_and_verify_routes
+    apply_group_heading "Marker / logs"
+    create_verification_report
+    write_completion_marker
 }
+
 
 function main() {
     init_script
