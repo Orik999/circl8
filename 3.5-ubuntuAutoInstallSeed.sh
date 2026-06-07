@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.22"
+SCRIPT_VERSION="v1.2.23"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="collection-summary-ui-polish"
+SCRIPT_BUILD="setup-plan-redraw-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -1648,6 +1648,16 @@ missing_iso_tools_display() {
     fi
 }
 
+iso_tool_action_display() {
+    if [ "${#MISSING_TOOL_PACKAGES[@]}" -eq 0 ]; then
+        echo "no action"
+    elif [ "$CLEANUP_INSTALLED_TOOLS" == "yes" ]; then
+        echo "install then remove"
+    else
+        echo "install and keep"
+    fi
+}
+
 install_missing_tools_display() {
     if [ "$INSTALL_MISSING_TOOLS_APPROVED" == "not-needed" ]; then
         echo "not-needed"
@@ -1682,24 +1692,12 @@ collect_attach_start_decision() {
 }
 
 collect_missing_iso_tools_decision() {
-    local install_yn=""
-
-    msg_info "Checking required ISO tools"
     detect_missing_iso_tools
 
     if [ "${#MISSING_TOOL_PACKAGES[@]}" -gt 0 ]; then
-        msg_warn "Missing required tools: ${MISSING_TOOL_PACKAGES[*]}"
-        echo ""
-        install_yn="$(timed_yes_no "Install missing ISO tools?" "y")"
-
-        if [[ "$install_yn" =~ ^[Nn] ]]; then
-            INSTALL_MISSING_TOOLS_APPROVED="no"
-        else
-            INSTALL_MISSING_TOOLS_APPROVED="yes"
-        fi
+        INSTALL_MISSING_TOOLS_APPROVED="yes"
     else
         INSTALL_MISSING_TOOLS_APPROVED="not-needed"
-        msg_ok "Required ISO tools available."
     fi
 }
 
@@ -1781,6 +1779,7 @@ install_options_summary() {
     group_answer_line "Source ISO" "$INSTALL_ISO_REF"
     group_status_line "Generated ISO" "$AUTOINSTALL_ISO_REF"
     group_status_line "Missing tools" "$(missing_iso_tools_display)"
+    group_status_line "Tool action" "$(iso_tool_action_display)"
 }
 
 # --- 35A. EARLY CLEANUP PREFERENCES ---
@@ -1819,6 +1818,7 @@ collect_early_cleanup_preferences() {
         DELETE_GENERATED_ISO_AFTER_INSTALL="y"
     fi
 
+    clear_terminal_lines 4
     cleanup_preference_summary
 }
 
@@ -1965,6 +1965,7 @@ select_vm() {
     local default_vm_index="1"
     local highest_vmid="0"
     local vm_index=""
+    local list_lines="0"
 
     section "VM SELECTION"
 
@@ -1978,6 +1979,7 @@ select_vm() {
 
     tty_print "${BFR}"
     echo -e "${YW}Available VMs:${CL}"
+    list_lines=1
 
     for i in "${!VM_LINES[@]}"; do
         vmid="$(echo "${VM_LINES[$i]}" | cut -d'|' -f1)"
@@ -1990,11 +1992,13 @@ select_vm() {
         fi
 
         echo "  $((i+1))) ${vmid} | ${name} | ${status}"
+        list_lines=$((list_lines + 1))
     done
 
     [ "${#VM_LINES[@]}" -eq 1 ] && default_vm_index="1"
 
     vm_index="$(timed_number_input_quiet "Select VM for Ubuntu autoinstall" "$default_vm_index" "1" "${#VM_LINES[@]}")"
+    clear_terminal_lines "$list_lines"
 
     TARGET_VMID="$(echo "${VM_LINES[$((vm_index-1))]}" | cut -d'|' -f1)"
     TARGET_VM_NAME="$(echo "${VM_LINES[$((vm_index-1))]}" | cut -d'|' -f2)"
@@ -2120,7 +2124,6 @@ collect_user_locale_inputs() {
 
     TARGET_HOSTNAME="$(safe_hostname "$TARGET_VM_NAME")"
 
-    echo ""
     identity_locale_summary
 }
 
@@ -2215,6 +2218,7 @@ select_ubuntu_iso() {
     local default_iso_index="1"
     local iso_base=""
     local iso_index=""
+    local list_lines="0"
 
     msg_info "Finding Ubuntu install ISO"
 
@@ -2225,16 +2229,18 @@ select_ubuntu_iso() {
     fi
 
     tty_print "${BFR}"
-    echo ""
     echo -e "${YW}Available ISOs:${CL}"
+    list_lines=1
 
     for i in "${!ISOS[@]}"; do
         iso_base="$(basename "${ISOS[$i]}")"
         [ "$iso_base" == "$DEFAULT_ISO_NAME" ] && default_iso_index="$((i+1))"
         echo "  $((i+1))) ${iso_base}"
+        list_lines=$((list_lines + 1))
     done
 
     iso_index="$(timed_number_input_quiet "Select Ubuntu ISO number" "$default_iso_index" "1" "${#ISOS[@]}")"
+    clear_terminal_lines "$list_lines"
     INSTALL_ISO_PATH="${ISOS[$((iso_index-1))]}"
     INSTALL_ISO_REF="local:iso/$(basename "$INSTALL_ISO_PATH")"
 
@@ -2521,7 +2527,6 @@ show_apply_summary() {
     group_status_line "Action" "wipe disk and install Ubuntu" "$YW"
     group_answer_line "Shutdown before apply" "$(vm_shutdown_display)"
     group_answer_line "Start after cleanup" "$(yn_word "$POST_INSTALL_START_VM")"
-    group_answer_line "Start unattended" "$(attach_start_display)"
     echo ""
 
     group_heading "Ubuntu"
@@ -2534,7 +2539,7 @@ show_apply_summary() {
     group_answer_line "Source" "$INSTALL_ISO_REF"
     group_answer_line "Generated" "$AUTOINSTALL_ISO_REF"
     group_status_line "Missing tools" "$(missing_iso_tools_display)"
-    group_answer_line "Generated ISO action" "$GENERATED_ISO_ACTION"
+    group_status_line "Tool action" "$(iso_tool_action_display)"
     echo ""
 
     group_heading "Proxmox identity"
@@ -3109,9 +3114,9 @@ main() {
     collect_vm_shutdown_decision
     collect_generated_iso_action
     collect_missing_iso_tools_decision
-    collect_attach_start_decision
 
     show_apply_summary
+    collect_attach_start_decision
 
     section "APPLY CHANGES"
     ISO_PREP_GROUPED_OUTPUT="yes"
