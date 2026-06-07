@@ -28,7 +28,7 @@ services:
       DEFAULT_WORKSPACE: /data/docker/compose
     labels:
       traefik.enable: "true"
-      traefik.http.routers.vscode.rule: Host(`code.${DOMAIN}`)
+      traefik.http.routers.vscode.rule: Host(`${VSCODE_HOST}`)
       traefik.http.routers.vscode.entrypoints: https
       traefik.http.routers.vscode.tls: "true"
       traefik.http.routers.vscode.middlewares: chain-authentik@file

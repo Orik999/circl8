@@ -83,7 +83,7 @@ services:
     labels:
       traefik.enable: "true"
 
-      traefik.http.routers.authentik.rule: Host(`auth.${DOMAIN}`)
+      traefik.http.routers.authentik.rule: Host(`${AUTHENTIK_ROUTE_HOST}`)
       traefik.http.routers.authentik.entrypoints: https
       traefik.http.routers.authentik.tls: "true"
       traefik.http.routers.authentik.middlewares: chain-secure@file

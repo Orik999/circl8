@@ -60,7 +60,7 @@ services:
     labels:
       traefik.enable: "true"
 
-      traefik.http.routers.portainer.rule: Host(`portainer.${DOMAIN}`)
+      traefik.http.routers.portainer.rule: Host(`${ADMIN_UI_HOST}`)
       traefik.http.routers.portainer.entrypoints: https
       traefik.http.routers.portainer.tls: "true"
       traefik.http.routers.portainer.middlewares: chain-authentik@file

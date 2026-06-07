@@ -59,7 +59,7 @@ services:
       traefik.enable: "true"
 
       # Router.
-      traefik.http.routers.filebrowser.rule: Host(`fb.${DOMAIN}`)
+      traefik.http.routers.filebrowser.rule: Host(`${FILEBROWSER_HOST}`)
       traefik.http.routers.filebrowser.entrypoints: https
       traefik.http.routers.filebrowser.tls: "true"
       traefik.http.routers.filebrowser.middlewares: chain-authentik-large-upload@file

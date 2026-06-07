@@ -13,6 +13,7 @@ BL="$(printf '\033[36m')"
 RD="$(printf '\033[01;31m')"
 BGN="$(printf '\033[4;92m')"
 GN="$(printf '\033[1;92m')"
+ANS="$(printf '\033[1;95m')"
 DGN="$(printf '\033[32m')"
 CL="$(printf '\033[m')"
 CLF="$(printf '\033[5m')"
@@ -25,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.40"
-SCRIPT_UPDATED="2026-05-29"
-SCRIPT_BUILD="redis-current-persistence-check"
+SCRIPT_VERSION="v1.3.48"
+SCRIPT_UPDATED="2026-06-06"
+SCRIPT_BUILD="apply-output-cf-order-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -36,6 +37,11 @@ T=15
 LOG_FILE="/var/log/docker-bootstrap-setup.log"
 RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/docker-bootstrap-setup-verify.log"
+VERIFY_DISPLAY_LOG="/var/log/docker-stack-deploy-verify-display.log"
+VERIFY_STATUS="not-run"
+VERIFY_PASS_COUNT="0"
+VERIFY_WARN_COUNT="0"
+VERIFY_FAIL_COUNT="0"
 COMPLETED_MARKER="/root/.docker-bootstrap-setup-completed"
 
 DEFAULT_DOCKER_USER="${SUDO_USER:-orik}"
@@ -44,7 +50,13 @@ DOCKER_DIR="${DOCKER_DIR:-/home/${DOCKER_USER}/docker}"
 COMPOSE_DIR="${COMPOSE_DIR:-${DOCKER_DIR}/compose}"
 ENV_FILE="${ENV_FILE:-${DOCKER_DIR}/.env}"
 
-GITHUB_RAW_BASE="${GITHUB_RAW_BASE:-https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main/docker}"
+DEFAULT_GITHUB_RAW_BASE="https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main/docker"
+GITHUB_RAW_BASE="${GITHUB_RAW_BASE_OVERRIDE:-${GITHUB_RAW_BASE:-$DEFAULT_GITHUB_RAW_BASE}}"
+if [ -n "${GITHUB_RAW_BASE_OVERRIDE:-}" ] || [ "${GITHUB_RAW_BASE}" != "$DEFAULT_GITHUB_RAW_BASE" ]; then
+    COMPOSE_SOURCE_LABEL="override from environment"
+else
+    COMPOSE_SOURCE_LABEL="default repo"
+fi
 TRAEFIK_TEMPLATE_RAW_BASE="${TRAEFIK_TEMPLATE_RAW_BASE:-https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main/docker/traefik}"
 TRAEFIK_STATIC_TEMPLATE_URL="${TRAEFIK_STATIC_TEMPLATE_URL:-${TRAEFIK_TEMPLATE_RAW_BASE}/traefik.yml.template}"
 TRAEFIK_DYNAMIC_TEMPLATE_URL="${TRAEFIK_DYNAMIC_TEMPLATE_URL:-${TRAEFIK_TEMPLATE_RAW_BASE}/dynamic-config.yml.template}"
@@ -56,7 +68,7 @@ KOMODO_STACK_FILE="01-[3]-komodo-compose.yml"
 DOCKHAND_STACK_FILE="01-[2]-dockhand-compose.yml"
 
 # Optional environment overrides for advanced/testing workflows.
-# If these are not set, URLs are rebuilt from GITHUB_RAW_BASE after user input.
+# If these are not set, URLs are rebuilt from the locked GITHUB_RAW_BASE value.
 SOCKET_PROXY_STACK_URL_OVERRIDE="${SOCKET_PROXY_STACK_URL:-}"
 PORTAINER_STACK_URL_OVERRIDE="${PORTAINER_STACK_URL:-}"
 PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${PORTAINER_BOOTSTRAP_OVERRIDE_URL:-}"
@@ -130,6 +142,11 @@ ADMIN_UI_COMPOSE_FILE=""
 ADMIN_UI_PROJECT_NAME="dockge"
 ADMIN_UI_HOST=""
 ADMIN_UI_URL=""
+AUTHENTIK_ROUTE_HOST=""
+AUTHENTIK_EXTERNAL_URL=""
+AUTHENTIK_HOST_BROWSER_VALUE=""
+VSCODE_HOST=""
+FILEBROWSER_HOST=""
 ADMIN_UI_DEPLOYED="no"
 ADMIN_UI_VALIDATED="no"
 
@@ -165,6 +182,7 @@ CF_COMPANION_SECRET_OK="skipped"
 FILEBROWSER_FOLDERS_OK="skipped"
 SUDO_CMD=""
 DOCKER_NEEDS_SUDO="no"
+DOCKER_ACCESS_STATUS="not ready"
 DOCKERHUB_LOGIN_ATTEMPTED="no"
 TEMP_FILES=()
 
@@ -184,6 +202,29 @@ PORTAINER_DEPLOYED="no"
 ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="no"
 ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="no"
 UFW_BOOTSTRAP_PORT_OPENED="no"
+VERIFY_ONLY_MODE="no"
+DEPLOYED_STACKS="none"
+FAILED_STACKS="none"
+
+SCRIPT6_MARKER="/root/.docker-env-setup-completed"
+SCRIPT6_PREFLIGHT_STATUS="unknown"
+SCRIPT6_VERIFY_STATUS="unknown"
+SCRIPT6_MARKER_DOCKER_DIR=""
+SCRIPT6_MARKER_DOMAIN=""
+SCRIPT6_MARKER_ADMIN_UI=""
+SCRIPT6_ENV_REQUIRED_KEYS_STATUS="unknown"
+SCRIPT6_ENV_HOSTNAMES_STATUS="unknown"
+SCRIPT6_ENV_URLS_STATUS="unknown"
+SCRIPT6_SECRETS_STATUS="unknown"
+SCRIPT6_HTPASSWD_STATUS="unknown"
+TRAEFIK_CONFIG_PREFLIGHT_STATUS="unknown"
+SAFE_WRITE_BACKUP_COUNT="0"
+SAFE_WRITE_UNCHANGED_COUNT="0"
+SAFE_WRITE_CREATED_COUNT="0"
+SAFE_WRITE_UPDATED_COUNT="0"
+COMPOSE_PROGRESS_ACTIVE="no"
+CURRENT_APPLY_GROUP=""
+PUBLIC_ROUTE_WARNINGS="none"
 
 # =========================================================
 #  OUTPUT / LOGGING FUNCTIONS
@@ -207,7 +248,7 @@ ${CL}"
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
-function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
+function msg_skip() { echo -e "${BFR} ${HOLD} ${BL}INFO - $1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
 # --- SCRIPT VERSION DISPLAY ---
@@ -220,7 +261,9 @@ function show_script_version() {
 # --- 5. SECTION HEADER HELPER ---
 # Keeps terminal output clean and grouped by stage.
 function section() {
-    echo ""
+    if [ "$1" != "APPLY CHANGES" ]; then
+        echo ""
+    fi
     echo -e "${BORDER}"
     echo -e "${BL}$1${CL}"
     echo -e "${BORDER}"
@@ -236,11 +279,124 @@ function section_flash_success() {
 }
 
 # --- 7. DETAIL LINE HELPER ---
-# Prints clean script 1-style detail lines for summaries and audit output.
+# Prints aligned label/value lines for summaries and audit output.
 function detail_line() {
     local label="$1"
     local value="$2"
-    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+    local value_color="${3:-$GN}"
+    local width="${4:-18}"
+    printf "  %b%-${width}s%b %b%s%b\n" "$BL" "${label}:" "$CL" "$value_color" "$value" "$CL"
+}
+
+function plan_line() {
+    local label="$1"
+    local value="$2"
+    local value_color="${3:-$GN}"
+    local width="${4:-18}"
+    printf "  %b%-${width}s%b %b%s%b\n" "$BL" "${label}:" "$CL" "$value_color" "$value" "$CL"
+}
+
+function answer_line() {
+    local label="$1"
+    local value="$2"
+    local width="${3:-18}"
+    plan_line "$label" "$value" "$ANS" "$width"
+}
+
+function selected_stack_plan_list() {
+    local i=""
+
+    echo -e "  ${GN}socket-proxy${CL}"
+    if [ "${#SELECTED_STACK_PROJECTS[@]}" -eq 0 ]; then
+        echo -e "  ${GN}none additional${CL}"
+        return 0
+    fi
+
+    for i in "${!SELECTED_STACK_PROJECTS[@]}"; do
+        echo -e "  ${GN}${SELECTED_STACK_PROJECTS[$i]}${CL}"
+    done
+}
+
+function stack_choice_summary() {
+    detail_line "Socket proxy" "selected" "$GN" "23"
+    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$GN" "23"
+    detail_line "Traefik" "$(selected_stack_contains "$TRAEFIK_STACK_FILE" && echo selected || echo not selected)" "$GN" "23"
+    detail_line "Authentik" "$(selected_stack_contains "$AUTHENTIK_STACK_FILE" && echo selected || echo not selected)" "$GN" "23"
+    detail_line "Postiz" "$(yes_no_label "$DEPLOY_POSTIZ")" "$ANS" "23"
+    detail_line "Cloudflare DDNS" "$(yes_no_label "$DEPLOY_CF_DDNS")" "$ANS" "23"
+    detail_line "Cloudflare Companion" "$(yes_no_label "$DEPLOY_CF_COMPANION")" "$ANS" "23"
+    detail_line "VS Code" "$(yes_no_label "$DEPLOY_VSCODE")" "$ANS" "23"
+    detail_line "Filebrowser" "$(yes_no_label "$DEPLOY_FILEBROWSER")" "$ANS" "23"
+}
+
+function readiness_status_summary() {
+    detail_line "Script 6 handoff" "${SCRIPT6_PREFLIGHT_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_PREFLIGHT_STATUS:-unknown}")"
+    detail_line "Project config" "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS:-unknown}")"
+    detail_line "Secrets" "${SCRIPT6_SECRETS_STATUS:-unknown}" "$(status_color_for_value "${SCRIPT6_SECRETS_STATUS:-unknown}")"
+    detail_line "Traefik config" "${TRAEFIK_CONFIG_PREFLIGHT_STATUS:-not selected}" "$(status_color_for_value "${TRAEFIK_CONFIG_PREFLIGHT_STATUS:-not selected}")"
+    detail_line "Redis/sysctl" "${SYSCTL_REDIS_OK:-not selected}" "$(status_color_for_value "${SYSCTL_REDIS_OK:-not selected}")"
+    detail_line "Authentik folders" "${AUTHENTIK_FOLDERS_OK:-not selected}" "$(status_color_for_value "${AUTHENTIK_FOLDERS_OK:-not selected}")"
+    detail_line "SMTP env" "${AUTHENTIK_SMTP_ENV_OK:-not selected}" "$(status_color_for_value "${AUTHENTIK_SMTP_ENV_OK:-not selected}")"
+    detail_line "Cloudflare token" "$CF_COMPANION_SECRET_OK" "$(status_color_for_value "$CF_COMPANION_SECRET_OK")"
+}
+
+function all_required_readiness_status() {
+    if [ "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS:-unknown}" == "ready" ] \
+        && [ "${SCRIPT6_ENV_HOSTNAMES_STATUS:-unknown}" == "ready" ] \
+        && [ "${SCRIPT6_ENV_URLS_STATUS:-unknown}" == "ready" ] \
+        && [ "${SCRIPT6_SECRETS_STATUS:-unknown}" == "ready" ] \
+        && [ "${TRAEFIK_CONFIG_PREFLIGHT_STATUS:-unknown}" == "ready" ]; then
+        printf 'ready'
+    else
+        printf 'review'
+    fi
+}
+
+function group_heading() {
+    echo -e "${YW}$1:${CL}"
+}
+
+function apply_group_heading() {
+    local heading="$1"
+
+    if [ "$CURRENT_APPLY_GROUP" != "$heading" ]; then
+        CURRENT_APPLY_GROUP="$heading"
+        echo ""
+        group_heading "$heading"
+    fi
+}
+
+# Runtime labels rendered by detail_line: Status: ready, Created:, Updated:, Unchanged:, Backups:
+function compose_progress_summary() {
+    local status="$1"
+
+    tty_print "${BFR}"
+    detail_line "Status" "$status" "$GN" "10"
+    detail_line "Created" "$SAFE_WRITE_CREATED_COUNT" "$GN" "10"
+    detail_line "Updated" "$SAFE_WRITE_UPDATED_COUNT" "$GN" "10"
+    detail_line "Unchanged" "$SAFE_WRITE_UNCHANGED_COUNT" "$GN" "10"
+    detail_line "Backups" "$SAFE_WRITE_BACKUP_COUNT" "$GN" "10"
+}
+
+function stack_list_lines() {
+    local csv="$1"
+    local item=""
+
+    if [ -z "$csv" ] || [ "$csv" == "none" ]; then
+        echo -e "  ${GN}none${CL}"
+        return 0
+    fi
+
+    IFS=',' read -r -a _stack_items <<< "$csv"
+    for item in "${_stack_items[@]}"; do
+        [ -n "$item" ] && echo -e "  ${GN}${item}${CL}"
+    done
+}
+
+function display_selected_stack_lines() {
+    local names=""
+    names="$(selected_stack_names)"
+    stack_list_lines "$names"
 }
 
 # --- 8. TTY PRINT HELPER ---
@@ -358,6 +514,36 @@ function root_path_exists() {
         "$SUDO_CMD" test -e "$path"
     else
         test -e "$path"
+    fi
+}
+
+function root_read_file() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cat "$path"
+    else
+        cat "$path"
+    fi
+}
+
+function root_file_not_empty() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -s "$path"
+    else
+        test -s "$path"
+    fi
+}
+
+function root_stat_mode() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" stat -c '%a' "$path" 2>/dev/null || true
+    else
+        stat -c '%a' "$path" 2>/dev/null || true
     fi
 }
 
@@ -481,6 +667,72 @@ function timed_yes_no() {
     tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
     flush_input_buffer
 
+    echo "$answer"
+}
+
+# --- 17A. TIMED YES/NO VALUE-ONLY HELPER ---
+# Same countdown behavior as timed_yes_no, but clears the prompt and returns only the answer.
+# Used when the caller prints a cleaner custom confirmation line.
+function timed_yes_no_value_only() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+    local key=""
+    local default_label="Y/n"
+    local deadline=""
+    local now=""
+    local remaining=""
+
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
+    fi
+
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${remaining}s]${CL} "
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        fi
+    done
+
+    [ -z "$answer" ] && answer="$default"
+    tty_print "${BFR}"
+    flush_input_buffer
     echo "$answer"
 }
 
@@ -697,26 +949,104 @@ function init_script() {
 
 # --- 27. DOCKER ACCESS DETECTION ---
 # Prefers normal docker group access, falls back to sudo docker if needed.
+function status_color_for_value() {
+    local value="$1"
+
+    case "$value" in
+        ready|present|completed|PASS|yes|deployed|downloaded|selected|enabled)
+            printf '%s' "$GN"
+            ;;
+        PASS_WITH_WARNINGS|warning|warnings|skipped|not-active|not-found|not\ selected|empty\ placeholder|review|needs-review|auth-host-tls-failed|acme-rate-limited)
+            printf '%s' "$YW"
+            ;;
+        missing|fail|FAIL|no|not\ ready|not-ready|empty|unknown)
+            printf '%s' "$RD"
+            ;;
+        *)
+            printf '%s' "$GN"
+            ;;
+    esac
+}
+
+function env_status_line() {
+    local label="$1"
+    local value="$2"
+    local color=""
+
+    color="$(status_color_for_value "$value")"
+    detail_line "$label" "$value" "$color"
+}
+
+function detected_runtime_user() {
+    if [ -n "${SUDO_USER:-}" ]; then
+        printf '%s' "$SUDO_USER"
+    elif [ -n "${USER:-}" ]; then
+        printf '%s' "$USER"
+    else
+        id -un 2>/dev/null || printf 'unknown'
+    fi
+}
+
+function refresh_compose_source_urls() {
+    if [ -z "$SOCKET_PROXY_STACK_URL_OVERRIDE" ]; then
+        SOCKET_PROXY_STACK_URL="${GITHUB_RAW_BASE}/${SOCKET_PROXY_STACK_FILE}"
+    fi
+
+    if [ -z "$PORTAINER_STACK_URL_OVERRIDE" ]; then
+        PORTAINER_STACK_URL="${GITHUB_RAW_BASE}/${PORTAINER_STACK_FILE}"
+    fi
+
+    if [ -z "$PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        PORTAINER_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+    fi
+
+    if [ -z "$DOCKGE_STACK_URL_OVERRIDE" ]; then
+        DOCKGE_STACK_URL="${GITHUB_RAW_BASE}/${DOCKGE_STACK_FILE}"
+    fi
+
+    if [ -z "$DOCKGE_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        DOCKGE_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+    fi
+
+    if [ -z "$KOMODO_STACK_URL_OVERRIDE" ]; then
+        KOMODO_STACK_URL="${GITHUB_RAW_BASE}/${KOMODO_STACK_FILE}"
+    fi
+
+    if [ -z "$KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        KOMODO_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+    fi
+
+    if [ -z "$DOCKHAND_STACK_URL_OVERRIDE" ]; then
+        DOCKHAND_STACK_URL="${GITHUB_RAW_BASE}/${DOCKHAND_STACK_FILE}"
+    fi
+
+    if [ -z "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        DOCKHAND_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+    fi
+}
+
 function detect_docker_access() {
-    section "DOCKER ACCESS CHECK"
+    local runtime_user=""
 
     msg_info "Checking Docker access"
+    runtime_user="$(detected_runtime_user)"
 
     if docker ps >/dev/null 2>&1; then
         DOCKER_NEEDS_SUDO="no"
+        DOCKER_ACCESS_STATUS="${runtime_user} ready"
         msg_ok "DOCKER ACCESS CONFIRMED"
-        detail_line "Docker mode" "current user"
         return 0
     fi
 
     if [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker ps >/dev/null 2>&1; then
         DOCKER_NEEDS_SUDO="yes"
+        DOCKER_ACCESS_STATUS="sudo ready"
         msg_ok "DOCKER ACCESS CONFIRMED WITH SUDO"
-        detail_line "Docker mode" "sudo fallback"
         msg_warn "Current shell cannot use Docker without sudo. Reboot/logout may still be needed after script 5."
         return 0
     fi
 
+    DOCKER_ACCESS_STATUS="not ready"
     msg_error "Docker daemon is not reachable. Run script 5 first and reboot/log back in."
 }
 
@@ -1127,6 +1457,70 @@ function env_value() {
     ' "$ENV_FILE" 2>/dev/null || true
 }
 
+# --- 29A.1. ROUTE HOST NORMALIZATION HELPER ---
+# Converts a hostname or URL from Script 6 into a bare Traefik Host() value.
+function route_host_from_value() {
+    local value="$1"
+
+    value="${value#http://}"
+    value="${value#https://}"
+    value="${value%%/*}"
+    value="${value%%:*}"
+    printf '%s' "$value"
+}
+
+# --- 29A.2. ROUTE HOST REQUIREMENT HELPER ---
+# Fails early if a compose route variable would be empty or accidentally contain a URL.
+function require_route_host_value() {
+    local key="$1"
+    local value="$2"
+
+    if [ -z "$value" ]; then
+        msg_error "Required route hostname ${key} is missing from Script 6 .env output. Run fixed Script 6 before deployment."
+    fi
+
+    if [[ "$value" == *://* ]] || [[ "$value" == */* ]] || [[ "$value" =~ [[:space:]] ]]; then
+        msg_error "Route hostname ${key} must be a bare hostname, got: ${value}"
+    fi
+}
+
+# --- 29A.3. SCRIPT 6 HOSTNAME MAPPING HELPER ---
+# Loads/derives non-sensitive route variables used by corrected compose templates.
+function load_script6_route_values() {
+    local authentik_host_raw=""
+    local authentik_host_browser_raw=""
+
+    DOMAIN_VALUE="$(env_value DOMAIN)"
+    [ -n "$DOMAIN_VALUE" ] || msg_error "Required .env value DOMAIN is missing. Run fixed Script 6 before deployment."
+
+    ADMIN_UI_HOST="$(env_value ADMIN_UI_HOST)"
+    ADMIN_UI_URL="$(env_value ADMIN_UI_URL)"
+    require_route_host_value "ADMIN_UI_HOST" "$ADMIN_UI_HOST"
+    [ -n "$ADMIN_UI_URL" ] || ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
+
+    VSCODE_HOST="$(env_value VSCODE_HOST)"
+    FILEBROWSER_HOST="$(env_value FILEBROWSER_HOST)"
+
+    authentik_host_raw="$(env_value AUTHENTIK_EXTERNAL_URL)"
+    [ -z "$authentik_host_raw" ] && authentik_host_raw="$(env_value AUTHENTIK_HOST)"
+    [ -z "$authentik_host_raw" ] && authentik_host_raw="https://auth.${DOMAIN_VALUE}"
+
+    AUTHENTIK_EXTERNAL_URL="$authentik_host_raw"
+    if [[ "$AUTHENTIK_EXTERNAL_URL" != http://* ]] && [[ "$AUTHENTIK_EXTERNAL_URL" != https://* ]]; then
+        AUTHENTIK_EXTERNAL_URL="https://${AUTHENTIK_EXTERNAL_URL}"
+    fi
+
+    AUTHENTIK_ROUTE_HOST="$(env_value AUTHENTIK_ROUTE_HOST)"
+    [ -z "$AUTHENTIK_ROUTE_HOST" ] && AUTHENTIK_ROUTE_HOST="$(route_host_from_value "$AUTHENTIK_EXTERNAL_URL")"
+    require_route_host_value "AUTHENTIK_ROUTE_HOST" "$AUTHENTIK_ROUTE_HOST"
+
+    authentik_host_browser_raw="$(env_value AUTHENTIK_HOST_BROWSER)"
+    [ -z "$authentik_host_browser_raw" ] && authentik_host_browser_raw="$AUTHENTIK_EXTERNAL_URL"
+    AUTHENTIK_HOST_BROWSER_VALUE="$authentik_host_browser_raw"
+
+    export ADMIN_UI_HOST ADMIN_UI_URL AUTHENTIK_ROUTE_HOST AUTHENTIK_EXTERNAL_URL VSCODE_HOST FILEBROWSER_HOST
+}
+
 # --- 29B. FILE WRITABILITY HELPER ---
 # Verifies that the selected Docker user can create and remove a test file in a folder.
 function verify_user_writable_dir() {
@@ -1161,31 +1555,80 @@ function validate_optional_compose_file() {
 
 # --- 30. PREVIOUS MARKER CHECK ---
 # Warns if Docker Bootstrap was already completed before.
-function check_previous_marker() {
-    local continue_yn=""
-
-    if root_path_exists "$COMPLETED_MARKER"; then
-        section "PREVIOUS DOCKER BOOTSTRAP MARKER DETECTED"
-
-        echo -e "${YW}A previous Docker Bootstrap marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
-        echo ""
-        if [ -n "$SUDO_CMD" ]; then
-            "$SUDO_CMD" cat "$COMPLETED_MARKER" 2>/dev/null || true
-        else
-            cat "$COMPLETED_MARKER" 2>/dev/null || true
-        fi
-        echo ""
-
-        continue_yn="$(timed_yes_no "Continue anyway?" "n")"
-
-        if [[ "$continue_yn" =~ ^[Nn] ]]; then
-            exit 0
-        fi
-    fi
-
-    return 0
+function marker_key_value() {
+    local key="$1"
+    root_path_exists "$COMPLETED_MARKER" || return 0
+    root_read_file "$COMPLETED_MARKER" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | xargs || true
 }
 
+function marker_readable_value() {
+    local label="$1"
+    root_path_exists "$COMPLETED_MARKER" || return 0
+    root_read_file "$COMPLETED_MARKER" 2>/dev/null | awk -F': ' -v label="$label" '$1 == label {print $2; exit}' | xargs || true
+}
+
+function numeric_menu_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+    while true; do
+        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}"
+        if [ -r /dev/tty ]; then IFS= read -r answer < /dev/tty || true; else IFS= read -r answer || true; fi
+        [ -z "$answer" ] && answer="$default"
+        if [[ "$answer" =~ ^[1-3]$ ]]; then tty_print "${BFR}"; printf '%s' "$answer"; return 0; fi
+        tty_println "${YW}Enter 1, 2 or 3.${CL}"
+    done
+}
+
+function previous_marker_summary_value() {
+    local parseable_key="$1"
+    local readable_label="$2"
+    local value=""
+    value="$(marker_key_value "$parseable_key")"
+    [ -z "$value" ] && value="$(marker_readable_value "$readable_label")"
+    [ -z "$value" ] && value="unknown"
+    printf '%s' "$value"
+}
+
+function check_previous_marker() {
+    local action=""
+    local docker_dir=""
+    local compose_dir=""
+    local admin_ui=""
+    local verification=""
+    local deployed=""
+    local failed=""
+
+    if root_path_exists "$COMPLETED_MARKER"; then
+        section "EXISTING DEPLOYMENT CHECK"
+        docker_dir="$(previous_marker_summary_value SCRIPT65_DOCKER_DIR 'Docker dir')"
+        compose_dir="$(previous_marker_summary_value SCRIPT65_COMPOSE_DIR 'Compose dir')"
+        admin_ui="$(previous_marker_summary_value SCRIPT65_ADMIN_UI 'Admin UI')"
+        verification="$(previous_marker_summary_value SCRIPT65_VERIFY_STATUS 'Verification')"
+        deployed="$(previous_marker_summary_value SCRIPT65_DEPLOYED_STACKS 'Deployed stacks')"
+        failed="$(previous_marker_summary_value SCRIPT65_FAILED_STACKS 'Failed stacks')"
+        echo -e "${YW}Existing Docker deployment detected:${CL}"
+        detail_line "Docker directory" "$docker_dir"
+        detail_line "Compose directory" "$compose_dir"
+        detail_line "Admin UI" "$admin_ui"
+        detail_line "Verification" "$verification"
+        detail_line "Deployed stacks" "$deployed"
+        detail_line "Failed stacks" "$failed"
+        echo ""
+        echo -e "${YW}Action:${CL}"
+        echo -e "  ${YW}1)${CL} ${GN}Verify existing deployment${CL}"
+        echo -e "  ${YW}2)${CL} ${YW}Re-run stack deployment${CL}"
+        echo -e "  ${YW}3)${CL} ${BL}Exit${CL}"
+        echo ""
+        action="$(numeric_menu_input 'Select action' '1')"
+        case "$action" in
+            1) VERIFY_ONLY_MODE="yes"; msg_ok "Verify existing deployment selected" ;;
+            2) VERIFY_ONLY_MODE="no"; msg_ok "Re-run stack deployment selected" ;;
+            3) msg_ok "Exit selected"; exit 0 ;;
+        esac
+    fi
+    return 0
+}
 # --- 31. START CONFIRMATION ---
 # Starts Docker network and Admin UI bootstrap after showing a clear description.
 function start_confirmation() {
@@ -1193,110 +1636,47 @@ function start_confirmation() {
 
     section "START"
 
-    echo -e "${YW}This script creates shared Docker networks, validates Script 6 output, downloads bootstrap compose files, and deploys socket-proxy plus the selected admin UI.${CL}"
-    echo -e "${YW}Selected admin UI is read from ${ENV_FILE}: Dockge, Portainer CE, Komodo, or Dockhand.${CL}"
+    echo -e "${YW}Deploys Docker networks and selected stack compose files prepared by Script 6.${CL}"
+    echo -e "${YW}No secrets are printed.${CL}"
     echo ""
 
-    start_yn="$(timed_yes_no "Start Docker Bootstrap Setup?" "y")"
+    start_yn="$(timed_yes_no_value_only "Start Docker stack deployment?" "y")"
 
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
     fi
 
-    return 0
-
+    msg_ok "Docker stack deployment start confirmed"
     return 0
 }
 
 # --- 32. BOOTSTRAP SETTINGS COLLECTION ---
-# Lets user confirm Docker user/path/source while defaulting to the established project layout.
+# Shows Script 6-owned paths/source as locked handoff values without prompting.
 function collect_bootstrap_settings() {
-    section "BOOTSTRAP SETTINGS"
+    section "SETUP OPTIONS"
 
-    while true; do
-        DOCKER_USER="$(timed_text_input "Enter Docker Linux user" "$DOCKER_USER")"
-
-        if validate_linux_username "$DOCKER_USER"; then
-            break
-        fi
-
-        msg_warn "Invalid username. Use lowercase Linux username format, for example: orik"
-    done
-
-    if ! id "$DOCKER_USER" >/dev/null 2>&1; then
-        msg_error "Linux user ${DOCKER_USER} does not exist. Run script 4 first or create the user."
-    fi
-
-    DOCKER_DIR="$(timed_text_input "Enter Docker directory" "$DOCKER_DIR")"
-    ENV_FILE="$(timed_text_input "Enter Docker .env path" "${DOCKER_DIR}/.env")"
-
-    if [ -f "$ENV_FILE" ]; then
-        # shellcheck disable=SC1090
-        set -a
-        . "$ENV_FILE"
-        set +a
-        DOCKER_DIR="${DOCKER_DIR:-$(env_value DOCKER_DIR)}"
-        COMPOSE_DIR="${COMPOSE_DIR:-$(env_value COMPOSE_DIR)}"
-    fi
-
-    COMPOSE_DIR="$(timed_text_input "Enter Docker compose directory" "${COMPOSE_DIR:-${DOCKER_DIR}/compose}")"
-    GITHUB_RAW_BASE="$(timed_text_input "Enter GitHub raw compose base" "$GITHUB_RAW_BASE")"
-
-    export DOCKER_DIR COMPOSE_DIR ENV_FILE
+    refresh_compose_source_urls
 
     if ! validate_url "$GITHUB_RAW_BASE"; then
-        msg_error "GitHub raw base is not a valid HTTP/HTTPS URL."
+        msg_error "GitHub raw compose base is not a valid HTTP/HTTPS URL. Set GITHUB_RAW_BASE or GITHUB_RAW_BASE_OVERRIDE before starting the script."
     fi
 
-    if [ -z "$SOCKET_PROXY_STACK_URL_OVERRIDE" ]; then
-        SOCKET_PROXY_STACK_URL="${GITHUB_RAW_BASE}/${SOCKET_PROXY_STACK_FILE}"
-    fi
-
-    if [ -z "$PORTAINER_STACK_URL_OVERRIDE" ]; then
-        PORTAINER_STACK_URL="${GITHUB_RAW_BASE}/${PORTAINER_STACK_FILE}"
-    fi
-
-    if [ -z "$PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
-        PORTAINER_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}"
-    fi
-
-    if [ -z "$DOCKGE_STACK_URL_OVERRIDE" ]; then
-        DOCKGE_STACK_URL="${GITHUB_RAW_BASE}/${DOCKGE_STACK_FILE}"
-    fi
-
-    if [ -z "$DOCKGE_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
-        DOCKGE_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME}"
-    fi
-
-    if [ -z "$KOMODO_STACK_URL_OVERRIDE" ]; then
-        KOMODO_STACK_URL="${GITHUB_RAW_BASE}/${KOMODO_STACK_FILE}"
-    fi
-
-    if [ -z "$KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
-        KOMODO_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME}"
-    fi
-
-    if [ -z "$DOCKHAND_STACK_URL_OVERRIDE" ]; then
-        DOCKHAND_STACK_URL="${GITHUB_RAW_BASE}/${DOCKHAND_STACK_FILE}"
-    fi
-
-    if [ -z "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
-        DOCKHAND_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME}"
-    fi
-
+    group_heading "Script 6 paths"
     detail_line "Docker user" "$DOCKER_USER"
-    detail_line "Docker dir" "$DOCKER_DIR"
+    detail_line "Docker directory" "$DOCKER_DIR"
+    detail_line ".env file" "$ENV_FILE"
     detail_line "Compose dir" "$COMPOSE_DIR"
-    detail_line "Env file" "$ENV_FILE"
-    detail_line "GitHub raw base" "$GITHUB_RAW_BASE"
+    detail_line "Compose source" "$COMPOSE_SOURCE_LABEL"
+    echo ""
 }
 
 # --- 33. PATH PRECHECKS ---
 # Validates Docker ENV output and compose directory before network/deploy work.
 function validate_project_paths() {
-    section "PROJECT PATH CHECK"
-
     msg_info "Validating Docker project paths"
+    clear_transient_line
+
+    validate_script6_marker
 
     if ! root_path_exists "$DOCKER_DIR"; then
         msg_error "Docker directory not found: ${DOCKER_DIR}. Run script 6 first."
@@ -1314,11 +1694,13 @@ function validate_project_paths() {
     . "$ENV_FILE"
     set +a
 
-    DOCKER_DIR="${DOCKER_DIR:-$(env_value DOCKER_DIR)}"
-    COMPOSE_DIR="${COMPOSE_DIR:-${DOCKER_DIR}/compose}"
+    DOCKER_DIR="${SCRIPT6_MARKER_DOCKER_DIR:-$DOCKER_DIR}"
+    [ -z "$DOCKER_DIR" ] && DOCKER_DIR="$(env_value DOCKER_DIR)"
+    COMPOSE_DIR="${DOCKER_DIR}/compose"
+    ENV_FILE="${DOCKER_DIR}/.env"
     export DOCKER_DIR COMPOSE_DIR ENV_FILE
 
-    DOMAIN_VALUE="$(env_value DOMAIN)"
+    load_script6_route_values
     DOCKER_SECRETS_DIR="$(env_value DOCKER_SECRETS_DIR)"
     CF_API_TOKEN_FILE="$(env_value CF_API_TOKEN_FILE)"
     CF_API_EMAIL_VALUE="$(env_value CF_API_EMAIL)"
@@ -1338,13 +1720,21 @@ function validate_project_paths() {
     TRAEFIK_ACME_STORAGE="$(env_value TRAEFIK_ACME_STORAGE)"
     [ -z "$TRAEFIK_ACME_STORAGE" ] && TRAEFIK_ACME_STORAGE="${DOCKER_DIR}/appdata/traefik/acme/acme.json"
 
-    msg_ok "PROJECT PATHS READY"
+    validate_script6_env_file
 
-    detail_line "Docker dir" "$DOCKER_DIR"
-    detail_line "Compose dir" "$COMPOSE_DIR"
-    detail_line ".env" "$ENV_FILE"
+    msg_ok "SCRIPT 6 HANDOFF READY"
+    echo ""
+    group_heading "Environment"
+    env_status_line "Docker access" "$DOCKER_ACCESS_STATUS"
+    env_status_line "Script 6 marker" "present"
+    env_status_line "Script 6 status" "completed"
+    env_status_line "Script 6 verify" "$SCRIPT6_VERIFY_STATUS"
+    detail_line "Docker directory" "$DOCKER_DIR"
     detail_line "Domain" "${DOMAIN_VALUE:-missing}"
-    detail_line "Selected admin UI" "$ADMIN_UI"
+    detail_line "Admin UI" "$ADMIN_UI"
+    env_status_line ".env file" "present"
+    env_status_line "Secrets" "$SCRIPT6_SECRETS_STATUS"
+    env_status_line "Traefik config" "ready"
 }
 
 
@@ -1352,23 +1742,347 @@ function validate_project_paths() {
 #  SCRIPT 6 OUTPUT VALIDATION
 # =========================================================
 
+
+# --- 33A. SCRIPT 6 PREFLIGHT SAFETY HELPERS ---
+# Validates Script 6 marker, .env, secrets and rendered config before deployment changes.
+function script6_marker_key_value() {
+    local key="$1"
+    local value=""
+
+    if root_path_exists "$SCRIPT6_MARKER"; then
+        value="$(root_read_file "$SCRIPT6_MARKER" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | xargs || true)"
+    fi
+
+    printf '%s' "$value"
+}
+
+function is_bare_hostname() {
+    local value="$1"
+
+    [ -n "$value" ] || return 1
+    [[ "$value" != *://* ]] || return 1
+    [[ "$value" != */* ]] || return 1
+    [[ "$value" != *\?* ]] || return 1
+    [[ "$value" != *#* ]] || return 1
+    [[ "$value" != *[[:space:]]* ]] || return 1
+    [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+function is_http_url() {
+    local value="$1"
+
+    [[ "$value" =~ ^https?://[^[:space:]/]+([^[:space:]]*)?$ ]]
+}
+
+function host_from_url() {
+    local value="$1"
+
+    value="${value#http://}"
+    value="${value#https://}"
+    value="${value%%/*}"
+    value="${value%%\?*}"
+    value="${value%%#*}"
+    value="${value%%:*}"
+    printf '%s' "$value"
+}
+
+function host_under_domain() {
+    local host="$1"
+    local domain="$2"
+
+    [ -n "$host" ] || return 1
+    [ -n "$domain" ] || return 1
+    [ "$host" == "$domain" ] && return 0
+    [[ "$host" == *."$domain" ]]
+}
+
+function require_env_key_present() {
+    local key="$1"
+    local value=""
+
+    value="$(env_value "$key")"
+    if [ -z "$value" ]; then
+        msg_error "Required Script 6 .env key is missing or empty: ${key}"
+    fi
+
+    return 0
+}
+
+function require_bare_host_env_key() {
+    local key="$1"
+    local value=""
+
+    value="$(env_value "$key")"
+    [ -n "$value" ] || msg_error "Required hostname key ${key} is missing from Script 6 .env. Rerun Script 6 v1.6.13+."
+    is_bare_hostname "$value" || msg_error "${key} must be a bare hostname, got: ${value}"
+    host_under_domain "$value" "$DOMAIN_VALUE" || msg_error "${key} (${value}) is outside configured DOMAIN (${DOMAIN_VALUE}). Rerun Script 6 v1.6.13+."
+}
+
+function require_url_env_key() {
+    local key="$1"
+    local value=""
+    local url_host=""
+
+    value="$(env_value "$key")"
+    [ -n "$value" ] || msg_error "Required URL key ${key} is missing from Script 6 .env. Rerun Script 6 v1.6.13+."
+    is_http_url "$value" || msg_error "${key} must be an http:// or https:// URL, got: ${value}"
+    url_host="$(host_from_url "$value")"
+    host_under_domain "$url_host" "$DOMAIN_VALUE" || msg_error "${key} host (${url_host}) is outside configured DOMAIN (${DOMAIN_VALUE}). Rerun Script 6 v1.6.13+."
+}
+
+function validate_script6_marker() {
+    local marker_status=""
+    local marker_verify=""
+    local marker_docker_dir=""
+    local marker_domain=""
+    local marker_admin_ui=""
+    local marker_traefik=""
+    local marker_secrets=""
+    local marker_env=""
+
+    msg_info "Validating Script 6 completion marker"
+
+    root_path_exists "$SCRIPT6_MARKER" || msg_error "Script 6 completion marker missing: ${SCRIPT6_MARKER}. Run Script 6 v1.6.13 before Script 6.5."
+
+    marker_status="$(script6_marker_key_value SCRIPT6_STATUS)"
+    marker_verify="$(script6_marker_key_value SCRIPT6_VERIFY_STATUS)"
+    marker_docker_dir="$(script6_marker_key_value SCRIPT6_DOCKER_DIR)"
+    marker_domain="$(script6_marker_key_value SCRIPT6_DOMAIN)"
+    marker_admin_ui="$(script6_marker_key_value SCRIPT6_ADMIN_UI)"
+    marker_traefik="$(script6_marker_key_value SCRIPT6_TRAEFIK_CONFIG)"
+    marker_secrets="$(script6_marker_key_value SCRIPT6_SECRETS_READY)"
+    marker_env="$(script6_marker_key_value SCRIPT6_ENV_FILE_READY)"
+
+    [ "$marker_status" == "completed" ] || msg_error "Script 6 marker is not completed. Found SCRIPT6_STATUS=${marker_status:-missing}."
+    case "$marker_verify" in
+        PASS)
+            ;;
+        PASS_WITH_WARNINGS)
+            msg_warn "Script 6 verification completed with warnings. Continuing because PASS_WITH_WARNINGS is allowed."
+            ;;
+        *)
+            msg_error "Script 6 verification is not deploy-safe. Found SCRIPT6_VERIFY_STATUS=${marker_verify:-missing}."
+            ;;
+    esac
+
+    [ -n "$marker_docker_dir" ] || msg_error "Script 6 marker missing SCRIPT6_DOCKER_DIR. Rerun Script 6."
+    [ -n "$marker_domain" ] || msg_error "Script 6 marker missing SCRIPT6_DOMAIN. Rerun Script 6."
+    [ -n "$marker_admin_ui" ] || msg_error "Script 6 marker missing SCRIPT6_ADMIN_UI. Rerun Script 6."
+    [ "$marker_traefik" == "yes" ] || msg_error "Script 6 marker says Traefik config is not ready: SCRIPT6_TRAEFIK_CONFIG=${marker_traefik:-missing}. Rerun Script 6."
+    [ "$marker_secrets" == "yes" ] || msg_error "Script 6 marker says secrets are not ready: SCRIPT6_SECRETS_READY=${marker_secrets:-missing}. Rerun Script 6."
+    [ "$marker_env" == "yes" ] || msg_error "Script 6 marker says .env is not ready: SCRIPT6_ENV_FILE_READY=${marker_env:-missing}. Rerun Script 6."
+
+    SCRIPT6_PREFLIGHT_STATUS="$marker_verify"
+    SCRIPT6_VERIFY_STATUS="$marker_verify"
+    SCRIPT6_MARKER_DOCKER_DIR="$marker_docker_dir"
+    SCRIPT6_MARKER_DOMAIN="$marker_domain"
+    SCRIPT6_MARKER_ADMIN_UI="$marker_admin_ui"
+    SCRIPT6_SECRETS_STATUS="ready"
+    TRAEFIK_CONFIG_PREFLIGHT_STATUS="ready"
+
+    DOCKER_DIR="$marker_docker_dir"
+    DOCKER_USER="$(basename "$(dirname "$DOCKER_DIR")")"
+    COMPOSE_DIR="${DOCKER_DIR}/compose"
+    ENV_FILE="${DOCKER_DIR}/.env"
+    export DOCKER_DIR COMPOSE_DIR ENV_FILE
+
+    clear_transient_line
+    msg_ok "SCRIPT 6 MARKER VALIDATED"
+}
+
+function validate_script6_env_file() {
+    local key=""
+    local required_keys=(
+        DOMAIN
+        ADMIN_UI
+        ADMIN_UI_HOST
+        ADMIN_UI_URL
+        AUTHENTIK_ROUTE_HOST
+        AUTHENTIK_EXTERNAL_URL
+        TRAEFIK_HOST
+        POSTIZ_HOST
+        FILEBROWSER_HOST
+        VSCODE_HOST
+        DOCKER_DIR
+        DOCKER_SECRETS_DIR
+    )
+    local optional_host_keys=(
+        LANDING_HOST
+        LANDING_WWW_HOST
+        AUTHENTIK_HOST_BROWSER_VALUE
+        AUTHENTIK_HOST_BROWSER
+        N8N_HOST
+    )
+
+    msg_info "Validating Script 6 .env keys"
+
+    root_path_exists "$ENV_FILE" || msg_error "Script 6 .env file missing: ${ENV_FILE}. Rerun Script 6."
+
+    for key in "${required_keys[@]}"; do
+        require_env_key_present "$key"
+    done
+
+    require_bare_host_env_key "ADMIN_UI_HOST"
+    require_bare_host_env_key "AUTHENTIK_ROUTE_HOST"
+    require_bare_host_env_key "TRAEFIK_HOST"
+    require_bare_host_env_key "POSTIZ_HOST"
+    require_bare_host_env_key "FILEBROWSER_HOST"
+    require_bare_host_env_key "VSCODE_HOST"
+    require_url_env_key "ADMIN_UI_URL"
+    require_url_env_key "AUTHENTIK_EXTERNAL_URL"
+
+    for key in "${optional_host_keys[@]}"; do
+        if [ -n "$(env_value "$key")" ]; then
+            case "$key" in
+                AUTHENTIK_HOST_BROWSER_VALUE|AUTHENTIK_HOST_BROWSER)
+                    require_url_env_key "$key"
+                    ;;
+                *)
+                    require_bare_host_env_key "$key"
+                    ;;
+            esac
+        fi
+    done
+
+    SCRIPT6_ENV_REQUIRED_KEYS_STATUS="ready"
+    SCRIPT6_ENV_HOSTNAMES_STATUS="ready"
+    SCRIPT6_ENV_URLS_STATUS="ready"
+
+    clear_transient_line
+    msg_ok "SCRIPT 6 .ENV PREFLIGHT PASSED"
+}
+
+function secret_file_status() {
+    local path="$1"
+    local allow_empty="${2:-no}"
+
+    if ! root_path_exists "$path"; then
+        printf 'missing'
+    elif root_file_not_empty "$path"; then
+        printf 'present'
+    elif [ "$allow_empty" == "yes" ]; then
+        printf 'empty placeholder'
+    else
+        printf 'empty'
+    fi
+}
+
+function require_secret_file_status() {
+    local label="$1"
+    local path="$2"
+    local allow_empty="${3:-no}"
+    local status=""
+
+    status="$(secret_file_status "$path" "$allow_empty")"
+    case "$status" in
+        present)
+            ;;
+        "empty placeholder")
+            ;;
+        empty)
+            msg_error "Required secret file is empty: ${path}"
+            ;;
+        missing)
+            msg_error "Required secret file is missing: ${path}"
+            ;;
+    esac
+}
+
+function validate_required_secret_files() {
+    local required_secrets=(
+        postgres_password
+        redis_password
+        authentik_secret_key
+        authentik_postgres_password
+        postiz_postgres_password
+        postiz_jwt_secret
+        temporal_postgres_password
+    )
+    local secret=""
+
+    [ -n "$DOCKER_SECRETS_DIR" ] || msg_error "DOCKER_SECRETS_DIR is missing from Script 6 .env. Rerun Script 6."
+    root_path_exists "$DOCKER_SECRETS_DIR" || msg_error "Docker secrets directory missing: ${DOCKER_SECRETS_DIR}. Rerun Script 6."
+
+    msg_info "Validating required secret files"
+    clear_transient_line
+
+    for secret in "${required_secrets[@]}"; do
+        require_secret_file_status "$secret" "${DOCKER_SECRETS_DIR}/${secret}" "no"
+    done
+
+    require_secret_file_status "htpasswd" "${DOCKER_SECRETS_DIR}/htpasswd" "yes"
+
+    if selected_stack_contains "$TRAEFIK_STACK_FILE" || [[ "$DEPLOY_CF_DDNS" =~ ^[Yy] ]] || [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
+        require_secret_file_status "cf_api_token" "${CF_API_TOKEN_FILE:-${DOCKER_SECRETS_DIR}/cf_api_token}" "no"
+    else
+        :
+    fi
+
+    if [ "$ADMIN_UI" == "komodo" ]; then
+        require_secret_file_status "komodo_db_password" "${DOCKER_SECRETS_DIR}/komodo_db_password" "no"
+        require_secret_file_status "komodo_passkey" "${DOCKER_SECRETS_DIR}/komodo_passkey" "no"
+        require_secret_file_status "komodo_webhook_secret" "${DOCKER_SECRETS_DIR}/komodo_webhook_secret" "no"
+        require_secret_file_status "komodo_jwt_secret" "${DOCKER_SECRETS_DIR}/komodo_jwt_secret" "no"
+    fi
+
+    SCRIPT6_SECRETS_STATUS="ready"
+    SCRIPT6_HTPASSWD_STATUS="$(secret_file_status "${DOCKER_SECRETS_DIR}/htpasswd" "yes")"
+}
+
+function validate_traefik_config_files_predeploy() {
+    local acme_mode=""
+
+    [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ] || msg_error "Traefik static config missing: ${TRAEFIK_STATIC_CONFIG_FILE}. Rerun Script 6."
+    [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] || msg_error "Traefik dynamic config missing: ${TRAEFIK_DYNAMIC_CONFIG_FILE}. Rerun Script 6."
+    [ -f "$TRAEFIK_ACME_STORAGE" ] || msg_error "Traefik acme.json missing: ${TRAEFIK_ACME_STORAGE}. Rerun Script 6."
+
+    if grep -R '{{[^}]*}}' "$TRAEFIK_STATIC_CONFIG_FILE" "$TRAEFIK_DYNAMIC_CONFIG_FILE" >/dev/null 2>&1; then
+        msg_error "Unresolved template placeholders remain in Traefik config files. Rerun Script 6."
+    fi
+
+    acme_mode="$(root_stat_mode "$TRAEFIK_ACME_STORAGE")"
+    [ "$acme_mode" == "600" ] || msg_error "Traefik acme.json mode is ${acme_mode:-unknown}; expected 600. Rerun Script 6."
+
+    TRAEFIK_CONFIG_PREFLIGHT_STATUS="ready"
+}
+
+function validate_cf_companion_predeploy() {
+    local cf_zone_id=""
+    local cf_token_path=""
+
+    cf_zone_id="$(env_value CF_ZONE_ID)"
+    cf_token_path="${CF_API_TOKEN_FILE:-$(env_value CF_API_TOKEN_FILE)}"
+
+    [ -n "$cf_zone_id" ] || msg_error "Cloudflare Companion selected but CF_ZONE_ID is missing from .env. Rerun Script 6 and provide the Cloudflare Zone ID, or skip cf-companion."
+    [ -n "$cf_token_path" ] || msg_error "Cloudflare Companion selected but CF_API_TOKEN_FILE is missing from .env. Rerun Script 6."
+    root_file_not_empty "$cf_token_path" || msg_error "Cloudflare Companion selected but cf_api_token is missing or empty: ${cf_token_path}. Rerun Script 6 with a token, or skip cf-companion."
+}
+
+function compose_plan_selected_count() {
+    local count=3
+    local file=""
+
+    for file in "${SELECTED_STACK_FILES[@]:-}"; do
+        count=$((count + 1))
+    done
+
+    printf '%s' "$count"
+}
+
 # --- 33A. REDIS HOST TUNING VERIFICATION ---
 # Confirms Script 5 applied the Redis-recommended overcommit setting before Redis deployment.
 function verify_redis_host_tuning() {
-    section "REDIS HOST TUNING"
-
     local value=""
     value="$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo "")"
 
     if [ "$value" == "1" ]; then
         SYSCTL_REDIS_OK="yes"
-        msg_ok "VM.OVERCOMMIT_MEMORY IS 1"
     else
         msg_error "vm.overcommit_memory is ${value:-unknown}. Run fixed Script 5 before deploying Redis."
     fi
 
     if [ -f /etc/sysctl.d/99-redis-overcommit.conf ] || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" test -f /etc/sysctl.d/99-redis-overcommit.conf 2>/dev/null; }; then
-        msg_ok "REDIS SYSCTL PERSISTENCE FILE FOUND"
+        :
     else
         msg_warn "Redis sysctl persistence file not found. Runtime value is correct, but reboot persistence should be fixed."
     fi
@@ -1377,47 +2091,32 @@ function verify_redis_host_tuning() {
 # --- 33B. TRAEFIK TEMPLATE RENDER VERIFICATION ---
 # Ensures no unreplaced placeholders remain and final Traefik v3.7 settings exist.
 function verify_traefik_rendered_configs() {
-    section "TRAEFIK TEMPLATE VERIFICATION"
+    [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ] || msg_error "Traefik static config missing: ${TRAEFIK_STATIC_CONFIG_FILE}. Rerun Script 6."
+    [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] || msg_error "Traefik dynamic config missing: ${TRAEFIK_DYNAMIC_CONFIG_FILE}. Rerun Script 6."
+    [ -f "$TRAEFIK_ACME_STORAGE" ] || msg_error "Traefik acme.json missing: ${TRAEFIK_ACME_STORAGE}. Rerun Script 6."
 
-    if [ ! -f "$TRAEFIK_STATIC_CONFIG_FILE" ] || [ ! -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] || [ ! -f "$TRAEFIK_ACME_STORAGE" ]; then
-        rebuild_missing_traefik_configs
-    fi
-
-    [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ] || msg_error "Traefik static config missing after self-heal: ${TRAEFIK_STATIC_CONFIG_FILE}"
-    [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] || msg_error "Traefik dynamic config missing after self-heal: ${TRAEFIK_DYNAMIC_CONFIG_FILE}"
-    [ -f "$TRAEFIK_ACME_STORAGE" ] || msg_error "Traefik acme.json missing after self-heal: ${TRAEFIK_ACME_STORAGE}"
-
-    msg_info "Checking for unreplaced template placeholders"
     if grep -R '{{[^}]*}}' "$TRAEFIK_STATIC_CONFIG_FILE" "$TRAEFIK_DYNAMIC_CONFIG_FILE" >/dev/null 2>&1; then
         msg_error "Unrendered {{PLACEHOLDER}} values remain in Traefik config. Fix Script 6 render logic/templates."
     fi
     TRAEFIK_PLACEHOLDERS_OK="yes"
-    msg_ok "TRAEFIK PLACEHOLDERS FULLY RENDERED"
 
-    msg_info "Checking Traefik v3.7 DNS propagation syntax"
     if grep -q 'delayBefore''Checks' "$TRAEFIK_STATIC_CONFIG_FILE" && ! grep -q 'delayBefore''Check:' "$TRAEFIK_STATIC_CONFIG_FILE"; then
         TRAEFIK_DNS_DELAY_OK="yes"
-        msg_ok "TRAEFIK DNS PROPAGATION SYNTAX IS V3.7 COMPATIBLE"
     else
         msg_error "Traefik DNS challenge must use the current Traefik v3 propagation delay key, not the deprecated singular key."
     fi
 
-    msg_info "Checking Traefik encoded-character options"
     if grep -q 'encodedCharacters' "$TRAEFIK_STATIC_CONFIG_FILE"; then
         TRAEFIK_ENCODED_CHARS_OK="yes"
-        msg_ok "TRAEFIK ENCODED-CHARACTER CONFIG FOUND"
     else
         msg_error "Traefik encoded-character options missing from static config. Fix Script 6 template."
     fi
 
-    msg_info "Checking for stale Authentik Docker-provider middleware references"
     if grep -q "authentik@""docker" "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then
         msg_error "Stale Authentik Docker-provider middleware reference found in dynamic config. Use authentik file-provider middleware."
     fi
     TRAEFIK_AUTHENTIK_REFERENCES_OK="yes"
-    msg_ok "NO STALE AUTHENTIK@DOCKER REFERENCES"
 
-    msg_info "Checking centralized wildcard certificate strategy"
     if ! grep -q "main: \"${DOMAIN_VALUE}\"" "$TRAEFIK_STATIC_CONFIG_FILE" 2>/dev/null && ! grep -q "main: ${DOMAIN_VALUE}" "$TRAEFIK_STATIC_CONFIG_FILE" 2>/dev/null; then
         msg_error "Traefik static config does not contain the base wildcard certificate domain."
     fi
@@ -1427,13 +2126,11 @@ function verify_traefik_rendered_configs() {
     if grep -q 'certResolver: cloudflare' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
         msg_error "Traefik dynamic config still contains per-router certResolver entries. Wildcard issuance must stay centralized in traefik.yml."
     fi
-    msg_ok "TRAEFIK WILDCARD CERTIFICATE STRATEGY VERIFIED"
 
-    msg_info "Checking acme.json permissions"
     local acme_mode=""
     acme_mode="$(stat -c '%a' "$TRAEFIK_ACME_STORAGE" 2>/dev/null || true)"
     if [ "$acme_mode" == "600" ]; then
-        msg_ok "TRAEFIK ACME STORAGE PERMISSIONS ARE 600"
+        :
     else
         msg_error "Traefik acme.json mode is ${acme_mode:-unknown}; expected 600."
     fi
@@ -1442,8 +2139,6 @@ function verify_traefik_rendered_configs() {
 # --- 33C. AUTHENTIK FOLDER VERIFICATION ---
 # Confirms host bind mounts exist and are writable by the non-root Authentik container user.
 function verify_authentik_folders() {
-    section "AUTHENTIK FOLDER VERIFICATION"
-
     local folders=(
         "${DOCKER_DIR}/appdata/authentik"
         "${DOCKER_DIR}/appdata/authentik/media"
@@ -1453,7 +2148,6 @@ function verify_authentik_folders() {
     local folder=""
 
     for folder in "${folders[@]}"; do
-        msg_info "Checking ${folder}"
         [ -d "$folder" ] || msg_error "Required Authentik folder missing: ${folder}"
 
         if [ -n "$SUDO_CMD" ]; then
@@ -1462,15 +2156,12 @@ function verify_authentik_folders() {
             touch "${folder}/.ak-write-test-$$" && rm -f "${folder}/.ak-write-test-$$" || msg_error "Cannot verify Authentik write access to ${folder}"
         fi
 
-        msg_ok "AUTHENTIK FOLDER READY: ${folder}"
     done
 
     AUTHENTIK_FOLDERS_OK="yes"
 }
 
 function verify_authentik_smtp_env() {
-    section "AUTHENTIK SMTP VERIFICATION"
-
     local smtp_host=""
     local smtp_port=""
     local smtp_username=""
@@ -1501,13 +2192,6 @@ function verify_authentik_smtp_env() {
 
     password_status="$( [ -n "$smtp_password" ] && echo set || echo missing)"
 
-    detail_line "SMTP host" "$smtp_host"
-    detail_line "SMTP port" "${smtp_port:-587}"
-    detail_line "SMTP username" "$( [ -n "$smtp_username" ] && echo set || echo missing)"
-    detail_line "SMTP from" "${smtp_from:-not set}"
-    detail_line "SMTP TLS/SSL" "${smtp_use_tls:-true}/${smtp_use_ssl:-false}"
-    detail_line "SMTP timeout" "${smtp_timeout:-30}"
-    detail_line "SMTP password" "$password_status"
 
     [ -n "$smtp_port" ] || msg_error "Authentik SMTP port is required when SMTP host is set"
     [ -n "$smtp_username" ] || msg_error "Authentik SMTP username is required when SMTP host is set"
@@ -1518,16 +2202,11 @@ function verify_authentik_smtp_env() {
     [ -n "$smtp_timeout" ] || msg_error "Authentik SMTP TIMEOUT is required when SMTP host is set"
 
     AUTHENTIK_SMTP_ENV_OK="yes"
-    msg_ok "AUTHENTIK SMTP ENV VERIFIED"
 }
 
 # --- 33E. ADMIN UI SELECTION VERIFICATION ---
 # Maps .env ADMIN_UI to expected compose template and service.
 function verify_admin_ui_selection() {
-    section "ADMIN UI SELECTION"
-
-    local expected_host=""
-
     case "$ADMIN_UI" in
         dockge)
             ADMIN_UI_PROJECT_NAME="dockge"
@@ -1539,7 +2218,6 @@ function verify_admin_ui_selection() {
             ADMIN_UI_BOOTSTRAP_PORT="$DOCKGE_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="5001"
             ADMIN_UI_BOOTSTRAP_SCHEME="http"
-            expected_host="dockge.${DOMAIN_VALUE}"
             ;;
         portainer|portainer-ce)
             ADMIN_UI="portainer"
@@ -1552,7 +2230,6 @@ function verify_admin_ui_selection() {
             ADMIN_UI_BOOTSTRAP_PORT="$PORTAINER_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="9443"
             ADMIN_UI_BOOTSTRAP_SCHEME="https"
-            expected_host="portainer.${DOMAIN_VALUE}"
             ;;
         komodo)
             ADMIN_UI_PROJECT_NAME="komodo"
@@ -1564,7 +2241,6 @@ function verify_admin_ui_selection() {
             ADMIN_UI_BOOTSTRAP_PORT="$KOMODO_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="9120"
             ADMIN_UI_BOOTSTRAP_SCHEME="http"
-            expected_host="komodo.${DOMAIN_VALUE}"
             ;;
         dockhand)
             ADMIN_UI_PROJECT_NAME="dockhand"
@@ -1576,30 +2252,30 @@ function verify_admin_ui_selection() {
             ADMIN_UI_BOOTSTRAP_PORT="$DOCKHAND_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="3000"
             ADMIN_UI_BOOTSTRAP_SCHEME="http"
-            expected_host="dockhand.${DOMAIN_VALUE}"
             ;;
         *)
             msg_error "Invalid ADMIN_UI value in .env: ${ADMIN_UI}. Expected dockge, portainer, komodo, or dockhand."
             ;;
     esac
 
-    [ -z "${ADMIN_UI_HOST:-}" ] && ADMIN_UI_HOST="$expected_host"
-    [ -z "${ADMIN_UI_URL:-}" ] && ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
+    require_route_host_value "ADMIN_UI_HOST" "$ADMIN_UI_HOST"
+    [ -n "$ADMIN_UI_URL" ] || ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
+    export ADMIN_UI_HOST ADMIN_UI_URL
 
-    msg_ok "ADMIN UI SELECTION VERIFIED"
-    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
-    detail_line "Admin UI host" "$ADMIN_UI_HOST"
-    detail_line "Admin UI URL" "$ADMIN_UI_URL"
-    detail_line "Stack compose" "$ADMIN_UI_COMPOSE_FILE"
-    detail_line "Bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
-    detail_line "Temporary bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
+    group_heading "Admin UI"
+    detail_line "Status" "verified" "$GN" "20"
+    detail_line "Selected UI" "$ADMIN_UI_DISPLAY_NAME" "$GN" "20"
+    detail_line "Admin UI host" "$ADMIN_UI_HOST" "$GN" "20"
+    detail_line "Admin UI URL" "$ADMIN_UI_URL" "$GN" "20"
+    detail_line "Stack compose" "$ADMIN_UI_COMPOSE_FILE" "$GN" "20"
+    detail_line "Bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" "$GN" "20"
+    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT" "$GN" "20"
+    echo ""
 }
 
 # --- 33F. CLOUDFLARE COMPANION SECRET VERIFICATION ---
 # Ensures cf-companion can read Cloudflare token from a local secret file.
 function verify_cf_companion_secret_file() {
-    section "CF-COMPANION SECRET VERIFICATION"
-
     if [ -z "$CF_API_TOKEN_FILE" ]; then
         CF_COMPANION_SECRET_OK="missing-env"
         msg_warn "CF_API_TOKEN_FILE missing from .env"
@@ -1608,7 +2284,6 @@ function verify_cf_companion_secret_file() {
 
     if [ -s "$CF_API_TOKEN_FILE" ]; then
         CF_COMPANION_SECRET_OK="yes"
-        msg_ok "CLOUDFLARE TOKEN FILE EXISTS AND IS NON-EMPTY"
     else
         CF_COMPANION_SECRET_OK="empty-or-missing"
         msg_warn "Cloudflare token file is empty or missing: ${CF_API_TOKEN_FILE}"
@@ -1618,8 +2293,6 @@ function verify_cf_companion_secret_file() {
 # --- 33G. FILEBROWSER FOLDER VERIFICATION ---
 # Confirms Filebrowser-safe writable folders exist before Filebrowser stack deployment.
 function verify_filebrowser_folders() {
-    section "FILEBROWSER FOLDER VERIFICATION"
-
     local folders=(
         "${DOCKER_DIR}/appdata/filebrowser/database"
         "${DOCKER_DIR}/appdata/filebrowser/config"
@@ -1630,10 +2303,8 @@ function verify_filebrowser_folders() {
     local folder=""
 
     for folder in "${folders[@]}"; do
-        msg_info "Checking ${folder}"
         [ -d "$folder" ] || msg_error "Required Filebrowser folder missing: ${folder}"
         verify_user_writable_dir "$folder" || msg_error "Docker user ${DOCKER_USER} cannot write to ${folder}"
-        msg_ok "FILEBROWSER FOLDER WRITABLE: ${folder}"
     done
 
     FILEBROWSER_FOLDERS_OK="yes"
@@ -1910,21 +2581,7 @@ pgdata="${PGDATA:-/var/lib/postgresql/data}"
 find "$pgdata" \( ! -uid "$expected_uid" -o ! -gid "$expected_gid" -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf "%u:%g %m %p\n" | head -30' 2>/dev/null || true)"
 
     if [ -n "$bad" ]; then
-        echo -e "${YW}PostgreSQL pgdata container-side permission offenders detected:${CL}"
-        printf '%s\n' "$bad"
-        echo -e "${YW}Expected PostgreSQL UID:GID inside container:${CL} ${owner_spec}:${group_spec}"
-        echo -e "${YW}PostgreSQL container PGDATA path:${CL} ${container_pgdata}"
-        echo -e "${YW}Host PostgreSQL pgdata path:${CL} ${pg_data_dir}"
-
-        if [ -n "$SUDO_CMD" ]; then
-            echo -e "${YW}Host pgdata stats:${CL}"
-            "$SUDO_CMD" stat -c 'path=%n owner=%u:%g mode=%a type=%F' "$pg_data_dir" "$pg_data_dir/18/docker" "$pg_data_dir/18/docker/global" "$pg_data_dir/18/docker/global/pg_filenode.map" 2>/dev/null || true
-        else
-            echo -e "${YW}Host pgdata stats:${CL}"
-            stat -c 'path=%n owner=%u:%g mode=%a type=%F' "$pg_data_dir" "$pg_data_dir/18/docker" "$pg_data_dir/18/docker/global" "$pg_data_dir/18/docker/global/pg_filenode.map" 2>/dev/null || true
-        fi
-
-        msg_info "Attempting PostgreSQL pgdata repair."
+        msg_info "Repairing PostgreSQL pgdata permissions"
         repair_postgres_pgdata_permissions
 
         bad="$(docker_cmd exec postgres sh -lc '
@@ -1936,11 +2593,15 @@ find "$pgdata" \( ! -uid "$expected_uid" -o ! -gid "$expected_gid" -o -type d ! 
         if [ -n "$bad" ]; then
             echo -e "${YW}PostgreSQL pgdata repair failed. Remaining container-side offenders:${CL}"
             printf '%s\n' "$bad"
+            echo -e "${YW}Expected PostgreSQL UID:GID inside container:${CL} ${owner_spec}:${group_spec}"
+            echo -e "${YW}PostgreSQL container PGDATA path:${CL} ${container_pgdata}"
+            echo -e "${YW}Host PostgreSQL pgdata path:${CL} ${pg_data_dir}"
             msg_error "PostgreSQL pgdata still contains container-side ownership/permission offenders after repair. Refusing to deploy dependants."
         fi
+        clear_transient_line
     fi
 
-    msg_ok "PostgreSQL pgdata ownership and permissions are verified."
+    msg_ok "PostgreSQL pgdata permissions ready"
 }
 
 function repair_redis_data_permissions() {
@@ -1983,7 +2644,7 @@ function prepare_postgres_runtime_prereqs() {
         return 0
     fi
 
-    section "POSTGRESQL RUNTIME PREREQS"
+    apply_group_heading "Runtime prerequisites"
 
     local pg_root_dir="${DOCKER_DIR}/appdata/postgres"
     local pg_data_dir="${pg_root_dir}/pgdata"
@@ -2000,10 +2661,10 @@ function prepare_postgres_runtime_prereqs() {
     verify_postgres_pgdata_permissions
     run_cmd "setting PostgreSQL init directory readability" chmod 755 "$pg_init_dir"
 
-    msg_ok "POSTGRESQL DATA DIRECTORY READY"
-    detail_line "Data path" "$pg_data_dir"
-    detail_line "Data owner" "$(postgres_data_owner) recursive"
-    detail_line "Data mode" "700 root, u+rwX,go-rwx recursive"
+    msg_ok "POSTGRESQL READY"
+    detail_line "Container" "ready"
+    detail_line "Data dir" "ready"
+    detail_line "Permissions" "ready"
 
     if docker_cmd inspect postgres --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null | grep -Eq 'restarting|unhealthy|exited|dead'; then
         msg_info "Existing PostgreSQL container is stale/unhealthy; removing container only, keeping data"
@@ -2018,7 +2679,7 @@ function prepare_redis_runtime_prereqs() {
         return 0
     fi
 
-    section "REDIS RUNTIME PREREQS"
+    apply_group_heading "Runtime prerequisites"
 
     local redis_data_dir="${DOCKER_DIR}/appdata/redis"
 
@@ -2026,10 +2687,9 @@ function prepare_redis_runtime_prereqs() {
     repair_redis_data_permissions
     verify_redis_data_permissions
 
-    msg_ok "REDIS DATA DIRECTORY READY"
-    detail_line "Path" "$redis_data_dir"
-    detail_line "Owner" "$(redis_data_owner)"
-    detail_line "Mode" "770"
+    msg_ok "REDIS READY"
+    detail_line "Data dir" "ready"
+    detail_line "Permissions" "ready"
 }
 
 function require_nonempty_env_value() {
@@ -2059,7 +2719,7 @@ function show_postgres_diagnostics() {
 }
 
 function wait_for_postgres_ready() {
-    section "POSTGRESQL READINESS CHECK"
+    apply_group_heading "Runtime prerequisites"
 
     local attempt=""
     local max_attempts="150"
@@ -2103,7 +2763,7 @@ function verify_redis_persistence_ready() {
         return 0
     fi
 
-    section "REDIS PERSISTENCE CHECK"
+    apply_group_heading "Runtime prerequisites"
 
     local attempt=""
     local max_attempts="60"
@@ -2155,7 +2815,7 @@ function wait_for_temporal_ready() {
         return 0
     fi
 
-    section "TEMPORAL READINESS CHECK"
+    apply_group_heading "Stack deployment"
 
     local temporal_address="${TEMPORAL_ADDRESS:-temporal:7233}"
     local temporal_namespace="${TEMPORAL_NAMESPACE:-default}"
@@ -2221,6 +2881,43 @@ function dockge_stack_dir_name_for_file() {
     esac
 }
 
+
+function safe_install_file_with_backup() {
+    local source_path="$1"
+    local target_file="$2"
+    local label="${3:-file}"
+    local backup_file=""
+    local timestamp=""
+
+    [ -s "$source_path" ] || msg_error "Safe write source is missing or empty for ${label}: ${source_path}"
+
+    if root_path_exists "$target_file"; then
+        if { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" cmp -s "$source_path" "$target_file"; } || { [ -z "$SUDO_CMD" ] && cmp -s "$source_path" "$target_file"; }; then
+            SAFE_WRITE_UNCHANGED_COUNT=$(( SAFE_WRITE_UNCHANGED_COUNT + 1 ))
+            if [ "$COMPOSE_PROGRESS_ACTIVE" != "yes" ]; then
+                msg_ok "unchanged ${label}: ${target_file}"
+            fi
+            return 0
+        fi
+
+        timestamp="$(date +%Y%m%d-%H%M%S)"
+        backup_file="${target_file}.bak-${timestamp}"
+        run_cmd "backing up existing ${label}" cp "$target_file" "$backup_file"
+        run_cmd "writing updated ${label}" cp "$source_path" "$target_file"
+        SAFE_WRITE_BACKUP_COUNT=$(( SAFE_WRITE_BACKUP_COUNT + 1 ))
+        SAFE_WRITE_UPDATED_COUNT=$(( SAFE_WRITE_UPDATED_COUNT + 1 ))
+        if [ "$COMPOSE_PROGRESS_ACTIVE" != "yes" ]; then
+            msg_ok "updated with backup: ${backup_file}"
+        fi
+    else
+        run_cmd "writing new ${label}" cp "$source_path" "$target_file"
+        SAFE_WRITE_CREATED_COUNT=$(( SAFE_WRITE_CREATED_COUNT + 1 ))
+        if [ "$COMPOSE_PROGRESS_ACTIVE" != "yes" ]; then
+            msg_ok "created ${label}: ${target_file}"
+        fi
+    fi
+}
+
 function sync_compose_file_for_dockge() {
     local file="$1"
     local source_path="$2"
@@ -2237,10 +2934,12 @@ function sync_compose_file_for_dockge() {
     target_file="${target_dir}/compose.yaml"
 
     run_cmd "creating Dockge stack folder ${stack_dir}" mkdir -p "$target_dir"
-    run_cmd "syncing ${file} into Dockge compose layout" cp "$source_path" "$target_file"
+    safe_install_file_with_backup "$source_path" "$target_file" "Dockge compose ${stack_dir}"
     run_cmd "setting Dockge compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target_file"
     run_cmd "setting Dockge compose permissions" chmod 640 "$target_file"
-    msg_ok "DOCKGE COMPOSE READY: ${target_file}"
+    if [ "$COMPOSE_PROGRESS_ACTIVE" != "yes" ]; then
+        msg_ok "Dockge compose ready: ${target_file}"
+    fi
 }
 
 function sync_bootstrap_override_for_dockge() {
@@ -2259,10 +2958,12 @@ function sync_bootstrap_override_for_dockge() {
     target_file="${target_dir}/bootstrap-override.yaml"
 
     run_cmd "creating Dockge stack folder ${stack_dir}" mkdir -p "$target_dir"
-    run_cmd "syncing bootstrap override into Dockge compose layout" cp "$source_path" "$target_file"
+    safe_install_file_with_backup "$source_path" "$target_file" "Dockge bootstrap override ${stack_dir}"
     run_cmd "setting Dockge bootstrap override ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target_file"
     run_cmd "setting Dockge bootstrap override permissions" chmod 640 "$target_file"
-    msg_ok "DOCKGE BOOTSTRAP OVERRIDE READY: ${target_file}"
+    if [ "$COMPOSE_PROGRESS_ACTIVE" != "yes" ]; then
+        msg_ok "Dockge bootstrap override ready: ${target_file}"
+    fi
 }
 
 
@@ -2384,16 +3085,69 @@ function add_traefik_only_dependency() {
     add_selected_stack_once "$TRAEFIK_STACK_FILE" "Traefik auto-selected because ${source_reason} requires Traefik routing/labels."
 }
 
+function _readd_selected_stack_by_file() {
+    local wanted="$1"
+    local i=""
+
+    for i in "${!SELECTED_STACK_FILES[@]}"; do
+        if [ "${SELECTED_STACK_FILES[$i]}" == "$wanted" ]; then
+            _ORDERED_STACK_FILES+=("${SELECTED_STACK_FILES[$i]}")
+            _ORDERED_STACK_PROJECTS+=("${SELECTED_STACK_PROJECTS[$i]}")
+            _ORDERED_STACK_SERVICES+=("${SELECTED_STACK_SERVICES[$i]}")
+            _ORDERED_DEPENDENCY_REASONS+=("${DEPENDENCY_REASONS[$i]}")
+            return 0
+        fi
+    done
+}
+
+function reorder_cloudflare_stacks_last() {
+    local i=""
+    local file=""
+    local ordered_files=()
+    local ordered_projects=()
+    local ordered_services=()
+    local ordered_reasons=()
+
+    _ORDERED_STACK_FILES=()
+    _ORDERED_STACK_PROJECTS=()
+    _ORDERED_STACK_SERVICES=()
+    _ORDERED_DEPENDENCY_REASONS=()
+
+    for i in "${!SELECTED_STACK_FILES[@]}"; do
+        file="${SELECTED_STACK_FILES[$i]}"
+        case "$file" in
+            "$CF_DDNS_STACK_FILE"|"$CF_COMPANION_STACK_FILE")
+                ;;
+            *)
+                _ORDERED_STACK_FILES+=("${SELECTED_STACK_FILES[$i]}")
+                _ORDERED_STACK_PROJECTS+=("${SELECTED_STACK_PROJECTS[$i]}")
+                _ORDERED_STACK_SERVICES+=("${SELECTED_STACK_SERVICES[$i]}")
+                _ORDERED_DEPENDENCY_REASONS+=("${DEPENDENCY_REASONS[$i]}")
+                ;;
+        esac
+    done
+
+    _readd_selected_stack_by_file "$CF_DDNS_STACK_FILE"
+    _readd_selected_stack_by_file "$CF_COMPANION_STACK_FILE"
+
+    SELECTED_STACK_FILES=("${_ORDERED_STACK_FILES[@]}")
+    SELECTED_STACK_PROJECTS=("${_ORDERED_STACK_PROJECTS[@]}")
+    SELECTED_STACK_SERVICES=("${_ORDERED_STACK_SERVICES[@]}")
+    DEPENDENCY_REASONS=("${_ORDERED_DEPENDENCY_REASONS[@]}")
+
+    unset _ORDERED_STACK_FILES _ORDERED_STACK_PROJECTS _ORDERED_STACK_SERVICES _ORDERED_DEPENDENCY_REASONS
+}
+
 # --- 33I. STACK DEPLOYMENT CHOICE COLLECTION ---
 # Collects all deployment choices before any compose files, networks or containers are changed.
 function collect_stack_deployment_choices() {
-    section "STACK DEPLOYMENT SELECTION"
-
-    echo -e "${YW}Socket Proxy is required and will always be deployed.${CL}"
-    echo -e "${YW}${ADMIN_UI_DISPLAY_NAME} was selected in Script 6 and will be deployed with temporary bootstrap access.${CL}"
+    group_heading "Required"
+    detail_line "Socket proxy" "selected"
+    detail_line "Admin UI" "${ADMIN_UI_DISPLAY_NAME} with temporary bootstrap access"
     echo ""
 
-    DEPLOY_POSTIZ="$(timed_yes_no "Deploy Postiz social media stack?" "y")"
+    group_heading "Stack choices"
+    DEPLOY_POSTIZ="$(timed_yes_no_value_only "Deploy Postiz social media stack?" "y")"
     if [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
         add_selected_stack_once "$POSTGRES_STACK_FILE" "PostgreSQL auto-selected because Authentik, Temporal and Postiz need database storage."
         add_selected_stack_once "$REDIS_STACK_FILE" "Redis auto-selected because Authentik and Postiz need cache/session storage."
@@ -2402,38 +3156,53 @@ function collect_stack_deployment_choices() {
         add_selected_stack_once "$TEMPORAL_STACK_FILE" "Temporal auto-selected because Postiz requires workflow orchestration."
         add_selected_stack_once "$POSTIZ_TEMPORAL_GUARD_STACK_FILE" "Postiz Temporal Guard auto-selected because Postiz can crash if Temporal Text attributes remain."
         add_selected_stack_once "$POSTIZ_STACK_FILE" "Postiz selected by user."
-    else
-        echo -e "${YW}Postiz not selected. You can still deploy optional utility stacks below.${CL}"
     fi
 
-    DEPLOY_CF_DDNS="$(timed_yes_no "Deploy Cloudflare DDNS stack?" "y")"
+    DEPLOY_CF_DDNS="$(timed_yes_no_value_only "Deploy Cloudflare DDNS stack?" "y")"
     [[ "$DEPLOY_CF_DDNS" =~ ^[Yy] ]] && add_selected_stack_once "$CF_DDNS_STACK_FILE" "Cloudflare DDNS selected by user."
 
-    DEPLOY_CF_COMPANION="$(timed_yes_no "Deploy Cloudflare Companion DNS automation stack?" "y")"
+    DEPLOY_CF_COMPANION="$(timed_yes_no_value_only "Deploy Cloudflare Companion DNS automation stack?" "y")"
     if [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
         add_traefik_only_dependency "Cloudflare Companion"
         add_selected_stack_once "$CF_COMPANION_STACK_FILE" "Cloudflare Companion selected by user for Traefik label-driven DNS automation."
     fi
 
-    DEPLOY_VSCODE="$(timed_yes_no "Deploy VS Code server utility stack?" "n")"
+    DEPLOY_VSCODE="$(timed_yes_no_value_only "Deploy VS Code server utility stack?" "n")"
     if [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]]; then
         add_authentik_routing_dependencies "VS Code"
         add_selected_stack_once "$VSCODE_STACK_FILE" "VS Code utility stack selected by user."
     fi
 
-    DEPLOY_FILEBROWSER="$(timed_yes_no "Deploy Filebrowser utility stack?" "n")"
+    DEPLOY_FILEBROWSER="$(timed_yes_no_value_only "Deploy Filebrowser utility stack?" "n")"
     if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then
         add_authentik_routing_dependencies "Filebrowser"
         add_selected_stack_once "$FILEBROWSER_STACK_FILE" "Filebrowser utility stack selected by user."
     fi
 
-    msg_ok "STACK CHOICES COLLECTED"
+    reorder_cloudflare_stacks_last
+    stack_choice_summary
+    echo ""
 }
 
 # --- 33J. SELECTED STACK PREFLIGHTS ---
-# Performs permission and secret checks for the selected plan before READY TO APPLY.
+# Performs permission and secret checks for the selected plan before SETUP PLAN.
 function verify_selected_stack_preflight() {
-    section "SELECTED STACK PREFLIGHT"
+    require_route_host_value "ADMIN_UI_HOST" "$ADMIN_UI_HOST"
+    require_route_host_value "AUTHENTIK_ROUTE_HOST" "$AUTHENTIK_ROUTE_HOST"
+
+    if [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]]; then
+        require_route_host_value "VSCODE_HOST" "$VSCODE_HOST"
+    fi
+
+    if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then
+        require_route_host_value "FILEBROWSER_HOST" "$FILEBROWSER_HOST"
+    fi
+
+    validate_required_secret_files
+
+    if selected_stack_contains "$TRAEFIK_STACK_FILE"; then
+        validate_traefik_config_files_predeploy
+    fi
 
     if [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
         verify_redis_host_tuning
@@ -2443,18 +3212,21 @@ function verify_selected_stack_preflight() {
     fi
 
     if [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
+        validate_cf_companion_predeploy
         verify_cf_companion_secret_file
     else
         CF_COMPANION_SECRET_OK="skipped"
-        msg_skip "CF-COMPANION SECRET CHECK SKIPPED; STACK NOT SELECTED"
     fi
 
     if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then
         verify_filebrowser_folders
     else
         FILEBROWSER_FOLDERS_OK="skipped"
-        msg_skip "FILEBROWSER FOLDER CHECK SKIPPED; STACK NOT SELECTED"
     fi
+
+    group_heading "Readiness"
+    readiness_status_summary
+    echo ""
 }
 
 # --- 33K. COMPOSE ENV VARIABLE COVERAGE CHECK ---
@@ -2500,7 +3272,7 @@ function verify_compose_env_coverage_for_file() {
 }
 
 function verify_selected_compose_env_coverage() {
-    section "COMPOSE VARIABLE COVERAGE"
+    apply_group_heading "Compose validation"
     local file=""
 
     verify_compose_env_coverage_for_file "$SOCKET_PROXY_STACK_FILE"
@@ -2517,15 +3289,12 @@ function normalize_compose_for_wildcard_tls() {
     local target="$1"
     local file="$2"
 
-    [ -f "$target" ] || return 0
+    [ -n "$target" ] || return 0
+    [ -n "$file" ] || return 0
 
-    # Router-level certresolver labels create a new ACME order per subdomain during
-    # repeated fresh tests. Keep TLS enabled on each router, but let Traefik's
-    # HTTPS entryPoint use the single wildcard certificate configured in traefik.yml.
-    if grep -q 'traefik\.http\.routers\..*\.tls\.certresolver' "$target" 2>/dev/null; then
-        sed -i '/traefik\.http\.routers\..*\.tls\.certresolver:/d' "$target"
-        msg_ok "NORMALIZED WILDCARD TLS LABELS: ${file}"
-    fi
+    # No-op by design. Wildcard TLS and route host correctness now belong in
+    # the checked-in compose templates, not in brittle post-download YAML edits.
+    return 0
 }
 
 function download_fixed_stack_file() {
@@ -2533,14 +3302,25 @@ function download_fixed_stack_file() {
     local target="${COMPOSE_DIR}/${file}"
     local url="${GITHUB_RAW_BASE}/${file}"
     local primary_for_override=""
+    local tmp_download=""
+    local project_label=""
 
-    msg_info "Downloading ${file}"
-    curl --globoff -fsSL "$url" -o "$target" || msg_error "Failed to download ${url}"
-    [ -s "$target" ] || msg_error "Downloaded file is empty: ${target}"
-    if grep -q "authentik@""docker" "$target"; then
+    project_label="$(stack_project_for_file "$file")"
+    [ -z "$project_label" ] && project_label="${file%.yml}"
+    compose_progress_summary "downloading ${project_label}"
+
+    tmp_download="$(mktemp)"
+    TEMP_FILES+=("$tmp_download")
+
+    curl --globoff -fsSL "$url" -o "$tmp_download" || msg_error "Failed to download ${url}"
+    [ -s "$tmp_download" ] || msg_error "Downloaded file is empty: ${url}"
+    if grep -q "authentik@""docker" "$tmp_download"; then
         msg_error "Forbidden stale Authentik Docker-provider middleware reference found in ${file}."
     fi
-    normalize_compose_for_wildcard_tls "$target" "$file"
+    normalize_compose_for_wildcard_tls "$tmp_download" "$file"
+
+    compose_progress_summary "installing ${project_label}"
+    safe_install_file_with_backup "$tmp_download" "$target" "compose ${file}"
     run_cmd "setting compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target"
     run_cmd "setting compose file permissions" chmod 640 "$target"
 
@@ -2550,13 +3330,14 @@ function download_fixed_stack_file() {
     else
         sync_compose_file_for_dockge "$file" "$target"
     fi
-
-    msg_ok "DOWNLOADED ${file}"
 }
 
 function download_selected_compose_files() {
-    section "STACK COMPOSE DOWNLOAD"
+    apply_group_heading "Compose files"
     local file=""
+
+    COMPOSE_PROGRESS_ACTIVE="yes"
+    compose_progress_summary "starting"
 
     download_fixed_stack_file "$SOCKET_PROXY_STACK_FILE"
     download_fixed_stack_file "$(basename "$ADMIN_UI_COMPOSE_FILE")"
@@ -2568,15 +3349,17 @@ function download_selected_compose_files() {
 
     SOCKET_PROXY_STACK_DOWNLOADED="yes"
     ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
+    compose_progress_summary "ready"
+    COMPOSE_PROGRESS_ACTIVE="no"
 }
 
 function validate_selected_compose_files() {
-    section "SELECTED STACK COMPOSE VALIDATION"
+    apply_group_heading "Compose validation"
     local i=""
     local file=""
     local project=""
 
-    export DOCKER_DIR COMPOSE_DIR ENV_FILE PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
+    export DOCKER_DIR COMPOSE_DIR ENV_FILE PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND ADMIN_UI_HOST ADMIN_UI_URL AUTHENTIK_ROUTE_HOST AUTHENTIK_EXTERNAL_URL VSCODE_HOST FILEBROWSER_HOST
 
     msg_info "Validating Socket Proxy stack compose"
     run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "$(compose_path_for_stack_file "$SOCKET_PROXY_STACK_FILE")" config -q
@@ -2591,28 +3374,27 @@ function validate_selected_compose_files() {
         project="${SELECTED_STACK_PROJECTS[$i]}"
         msg_info "Validating ${file}"
         run_docker_cmd "validating ${file}" compose --env-file "$ENV_FILE" -p "$project" -f "$(compose_path_for_stack_file "$file")" config -q
-        msg_ok "VALID COMPOSE: ${file}"
+        msg_ok "compose valid: ${project}"
     done
 
     ADMIN_UI_VALIDATED="yes"
 }
 
 function deploy_selected_stacks() {
-    section "DEPENDENCY-AWARE STACK DEPLOYMENT"
+    apply_group_heading "Stack deployment"
     local i=""
     local file=""
     local project=""
     local service=""
     local compose_path=""
 
-    detail_line "Bootstrap stacks" "socket-proxy + ${ADMIN_UI_DISPLAY_NAME}"
-    if [ "${#SELECTED_STACK_FILES[@]}" -eq 0 ]; then
-        detail_line "Additional stacks" "none selected"
-    else
-        for i in "${!SELECTED_STACK_FILES[@]}"; do
-            detail_line "Deploy order $((i + 1))" "${SELECTED_STACK_PROJECTS[$i]} from $(compose_path_for_stack_file "${SELECTED_STACK_FILES[$i]}")"
-        done
-    fi
+    group_heading "Deployment order"
+    detail_line "1" "socket-proxy"
+    detail_line "2" "$ADMIN_UI_PROJECT_NAME"
+    for i in "${!SELECTED_STACK_FILES[@]}"; do
+        detail_line "$((i + 3))" "${SELECTED_STACK_PROJECTS[$i]}"
+    done
+    echo ""
 
     deploy_socket_proxy
     deploy_admin_ui
@@ -2624,22 +3406,15 @@ function deploy_selected_stacks() {
         compose_path="$(compose_path_for_stack_file "$file")"
 
         if [ "$file" == "$POSTIZ_TEMPORAL_GUARD_STACK_FILE" ]; then
-            section "RUN STACK - POSTIZ TEMPORAL GUARD"
             run_postiz_temporal_guard_stack "$project" "$file"
             continue
         fi
 
-        section "DEPLOY STACK - ${project^^}"
-        detail_line "Compose file" "$compose_path"
         compose_up_quiet "deploying ${project}" --env-file "$ENV_FILE" -p "$project" -f "$compose_path"
-        msg_ok "DEPLOYED ${project^^}"
+        msg_ok "${project} deployed"
 
-        if [ -n "$service" ]; then
-            if docker_cmd ps --format '{{.Names}}' | grep -qx "$service"; then
-                msg_ok "RUNNING CONTAINER CONFIRMED: ${service}"
-            else
-                msg_warn "Container ${service} not confirmed yet. It may still be starting; check docker logs if needed."
-            fi
+        if [ -n "$service" ] && ! docker_cmd ps --format '{{.Names}}' | grep -qx "$service"; then
+            msg_warn "Container ${service} not confirmed yet. It may still be starting; check docker logs if needed."
         fi
 
         if [ "$file" == "$POSTGRES_STACK_FILE" ]; then
@@ -2657,7 +3432,7 @@ function deploy_selected_stacks() {
 }
 
 function verify_cf_companion_runtime_if_selected() {
-    section "CF-COMPANION RUNTIME VERIFICATION"
+    apply_group_heading "Post-deploy verification"
 
     if ! [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
         msg_skip "CF-COMPANION RUNTIME CHECK SKIPPED; STACK NOT SELECTED"
@@ -2673,84 +3448,58 @@ function verify_cf_companion_runtime_if_selected() {
         msg_error "Cloudflare Companion logs show authentication/token errors. Verify cf_token secret and API token permissions."
     fi
 
-    msg_ok "CF-COMPANION LOGS SHOW NO OBVIOUS AUTH FAILURE"
-
-    # Attempt a cf-companion restart/rescan to ensure Traefik label discovery
+    msg_ok "cf-companion logs show no obvious auth failure"
     refresh_cf_companion_dns_records
-
     return 0
 }
 
 function refresh_cf_companion_dns_records() {
-    section "CF-COMPANION DNS RESCAN"
+    apply_group_heading "Post-deploy verification"
 
     if ! docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cf-companion'; then
         msg_warn "cf-companion not present; skipping DNS rescan"
         return 0
     fi
 
+    group_heading "DNS readiness"
     msg_info "Restarting cf-companion for DNS rescan"
     docker_cmd restart cf-companion >/dev/null 2>&1 || true
     sleep 12
-    echo ""
-    msg_info "Checking cf-companion logs for discovery events"
-    local cf_log_file
-    cf_log_file="$(mktemp)"
-    docker_cmd logs --tail=200 cf-companion 2>/dev/null >"$cf_log_file" || true
+    clear_transient_line
 
-    local found_records created_records existing_records updated_records
+    local cf_log_file
+    local found_records=""
+    local created_records=""
+    local existing_records=""
+    local updated_records=""
+    local warn_lines=""
+
+    cf_log_file="$(mktemp)"
+    TEMP_FILES+=("$cf_log_file")
+    docker_cmd logs --tail=220 cf-companion 2>/dev/null >"$cf_log_file" || true
+
     found_records=$(grep -Ei 'Found Service ID:.*Hostname' "$cf_log_file" | sed -E 's/.*Hostname[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
     created_records=$(grep -Ei 'Created new record:' "$cf_log_file" | sed -E 's/.*Created new record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
     existing_records=$(grep -Ei 'Existing record:' "$cf_log_file" | sed -E 's/.*Existing record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
     updated_records=$(grep -Ei 'Updated record:' "$cf_log_file" | sed -E 's/.*Updated record:[[:space:]]*([^[:space:]]+).*/\1/' | sort -u | head -n20 || true)
-
-    local warn_lines
     warn_lines=$(grep -Ei 'error|denied|unauthorized|authentication failed|invalid token|missing token|permission denied' "$cf_log_file" | awk '{ if(length($0) > 140) print substr($0,1,137) "..."; else print }' | sort -u | head -n20 || true)
 
-    echo ""
-    echo -e " ${CM} cf-companion restarted for DNS rescan${CL}"
-
+    detail_line "cf-companion" "rescan complete"
     if [ -n "$found_records" ] || [ -n "$created_records" ] || [ -n "$existing_records" ] || [ -n "$updated_records" ]; then
-        echo -e " ${CM} DNS discovery events:${CL}"
-        if [ -n "$found_records" ]; then
-            while IFS= read -r hostname; do
-                echo -e "   - Found: ${hostname}"
-            done <<< "$found_records"
-        else
-            echo -e "   - No discovery hostnames found"
-        fi
-
-        echo -e ""
-        echo -e " ${CM} DNS record actions:${CL}"
-        if [ -n "$created_records" ]; then
-            while IFS= read -r hostname; do
-                echo -e "   - Created: ${hostname}"
-            done <<< "$created_records"
-        fi
-        if [ -n "$existing_records" ]; then
-            while IFS= read -r hostname; do
-                echo -e "   - Existing: ${hostname}"
-            done <<< "$existing_records"
-        fi
-        if [ -n "$updated_records" ]; then
-            while IFS= read -r hostname; do
-                echo -e "   - Updated: ${hostname}"
-            done <<< "$updated_records"
-        fi
+        detail_line "DNS records" "discovery/actions found"
     else
-        echo -e " ${YW}! No cf-companion DNS discovery/action lines found in recent logs.${CL}"
+        detail_line "DNS records" "no recent action lines" "$YW"
     fi
 
     if [ -n "$warn_lines" ]; then
-        echo ""
-        echo -e " ${WARN} cf-companion warnings/errors:${CL}"
-        while IFS= read -r warn_line; do
-            echo -e "   - ${warn_line}"
-        done <<< "$warn_lines"
+        msg_warn "cf-companion recent logs contain warnings/errors; review logs after deployment."
     fi
 
+    msg_info "Waiting briefly before public route checks"
+    sleep 20
+    clear_transient_line
+    detail_line "DNS wait" "complete"
     rm -f "$cf_log_file"
-    msg_ok "cf-companion rescan completed"
 }
 
 
@@ -2800,7 +3549,7 @@ function json_escape() {
 }
 
 function verify_authentik_dependencies_for_deploy() {
-    section "AUTHENTIK DEPENDENCY GATE"
+    apply_group_heading "Post-deploy verification"
 
     local required="no"
     local check_output=""
@@ -2866,7 +3615,7 @@ PY
 
 
 function wait_for_authentik_internal_api_ready() {
-    section "AUTHENTIK INTERNAL API READINESS"
+    apply_group_heading "Post-deploy verification"
 
     local attempt=""
     local max_attempts="120"
@@ -3027,7 +3776,7 @@ except Exception as exc:
 }
 
 function verify_authentik_api_for_deploy() {
-    section "AUTHENTIK API CHECK"
+    apply_group_heading "Post-deploy verification"
 
     local api_response=""
     local api_error=""
@@ -3165,7 +3914,7 @@ function restart_authentik_after_outpost_update() {
     msg_ok "AUTHENTIK OUTPOST RELOAD WAIT COMPLETE"
 }
 function create_or_update_authentik_forward_auth_for_deploy() {
-    section "AUTHENTIK FORWARD-AUTH SETUP"
+    apply_group_heading "Post-deploy verification"
 
     if [ "$AUTHENTIK_API_OK" != "yes" ]; then
         AUTHENTIK_PROVIDER_OK="skipped-no-api"
@@ -3203,8 +3952,8 @@ function create_or_update_authentik_forward_auth_for_deploy() {
         return 0
     fi
 
-    auth_host_value="${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}"
-    auth_host_browser_value="${AUTHENTIK_HOST_BROWSER:-$auth_host_value}"
+    auth_host_value="${AUTHENTIK_EXTERNAL_URL:-https://${AUTHENTIK_ROUTE_HOST}}"
+    auth_host_browser_value="${AUTHENTIK_HOST_BROWSER_VALUE:-$auth_host_value}"
     auth_host_json="$(printf '%s' "$auth_host_value" | json_escape)"
     domain_json="$(printf '%s' ".${DOMAIN_VALUE}" | json_escape)"
 
@@ -3300,25 +4049,22 @@ JSON
 }
 
 function verify_authentik_outpost_route_for_deploy() {
-    section "AUTHENTIK OUTPOST ROUTE CHECK"
+    apply_group_heading "Post-deploy verification"
 
-    local test_host="${ADMIN_UI_HOST:-dockge.${DOMAIN_VALUE}}"
+    local test_host="$ADMIN_UI_HOST"
     local test_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
     local http_code=""
 
-    # Use GET instead of HEAD because some Authentik/Traefik protected routes handle HEAD
-    # differently and can produce misleading Authentik-powered 404 results.
     http_code="$(curl -ksS -o /dev/null -w '%{http_code}' "$test_url" || true)"
     if [[ "$http_code" =~ ^(302|303|307)$ ]]; then
         AUTHENTIK_OUTPOST_302_OK="yes"
-        msg_ok "AUTHENTIK OUTPOST ROUTE REDIRECTED AS EXPECTED"
+        msg_ok "Authentik outpost route redirected as expected"
     else
-        AUTHENTIK_OUTPOST_302_OK="no"
-        msg_warn "Authentik outpost GET route returned HTTP ${http_code:-none}; protected routes may still need UI confirmation."
+        AUTHENTIK_OUTPOST_302_OK="warning"
+        msg_warn "Authentik outpost route returned HTTP ${http_code:-none}; protected routes may need UI confirmation."
     fi
 
-    detail_line "Outpost test URL" "$test_url"
-    detail_line "HTTP result" "${http_code:-none}"
+    detail_line "Outpost HTTP" "${http_code:-none}" "$(status_color_for_value "$AUTHENTIK_OUTPOST_302_OK")"
 }
 
 function detect_recent_acme_rate_limit() {
@@ -3330,9 +4076,9 @@ function detect_recent_acme_rate_limit() {
 }
 
 function verify_authentik_public_host_route() {
-    section "AUTHENTIK PUBLIC HOST CHECK"
+    apply_group_heading "Post-deploy verification"
 
-    local auth_host="auth.${DOMAIN_VALUE}"
+    local auth_host="$AUTHENTIK_ROUTE_HOST"
     local public_code=""
     local local_code=""
     local headers_file=""
@@ -3340,105 +4086,98 @@ function verify_authentik_public_host_route() {
     headers_file="$(mktemp)"
     TEMP_FILES+=("$headers_file")
 
-    # Public check catches Cloudflare 525. Local --resolve check catches missing
-    # Traefik SNI/router/certificate before Cloudflare is involved.
     public_code="$(curl -ksS -D "$headers_file" -o /dev/null -w '%{http_code}' "https://${auth_host}/" || true)"
     local_code="$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "${auth_host}:443:127.0.0.1" "https://${auth_host}/" || true)"
 
     case "$public_code" in
         200|301|302|303|307|401|403)
             AUTHENTIK_HOST_ROUTE_OK="yes"
-            msg_ok "AUTHENTIK PUBLIC HOST RESPONDED: ${auth_host} HTTP ${public_code}"
-            detail_line "Local Traefik/SNI check" "HTTP ${local_code:-none}"
-            return 0
+            msg_ok "Authentik public host responded: ${auth_host} HTTP ${public_code}"
             ;;
         525)
             if detect_recent_acme_rate_limit; then
                 AUTHENTIK_HOST_ROUTE_OK="acme-rate-limited"
-                msg_warn "AUTHENTIK PUBLIC HOST FAILED: ${auth_host} HTTP 525 with recent ACME rate-limit evidence."
-                detail_line "Diagnosis" "Let’s Encrypt ACME 429/rate-limit; wait for retry window or use staging/origin-cert test mode"
+                msg_warn "Authentik public host HTTP 525 with recent ACME rate-limit evidence; treating as bootstrap warning."
             else
                 AUTHENTIK_HOST_ROUTE_OK="auth-host-tls-failed"
-                msg_warn "AUTHENTIK PUBLIC HOST FAILED: ${auth_host} HTTP 525. Origin TLS/Traefik certificate is not ready."
+                msg_warn "Authentik public host HTTP 525 from Cloudflare; internal deployment can still be healthy."
             fi
-            detail_line "Local Traefik/SNI check" "HTTP ${local_code:-none}"
-            return 1
+            PUBLIC_ROUTE_WARNINGS="warnings"
             ;;
         *)
             if [ "$local_code" == "000" ] || [ -z "$local_code" ]; then
                 if detect_recent_acme_rate_limit; then
                     AUTHENTIK_HOST_ROUTE_OK="acme-rate-limited"
-                    msg_warn "AUTHENTIK LOCAL SNI CHECK FAILED and Traefik logs show ACME rate-limit evidence."
-                    detail_line "Diagnosis" "Traefik cannot present auth.${DOMAIN_VALUE} certificate yet because ACME is rate-limited"
+                    msg_warn "Authentik local SNI check failed with ACME rate-limit evidence; treating as bootstrap warning."
                 else
                     AUTHENTIK_HOST_ROUTE_OK="auth-host-tls-failed"
-                    msg_warn "AUTHENTIK LOCAL SNI CHECK FAILED for ${auth_host}; Traefik has no usable TLS route/cert yet."
+                    msg_warn "Authentik local SNI/TLS check is not ready yet; treating as bootstrap warning."
                 fi
-                detail_line "Public HTTP result" "${public_code:-none}"
-                detail_line "Local Traefik/SNI check" "HTTP ${local_code:-none}"
-                return 1
+            else
+                AUTHENTIK_HOST_ROUTE_OK="needs-review"
+                msg_warn "Authentik public host needs review: public HTTP ${public_code:-none}, local HTTP ${local_code:-none}."
             fi
-            AUTHENTIK_HOST_ROUTE_OK="needs-review"
-            msg_warn "AUTHENTIK PUBLIC HOST NEEDS REVIEW: ${auth_host} HTTP ${public_code:-none}, local HTTP ${local_code:-none}"
-            return 1
+            PUBLIC_ROUTE_WARNINGS="warnings"
             ;;
     esac
+
+    detail_line "Authentik public" "HTTP ${public_code:-none}" "$(status_color_for_value "$AUTHENTIK_HOST_ROUTE_OK")"
+    detail_line "Authentik local" "HTTP ${local_code:-none}" "$(status_color_for_value "$AUTHENTIK_HOST_ROUTE_OK")"
+    return 0
 }
 
 function verify_selected_protected_routes() {
-    section "PROTECTED ROUTE CHECKS"
+    apply_group_heading "Post-deploy verification"
 
     local host=""
     local code=""
     local headers_file=""
     local powered_by=""
-    local failures="0"
+    local warnings="0"
     local hosts=()
 
     headers_file="$(mktemp)"
     TEMP_FILES+=("$headers_file")
 
-    verify_authentik_public_host_route || failures=$((failures + 1))
+    group_heading "Public route verification"
+    verify_authentik_public_host_route
 
-    hosts+=("${ADMIN_UI_HOST:-dockge.${DOMAIN_VALUE}}")
-    if [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]]; then hosts+=("code.${DOMAIN_VALUE}"); fi
-    if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then hosts+=("fb.${DOMAIN_VALUE}"); fi
+    hosts+=("$ADMIN_UI_HOST")
+    if [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]]; then hosts+=("${VSCODE_HOST}"); fi
+    if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then hosts+=("${FILEBROWSER_HOST}"); fi
 
     for host in "${hosts[@]}"; do
         : > "$headers_file"
-        # Use GET and capture headers so Authentik-powered 404s are treated as a protected-route
-        # setup failure instead of a healthy app response.
         code="$(curl -ksS -D "$headers_file" -o /dev/null -w '%{http_code}' "https://${host}/" || true)"
         powered_by="$(awk 'BEGIN{IGNORECASE=1} /^x-powered-by:/ {print $0}' "$headers_file" | tr -d '\r' || true)"
         case "$code" in
             200|302|303|307|401|403)
-                msg_ok "ROUTE RESPONDED: ${host} HTTP ${code}"
+                detail_line "$host" "HTTP ${code}" "$GN" "24"
                 ;;
             404)
-                failures=$((failures + 1))
+                warnings=$((warnings + 1))
+                PUBLIC_ROUTE_WARNINGS="warnings"
                 if printf '%s' "$powered_by" | grep -qi 'authentik'; then
-                    msg_warn "ROUTE CHECK FAILED: ${host} HTTP 404 from Authentik. Verify provider/application/outpost attachment and Traefik forward-auth."
+                    detail_line "$host" "HTTP 404 from Authentik; check provider/outpost" "$YW" "24"
                 else
-                    msg_warn "ROUTE CHECK FAILED: ${host} HTTP 404"
+                    detail_line "$host" "HTTP 404; route needs review" "$YW" "24"
                 fi
                 ;;
             525)
-                failures=$((failures + 1))
-                msg_warn "ROUTE CHECK FAILED: ${host} HTTP 525 from Cloudflare. Origin TLS/Traefik certificate is not compatible with current Cloudflare SSL mode yet."
+                warnings=$((warnings + 1))
+                PUBLIC_ROUTE_WARNINGS="warnings"
+                detail_line "$host" "HTTP 525 from Cloudflare; check SSL/origin cert" "$YW" "24"
                 ;;
             *)
-                failures=$((failures + 1))
-                msg_warn "ROUTE CHECK NEEDS ATTENTION: ${host} HTTP ${code:-none}"
+                warnings=$((warnings + 1))
+                PUBLIC_ROUTE_WARNINGS="warnings"
+                detail_line "$host" "HTTP ${code:-none}; needs review" "$YW" "24"
                 ;;
         esac
     done
 
-    if [ "$failures" -eq 0 ] && [ "$AUTHENTIK_HOST_ROUTE_OK" == "yes" ]; then
+    if [ "$warnings" -eq 0 ] && [ "$AUTHENTIK_HOST_ROUTE_OK" == "yes" ]; then
         PROTECTED_ROUTE_VERIFY_OK="yes"
-    elif [ "$AUTHENTIK_HOST_ROUTE_OK" == "acme-rate-limited" ]; then
-        PROTECTED_ROUTE_VERIFY_OK="acme-rate-limited"
-    elif [ "$AUTHENTIK_HOST_ROUTE_OK" == "auth-host-tls-failed" ]; then
-        PROTECTED_ROUTE_VERIFY_OK="auth-host-tls-failed"
     else
         PROTECTED_ROUTE_VERIFY_OK="needs-review"
     fi
@@ -3465,7 +4204,7 @@ function configure_authentik_and_verify_routes() {
 # --- 34. NETWORK CREATION ---
 # Creates the shared external networks used by all independent compose stacks.
 function create_shared_networks() {
-    section "DOCKER NETWORKS"
+    apply_group_heading "Networks"
 
     msg_info "Creating socket_proxy network"
     docker_cmd network create --driver bridge --subnet "$SOCKET_PROXY_SUBNET_EXPECTED" socket_proxy >/dev/null 2>&1 || true
@@ -3485,7 +4224,7 @@ function create_shared_networks() {
 # --- 35. NETWORK VERIFICATION ---
 # Verifies network existence and expected subnets before compose deployment.
 function verify_shared_networks() {
-    section "NETWORK VERIFICATION"
+    apply_group_heading "Networks"
 
     msg_info "Inspecting Docker networks"
 
@@ -3520,57 +4259,57 @@ function verify_shared_networks() {
 # --- 36. COMPOSE FILE DOWNLOAD ---
 # Downloads Socket Proxy stack, selected Admin UI stack and Admin UI bootstrap override from GitHub into docker/compose.
 function download_bootstrap_compose_files() {
-    section "STACK COMPOSE DOWNLOAD"
+    apply_group_heading "Compose files"
 
     msg_info "Downloading Socket Proxy stack compose"
     curl --globoff -fsSL "$SOCKET_PROXY_STACK_URL" -o "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
     SOCKET_PROXY_STACK_DOWNLOADED="yes"
-    msg_ok "SOCKET PROXY STACK COMPOSE DOWNLOADED"
+    msg_ok "Socket Proxy stack compose ready"
 
     case "$ADMIN_UI" in
         portainer)
             msg_info "Downloading Portainer stack compose"
             curl --globoff -fsSL "$PORTAINER_STACK_URL" -o "${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
             PORTAINER_STACK_DOWNLOADED="yes"
-            msg_ok "ADMIN UI STACK COMPOSE DOWNLOADED"
+            msg_ok "Admin UI stack compose ready"
 
             msg_info "Downloading Admin UI bootstrap override"
             curl --globoff -fsSL "$PORTAINER_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
-            msg_ok "PORTAINER BOOTSTRAP OVERRIDE DOWNLOADED"
+            msg_ok "Portainer bootstrap override ready"
             ;;
         dockge)
             msg_info "Downloading Dockge stack compose"
             curl --globoff -fsSL "$DOCKGE_STACK_URL" -o "${COMPOSE_DIR}/${DOCKGE_STACK_FILE}"
             DOCKGE_STACK_DOWNLOADED="yes"
-            msg_ok "DOCKGE STACK COMPOSE DOWNLOADED"
+            msg_ok "Dockge stack compose ready"
 
             msg_info "Downloading Dockge bootstrap override"
             curl --globoff -fsSL "$DOCKGE_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             DOCKGE_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
-            msg_ok "DOCKGE BOOTSTRAP OVERRIDE DOWNLOADED"
+            msg_ok "Dockge bootstrap override ready"
             ;;
         komodo)
             msg_info "Downloading Komodo stack compose"
             curl --globoff -fsSL "$KOMODO_STACK_URL" -o "${COMPOSE_DIR}/${KOMODO_STACK_FILE}"
             KOMODO_STACK_DOWNLOADED="yes"
-            msg_ok "KOMODO STACK COMPOSE DOWNLOADED"
+            msg_ok "Komodo stack compose ready"
 
             msg_info "Downloading Komodo bootstrap override"
             curl --globoff -fsSL "$KOMODO_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             KOMODO_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
-            msg_ok "KOMODO BOOTSTRAP OVERRIDE DOWNLOADED"
+            msg_ok "Komodo bootstrap override ready"
             ;;
         dockhand)
             msg_info "Downloading Dockhand stack compose"
             curl --globoff -fsSL "$DOCKHAND_STACK_URL" -o "${COMPOSE_DIR}/${DOCKHAND_STACK_FILE}"
             DOCKHAND_STACK_DOWNLOADED="yes"
-            msg_ok "DOCKHAND STACK COMPOSE DOWNLOADED"
+            msg_ok "Dockhand stack compose ready"
 
             msg_info "Downloading Dockhand bootstrap override"
             curl --globoff -fsSL "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             DOCKHAND_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
-            msg_ok "DOCKHAND BOOTSTRAP OVERRIDE DOWNLOADED"
+            msg_ok "Dockhand bootstrap override ready"
             ;;
     esac
 
@@ -3592,7 +4331,7 @@ function download_bootstrap_compose_files() {
 # Confirms the downloaded Admin UI bootstrap override exists locally.
 # Script 7 should later redeploy Portainer without this override to close the bootstrap port.
 function verify_admin_ui_bootstrap_override_file() {
-    section "ADMIN UI BOOTSTRAP OVERRIDE"
+    apply_group_heading "Compose files"
 
     msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} bootstrap override"
 
@@ -3601,7 +4340,7 @@ function verify_admin_ui_bootstrap_override_file() {
     fi
 
     ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
-    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} BOOTSTRAP OVERRIDE READY"
+    msg_ok "${ADMIN_UI_DISPLAY_NAME} bootstrap override ready"
     detail_line "Override file" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
     detail_line "Bootstrap port" "${ADMIN_UI_BOOTSTRAP_PORT}->${ADMIN_UI_INTERNAL_PORT}"
 }
@@ -3610,7 +4349,7 @@ function verify_admin_ui_bootstrap_override_file() {
 # --- 38. COMPOSE CONFIG VALIDATION ---
 # Validates Socket Proxy stack, selected Admin UI stack and Admin UI bootstrap override before deployment.
 function validate_bootstrap_compose_files() {
-    section "STACK COMPOSE VALIDATION"
+    apply_group_heading "Compose validation"
 
     msg_info "Validating Socket Proxy stack compose"
     run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "$(compose_path_for_stack_file "$SOCKET_PROXY_STACK_FILE")" config -q
@@ -3626,29 +4365,22 @@ function validate_bootstrap_compose_files() {
 # --- 39. SOCKET-PROXY DEPLOYMENT ---
 # Deploys the Socket Proxy stack using Docker Compose.
 function deploy_socket_proxy() {
-    section "DEPLOY STACK - SOCKET PROXY"
-
     local compose_path=""
     compose_path="$(compose_path_for_stack_file "$SOCKET_PROXY_STACK_FILE")"
-    detail_line "Compose file" "$compose_path"
     compose_up_quiet "deploying socket-proxy" --env-file "$ENV_FILE" -p socket-proxy -f "$compose_path"
     SOCKET_PROXY_DEPLOYED="yes"
-    msg_ok "SOCKET-PROXY DEPLOYED"
+    msg_ok "socket-proxy deployed"
 }
 
 # --- 40. PORTAINER DEPLOYMENT ---
 # Deploys the selected Admin UI stack with its temporary bootstrap override.
 function deploy_admin_ui() {
-    section "DEPLOY STACK - ${ADMIN_UI_DISPLAY_NAME}"
-
     local admin_compose_path=""
     local admin_override_path=""
 
     export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
     admin_compose_path="$(compose_path_for_stack_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")"
     admin_override_path="$(bootstrap_override_path_for_primary_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")"
-    detail_line "Compose file" "$admin_compose_path"
-    detail_line "Bootstrap override" "$admin_override_path"
     compose_up_quiet "deploying ${ADMIN_UI_DISPLAY_NAME}" --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$admin_compose_path" -f "$admin_override_path"
     ADMIN_UI_DEPLOYED="yes"
 
@@ -3656,13 +4388,13 @@ function deploy_admin_ui() {
         PORTAINER_DEPLOYED="yes"
     fi
 
-    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} DEPLOYED"
+    msg_ok "${ADMIN_UI_PROJECT_NAME} deployed"
 }
 
 # --- 41. UFW BOOTSTRAP PORT HELPER ---
 # Opens temporary Admin UI bootstrap port if UFW is active.
 function configure_bootstrap_firewall() {
-    section "BOOTSTRAP FIREWALL"
+    apply_group_heading "Bootstrap access"
 
     if ! command -v ufw >/dev/null 2>&1; then
         msg_skip "UFW NOT FOUND; BOOTSTRAP PORT RULE SKIPPED"
@@ -3715,7 +4447,7 @@ function detect_portainer_access_ip() {
 # --- 43. CONTAINER VERIFICATION ---
 # Verifies the bootstrap containers are running and visible.
 function verify_bootstrap_containers() {
-    section "BOOTSTRAP VERIFICATION"
+    apply_group_heading "Post-deploy verification"
 
     msg_info "Checking Socket Proxy container"
     if docker_cmd ps --format '{{.Names}}' | grep -qx 'socket-proxy'; then
@@ -3736,10 +4468,8 @@ function verify_bootstrap_containers() {
     msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} bootstrap port"
     if docker_cmd port "$ADMIN_UI_SERVICE_NAME" "${ADMIN_UI_INTERNAL_PORT}/tcp" 2>/dev/null | grep -q ":${ADMIN_UI_BOOTSTRAP_PORT}$"; then
         ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="yes"
-        ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="yes"
         msg_ok "${ADMIN_UI_DISPLAY_NAME^^} BOOTSTRAP PORT EXPOSED"
     else
-        ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="not-confirmed"
         ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="not-confirmed"
         msg_warn "${ADMIN_UI_DISPLAY_NAME} is running, but bootstrap port ${ADMIN_UI_BOOTSTRAP_PORT} was not confirmed"
     fi
@@ -3748,230 +4478,219 @@ function verify_bootstrap_containers() {
     detail_line "Domain access after Traefik/AuthentiK" "$ADMIN_UI_URL"
     detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
 }
-# --- 44. VERIFICATION REPORT ---
-# Writes a small Docker bootstrap verification report to /var/log.
-function create_verification_report() {
-    section "VERIFICATION REPORT"
 
-    msg_info "Writing Docker bootstrap verification report"
-
-    if [ -n "$SUDO_CMD" ]; then
-        "$SUDO_CMD" bash -c "cat > '$VERIFY_LOG'" <<VERIFY_LOG_EOF
---- DOCKER BOOTSTRAP SETUP VERIFICATION REPORT ---
-Date: $(date)
-Docker user: $DOCKER_USER
-Docker dir: $DOCKER_DIR
-Compose dir: $COMPOSE_DIR
-Env file: $ENV_FILE
-GitHub raw base: $GITHUB_RAW_BASE
-
-Results:
-VERIFY_LOG_EOF
-    else
-        cat > "$VERIFY_LOG" <<VERIFY_LOG_EOF
---- DOCKER BOOTSTRAP SETUP VERIFICATION REPORT ---
-Date: $(date)
-Docker user: $DOCKER_USER
-Docker dir: $DOCKER_DIR
-Compose dir: $COMPOSE_DIR
-Env file: $ENV_FILE
-GitHub raw base: $GITHUB_RAW_BASE
-
-Results:
-VERIFY_LOG_EOF
-    fi
-
+function verify_reset_counts() {
+    VERIFY_PASS_COUNT="0"; VERIFY_WARN_COUNT="0"; VERIFY_FAIL_COUNT="0"; VERIFY_STATUS="not-run"
+}
+function verify_pass() { VERIFY_PASS_COUNT=$(( VERIFY_PASS_COUNT + 1 )); }
+function verify_warn() { VERIFY_WARN_COUNT=$(( VERIFY_WARN_COUNT + 1 )); }
+function verify_fail() { VERIFY_FAIL_COUNT=$(( VERIFY_FAIL_COUNT + 1 )); }
+function finalize_verify_status() {
+    if [ "${VERIFY_FAIL_COUNT:-0}" -gt 0 ]; then VERIFY_STATUS="FAIL"; elif [ "${VERIFY_WARN_COUNT:-0}" -gt 0 ]; then VERIFY_STATUS="PASS_WITH_WARNINGS"; else VERIFY_STATUS="PASS"; fi
+}
+function status_verify_from_value() {
+    local label="$1"; local value="$2"
+    case "$value" in yes|ready|downloaded|deployed|PASS|completed) verify_pass ;; no|missing|failed|FAIL|empty-or-missing) verify_fail ;; skipped|not-run|not-found|not-active|PASS_WITH_WARNINGS|warning|warnings|needs-review|auth-host-tls-failed|acme-rate-limited|skipped-no-api|skipped-no-token|authentik-not-running|not-confirmed|unknown) verify_warn ;; *) [ -n "$value" ] && verify_pass || verify_warn ;; esac
+    printf '%s=%s\n' "$label" "$value"
+}
+function selected_stack_names() {
+    local names=""; local i=""
+    if [ "${#SELECTED_STACK_FILES[@]}" -eq 0 ]; then printf 'none'; return 0; fi
+    for i in "${!SELECTED_STACK_FILES[@]}"; do names="${names:+${names},}${SELECTED_STACK_PROJECTS[$i]}"; done
+    printf '%s' "$names"
+}
+function update_deployed_failed_stack_summary() {
+    local deployed=""; local failed=""; local i=""; local service=""; local project=""
+    if [ "$SOCKET_PROXY_DEPLOYED" == "yes" ]; then deployed="socket-proxy"; else failed="socket-proxy"; fi
+    if [ "$ADMIN_UI_DEPLOYED" == "yes" ]; then deployed="${deployed:+${deployed},}${ADMIN_UI_PROJECT_NAME}"; else failed="${failed:+${failed},}${ADMIN_UI_PROJECT_NAME}"; fi
+    for i in "${!SELECTED_STACK_PROJECTS[@]}"; do
+        project="${SELECTED_STACK_PROJECTS[$i]}"; service="${SELECTED_STACK_SERVICES[$i]}"
+        if [ -z "$service" ] || docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx "$service"; then deployed="${deployed:+${deployed},}${project}"; else failed="${failed:+${failed},}${project}"; fi
+    done
+    DEPLOYED_STACKS="${deployed:-none}"; FAILED_STACKS="${failed:-none}"
+}
+function write_verify_outputs() {
+    local machine_tmp="" display_tmp=""
+    machine_tmp="$(mktemp)"; display_tmp="$(mktemp)"; TEMP_FILES+=("$machine_tmp" "$display_tmp")
+    update_deployed_failed_stack_summary; verify_reset_counts
     {
-        echo "Networks:"
-        echo "socket_proxy=${SOCKET_PROXY_SUBNET_ACTUAL}"
-        echo "t2_proxy=${T2_PROXY_SUBNET_ACTUAL}"
-        echo "database=${DATABASE_NETWORK_NAME}"
+        echo "--- DOCKER STACK DEPLOY VERIFY LOG ---"; echo "Date=$(date)"; echo "SCRIPT_VERSION=${SCRIPT_VERSION}"; echo "SCRIPT_BUILD=${SCRIPT_BUILD}"; echo "Docker user=${DOCKER_USER}"; echo "Docker dir=${DOCKER_DIR}"; echo "Compose dir=${COMPOSE_DIR}"; echo "Env file=${ENV_FILE}"; echo "Domain=${DOMAIN_VALUE}"; echo "Admin UI=${ADMIN_UI}"; echo "Selected stacks=$(selected_stack_names)"; echo "Deployed stacks=${DEPLOYED_STACKS}"; echo "Failed stacks=${FAILED_STACKS}"; echo ""; echo "Checks:"
+        status_verify_from_value "Script 6 verify" "${SCRIPT6_PREFLIGHT_STATUS}"
+        status_verify_from_value ".env keys" "${SCRIPT6_ENV_REQUIRED_KEYS_STATUS}"
+        status_verify_from_value "Hostnames" "${SCRIPT6_ENV_HOSTNAMES_STATUS}"
+        status_verify_from_value "URLs" "${SCRIPT6_ENV_URLS_STATUS}"
+        status_verify_from_value "Secrets" "${SCRIPT6_SECRETS_STATUS}"
+        status_verify_from_value "Traefik config" "${TRAEFIK_CONFIG_PREFLIGHT_STATUS}"
+        status_verify_from_value "Networks created" "${NETWORKS_CREATED}"
+        status_verify_from_value "Networks verified" "${NETWORKS_VERIFIED}"
+        status_verify_from_value "Socket proxy deployed" "${SOCKET_PROXY_DEPLOYED}"
+        status_verify_from_value "Admin UI deployed" "${ADMIN_UI_DEPLOYED}"
+        status_verify_from_value "Admin UI validated" "${ADMIN_UI_VALIDATED}"
+        status_verify_from_value "Bootstrap port exposed" "${ADMIN_UI_BOOTSTRAP_PORT_EXPOSED}"
+        status_verify_from_value "UFW bootstrap port" "${UFW_BOOTSTRAP_PORT_OPENED}"
+        status_verify_from_value "Redis sysctl" "${SYSCTL_REDIS_OK}"
+        status_verify_from_value "Traefik placeholders" "${TRAEFIK_PLACEHOLDERS_OK}"
+        status_verify_from_value "Traefik DNS" "${TRAEFIK_DNS_DELAY_OK}"
+        status_verify_from_value "Traefik encoded chars" "${TRAEFIK_ENCODED_CHARS_OK}"
+        status_verify_from_value "Authentik folders" "${AUTHENTIK_FOLDERS_OK}"
+        status_verify_from_value "CF companion secret" "${CF_COMPANION_SECRET_OK}"
+        status_verify_from_value "Filebrowser folders" "${FILEBROWSER_FOLDERS_OK}"
+        status_verify_from_value "Authentik dependency gate" "${AUTHENTIK_DEPENDENCIES_OK}"
+        status_verify_from_value "Authentik API" "${AUTHENTIK_API_OK}"
+        status_verify_from_value "Authentik provider" "${AUTHENTIK_PROVIDER_OK}"
+        status_verify_from_value "Authentik application" "${AUTHENTIK_APPLICATION_OK}"
+        status_verify_from_value "Authentik outpost attach" "${AUTHENTIK_OUTPOST_ATTACH_OK}"
+        status_verify_from_value "Authentik outpost 302" "${AUTHENTIK_OUTPOST_302_OK}"
+        status_verify_from_value "Authentik public host route" "${AUTHENTIK_HOST_ROUTE_OK}"
+        status_verify_from_value "Protected routes" "${PROTECTED_ROUTE_VERIFY_OK}"
+    } > "$machine_tmp"
+    [ "$FAILED_STACKS" != "none" ] && verify_fail
+    finalize_verify_status
+    {
+        echo "SCRIPT 6.5 STACK DEPLOY VERIFICATION"
+        echo "Version: ${SCRIPT_VERSION} (${SCRIPT_BUILD})"
+        echo "Date: $(date)"
         echo ""
-        echo "Compose files:"
-        echo "Socket Proxy stack compose downloaded: ${SOCKET_PROXY_STACK_DOWNLOADED}"
-        echo "Portainer stack compose downloaded: ${PORTAINER_STACK_DOWNLOADED}"
-        echo "Portainer bootstrap override downloaded: ${PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED}"
-        echo "Dockge stack compose downloaded: ${DOCKGE_STACK_DOWNLOADED}"
-        echo "Komodo stack compose downloaded: ${KOMODO_STACK_DOWNLOADED}"
-        echo "Dockhand stack compose downloaded: ${DOCKHAND_STACK_DOWNLOADED}"
-        echo "Admin UI bootstrap override: ${ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN}"
+        echo "Deployment:"
+        echo "  Docker dir: ${DOCKER_DIR}"
+        echo "  Compose dir: ${COMPOSE_DIR}"
+        echo "  Domain: ${DOMAIN_VALUE}"
+        echo "  Admin UI: ${ADMIN_UI}"
+        echo "  Selected stacks:"
+        stack_list_lines "$(selected_stack_names)" | sed 's/^/  /'
+        echo "  Deployed stacks:"
+        stack_list_lines "$DEPLOYED_STACKS" | sed 's/^/  /'
+        echo "  Failed stacks:"
+        stack_list_lines "$FAILED_STACKS" | sed 's/^/  /'
         echo ""
-        echo "Deployments:"
-        echo "socket-proxy deployed: ${SOCKET_PROXY_DEPLOYED}"
-        echo "admin UI: ${ADMIN_UI}"
-        echo "admin UI validated: ${ADMIN_UI_VALIDATED}"
-        echo "admin UI deployed: ${ADMIN_UI_DEPLOYED}"
-        echo "portainer deployed: ${PORTAINER_DEPLOYED}"
-        echo "Admin UI bootstrap port exposed: ${ADMIN_UI_BOOTSTRAP_PORT_EXPOSED}"
-        echo "UFW bootstrap port opened: ${UFW_BOOTSTRAP_PORT_OPENED}"
-        echo "Admin UI temporary URL: ${PORTAINER_ACCESS_URL}"
-        echo "Admin UI host: ${ADMIN_UI_HOST}"
+        echo "Readiness:"
+        echo "  Script 6 dependency: ${SCRIPT6_PREFLIGHT_STATUS}"
+        echo "  .env keys: ${SCRIPT6_ENV_REQUIRED_KEYS_STATUS}"
+        echo "  Hostnames: ${SCRIPT6_ENV_HOSTNAMES_STATUS}"
+        echo "  URLs: ${SCRIPT6_ENV_URLS_STATUS}"
+        echo "  Secrets: ${SCRIPT6_SECRETS_STATUS}"
+        echo "  Optional htpasswd: ${SCRIPT6_HTPASSWD_STATUS}"
+        echo "  Traefik config: ${TRAEFIK_CONFIG_PREFLIGHT_STATUS}"
         echo ""
-        echo "Preflight checks:"
-        echo "vm.overcommit_memory=1: ${SYSCTL_REDIS_OK}"
-        echo "Traefik placeholders rendered: ${TRAEFIK_PLACEHOLDERS_OK}"
-        echo "Traefik DNS v3.7 syntax: ${TRAEFIK_DNS_DELAY_OK}"
-        echo "Traefik encoded characters: ${TRAEFIK_ENCODED_CHARS_OK}"
-        echo "Traefik authentik references: ${TRAEFIK_AUTHENTIK_REFERENCES_OK}"
-        echo "Authentik folders: ${AUTHENTIK_FOLDERS_OK}"
-        echo "CF companion secret: ${CF_COMPANION_SECRET_OK}"
-        echo "Filebrowser folders: ${FILEBROWSER_FOLDERS_OK}"
-        echo "Authentik dependency gate: ${AUTHENTIK_DEPENDENCIES_OK}"
-        echo "Authentik API: ${AUTHENTIK_API_OK}"
-        echo "Authentik provider: ${AUTHENTIK_PROVIDER_OK}"
-        echo "Authentik application: ${AUTHENTIK_APPLICATION_OK}"
-        echo "Authentik outpost attach: ${AUTHENTIK_OUTPOST_ATTACH_OK}"
-        echo "Authentik outpost 302: ${AUTHENTIK_OUTPOST_302_OK}"
-        echo "Authentik public host route: ${AUTHENTIK_HOST_ROUTE_OK}"
-        echo "Protected routes: ${PROTECTED_ROUTE_VERIFY_OK}"
-                echo ""
-        echo "Docker containers:"
-        docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
-    } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee -a "$VERIFY_LOG" >/dev/null; else tee -a "$VERIFY_LOG" >/dev/null; fi
-
-    msg_ok "DOCKER BOOTSTRAP VERIFICATION REPORT WRITTEN"
+        echo "Runtime:"
+        echo "  Networks: ${NETWORKS_VERIFIED}"
+        echo "  Socket proxy: ${SOCKET_PROXY_DEPLOYED}"
+        echo "  Admin UI: ${ADMIN_UI_DEPLOYED}"
+        echo "  Authentik API: ${AUTHENTIK_API_OK}"
+        echo "  Protected routes: ${PROTECTED_ROUTE_VERIFY_OK}"
+        echo "  Public route warnings: ${PUBLIC_ROUTE_WARNINGS}"
+        echo ""
+        echo "Verification:"
+        echo "  Status: ${VERIFY_STATUS}"
+        echo "  Pass: ${VERIFY_PASS_COUNT}"
+        echo "  Warn: ${VERIFY_WARN_COUNT}"
+        echo "  Fail: ${VERIFY_FAIL_COUNT}"
+        echo "  Verify log: ${VERIFY_LOG}"
+        echo "  Display log: ${VERIFY_DISPLAY_LOG}"
+    } > "$display_tmp"
+    { cat "$machine_tmp"; echo "VERIFY_STATUS=${VERIFY_STATUS}"; echo "VERIFY_PASS_COUNT=${VERIFY_PASS_COUNT}"; echo "VERIFY_WARN_COUNT=${VERIFY_WARN_COUNT}"; echo "VERIFY_FAIL_COUNT=${VERIFY_FAIL_COUNT}"; echo ""; echo "Docker containers:"; docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true; } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee "$VERIFY_LOG" >/dev/null; else tee "$VERIFY_LOG" >/dev/null; fi
+    if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" cp "$display_tmp" "$VERIFY_DISPLAY_LOG"; "$SUDO_CMD" chmod 0644 "$VERIFY_DISPLAY_LOG" "$VERIFY_LOG" 2>/dev/null || true; else cp "$display_tmp" "$VERIFY_DISPLAY_LOG"; chmod 0644 "$VERIFY_DISPLAY_LOG" "$VERIFY_LOG" 2>/dev/null || true; fi
 }
 
-# --- 45. COMPLETION MARKER ---
+# --- 44. VERIFY LOG ---
+# Writes a small Docker bootstrap verification report to /var/log.
+function create_verification_report() {
+    write_verify_outputs
+    msg_ok "Verification logs written"
+}
+
+# --- 45. MARKER ---
 # Stores successful bootstrap information.
 function write_completion_marker() {
-    section "COMPLETION MARKER"
-
-    msg_info "Writing completion marker"
-
-    if [ -n "$SUDO_CMD" ]; then
-        "$SUDO_CMD" bash -c "cat > '$COMPLETED_MARKER'" <<MARKER_EOF
-Docker Bootstrap Setup completed on: $(date)
+    local marker_tmp=""
+    marker_tmp="$(mktemp)"; TEMP_FILES+=("$marker_tmp")
+    update_deployed_failed_stack_summary
+    cat > "$marker_tmp" <<MARKER_EOF
+Docker Stack Deploy completed on: $(date)
 Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
 Compose dir: $COMPOSE_DIR
 Env file: $ENV_FILE
 GitHub raw base: $GITHUB_RAW_BASE
-Networks created: $NETWORKS_CREATED
-Networks verified: $NETWORKS_VERIFIED
-socket_proxy subnet: $SOCKET_PROXY_SUBNET_ACTUAL
-t2_proxy subnet: $T2_PROXY_SUBNET_ACTUAL
-database network: $DATABASE_NETWORK_NAME
-Socket Proxy stack downloaded: $SOCKET_PROXY_STACK_DOWNLOADED
-Admin stack downloaded: $PORTAINER_STACK_DOWNLOADED
-Portainer bootstrap override downloaded: $PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED
-Dockge stack compose downloaded: $DOCKGE_STACK_DOWNLOADED
-Komodo stack compose downloaded: $KOMODO_STACK_DOWNLOADED
-Dockhand stack compose downloaded: $DOCKHAND_STACK_DOWNLOADED
-Socket proxy deployed: $SOCKET_PROXY_DEPLOYED
 Admin UI: $ADMIN_UI
-Admin UI validated: $ADMIN_UI_VALIDATED
-Admin UI deployed: $ADMIN_UI_DEPLOYED
-Portainer deployed: $PORTAINER_DEPLOYED
-Admin UI bootstrap override: $ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN
-Admin UI bootstrap port: $ADMIN_UI_BOOTSTRAP_PORT
-Admin UI bootstrap port exposed: $ADMIN_UI_BOOTSTRAP_PORT_EXPOSED
-UFW bootstrap port opened: $UFW_BOOTSTRAP_PORT_OPENED
-Admin UI temporary URL: $ADMIN_UI_BOOTSTRAP_ACCESS_URL
-vm.overcommit_memory OK: $SYSCTL_REDIS_OK
-Traefik placeholders OK: $TRAEFIK_PLACEHOLDERS_OK
-Traefik DNS v3.7 OK: $TRAEFIK_DNS_DELAY_OK
-Traefik encoded characters OK: $TRAEFIK_ENCODED_CHARS_OK
-Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
-Authentik folders OK: $AUTHENTIK_FOLDERS_OK
-CF companion secret OK: $CF_COMPANION_SECRET_OK
-Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
-Authentik dependency gate: $AUTHENTIK_DEPENDENCIES_OK
-Authentik API OK: $AUTHENTIK_API_OK
-Authentik provider OK: $AUTHENTIK_PROVIDER_OK
-Authentik application OK: $AUTHENTIK_APPLICATION_OK
-Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
-Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
-Authentik public host route: $AUTHENTIK_HOST_ROUTE_OK
-Protected routes OK: $PROTECTED_ROUTE_VERIFY_OK
+Domain: $DOMAIN_VALUE
+Verification: $VERIFY_STATUS
+Deployed stacks: $DEPLOYED_STACKS
+Failed stacks: $FAILED_STACKS
 Verify log: $VERIFY_LOG
-MARKER_EOF
-    else
-        cat > "$COMPLETED_MARKER" <<MARKER_EOF
-Docker Bootstrap Setup completed on: $(date)
-Docker user: $DOCKER_USER
-Docker dir: $DOCKER_DIR
-Compose dir: $COMPOSE_DIR
-Env file: $ENV_FILE
-GitHub raw base: $GITHUB_RAW_BASE
-Networks created: $NETWORKS_CREATED
-Networks verified: $NETWORKS_VERIFIED
-socket_proxy subnet: $SOCKET_PROXY_SUBNET_ACTUAL
-t2_proxy subnet: $T2_PROXY_SUBNET_ACTUAL
-database network: $DATABASE_NETWORK_NAME
-Socket Proxy stack downloaded: $SOCKET_PROXY_STACK_DOWNLOADED
-Admin stack downloaded: $PORTAINER_STACK_DOWNLOADED
-Portainer bootstrap override downloaded: $PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED
-Dockge stack compose downloaded: $DOCKGE_STACK_DOWNLOADED
-Komodo stack compose downloaded: $KOMODO_STACK_DOWNLOADED
-Dockhand stack compose downloaded: $DOCKHAND_STACK_DOWNLOADED
-Socket proxy deployed: $SOCKET_PROXY_DEPLOYED
-Admin UI: $ADMIN_UI
-Admin UI validated: $ADMIN_UI_VALIDATED
-Admin UI deployed: $ADMIN_UI_DEPLOYED
-Portainer deployed: $PORTAINER_DEPLOYED
-Admin UI bootstrap override: $ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN
-Admin UI bootstrap port: $ADMIN_UI_BOOTSTRAP_PORT
-Admin UI bootstrap port exposed: $ADMIN_UI_BOOTSTRAP_PORT_EXPOSED
-UFW bootstrap port opened: $UFW_BOOTSTRAP_PORT_OPENED
-Admin UI temporary URL: $ADMIN_UI_BOOTSTRAP_ACCESS_URL
-vm.overcommit_memory OK: $SYSCTL_REDIS_OK
-Traefik placeholders OK: $TRAEFIK_PLACEHOLDERS_OK
-Traefik DNS v3.7 OK: $TRAEFIK_DNS_DELAY_OK
-Traefik encoded characters OK: $TRAEFIK_ENCODED_CHARS_OK
-Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
-Authentik folders OK: $AUTHENTIK_FOLDERS_OK
-CF companion secret OK: $CF_COMPANION_SECRET_OK
-Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
-Authentik dependency gate: $AUTHENTIK_DEPENDENCIES_OK
-Authentik API OK: $AUTHENTIK_API_OK
-Authentik provider OK: $AUTHENTIK_PROVIDER_OK
-Authentik application OK: $AUTHENTIK_APPLICATION_OK
-Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
-Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
-Authentik public host route: $AUTHENTIK_HOST_ROUTE_OK
-Protected routes OK: $PROTECTED_ROUTE_VERIFY_OK
-Verify log: $VERIFY_LOG
-MARKER_EOF
-    fi
+Display log: $VERIFY_DISPLAY_LOG
 
-    msg_ok "COMPLETION MARKER WRITTEN"
+SCRIPT65_STATUS=completed
+SCRIPT65_VERSION=$SCRIPT_VERSION
+SCRIPT65_BUILD=$SCRIPT_BUILD
+SCRIPT65_VERIFY_STATUS=$VERIFY_STATUS
+SCRIPT65_VERIFY_LOG=$VERIFY_LOG
+SCRIPT65_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
+SCRIPT65_DOCKER_DIR=$DOCKER_DIR
+SCRIPT65_COMPOSE_DIR=$COMPOSE_DIR
+SCRIPT65_ENV_FILE=$ENV_FILE
+SCRIPT65_ADMIN_UI=$ADMIN_UI
+SCRIPT65_DOMAIN=$DOMAIN_VALUE
+SCRIPT65_DEPLOYED_STACKS=$DEPLOYED_STACKS
+SCRIPT65_FAILED_STACKS=$FAILED_STACKS
+SCRIPT65_NETWORKS_READY=$NETWORKS_VERIFIED
+SCRIPT65_SOCKET_PROXY_READY=$SOCKET_PROXY_DEPLOYED
+SCRIPT65_TRAEFIK_READY=$TRAEFIK_PLACEHOLDERS_OK
+SCRIPT65_AUTHENTIK_READY=$AUTHENTIK_API_OK
+SCRIPT65_BOOTSTRAP_PORT_OPEN=$UFW_BOOTSTRAP_PORT_OPENED
+MARKER_EOF
+    if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" cp "$marker_tmp" "$COMPLETED_MARKER"; "$SUDO_CMD" chmod 0600 "$COMPLETED_MARKER" 2>/dev/null || true; else cp "$marker_tmp" "$COMPLETED_MARKER"; chmod 0600 "$COMPLETED_MARKER" 2>/dev/null || true; fi
+    msg_ok "Marker written"
 }
 
 # --- 46. FINAL SUMMARY ---
 # Displays clean final setup summary and next step.
 function show_final_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
-
-    detail_line "socket_proxy" "$SOCKET_PROXY_SUBNET_ACTUAL"
-    detail_line "t2_proxy" "$T2_PROXY_SUBNET_ACTUAL"
-    detail_line "database" "$DATABASE_NETWORK_NAME"
-    detail_line "SOCKET PROXY STACK" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
-    detail_line "ADMIN UI" "$ADMIN_UI_DISPLAY_NAME"
-    detail_line "ADMIN UI COMPOSE" "$ADMIN_UI_COMPOSE_FILE"
-    detail_line "ADMIN UI HOST" "$ADMIN_UI_HOST"
-    detail_line "REDIS SYSCTL" "$SYSCTL_REDIS_OK"
-    detail_line "TRAEFIK PLACEHOLDERS" "$TRAEFIK_PLACEHOLDERS_OK"
-    detail_line "TRAEFIK DNS V3.7" "$TRAEFIK_DNS_DELAY_OK"
-    detail_line "TRAEFIK ENCODED CHARS" "$TRAEFIK_ENCODED_CHARS_OK"
-    detail_line "AUTHENTIK FOLDERS" "$AUTHENTIK_FOLDERS_OK"
-    detail_line "FILEBROWSER FOLDERS" "$FILEBROWSER_FOLDERS_OK"
-    detail_line "AUTHENTIK DEPENDENCIES" "$AUTHENTIK_DEPENDENCIES_OK"
-    detail_line "AUTHENTIK API" "$AUTHENTIK_API_OK"
-    detail_line "AUTHENTIK PUBLIC HOST" "$AUTHENTIK_HOST_ROUTE_OK"
-    detail_line "PROTECTED ROUTES" "$PROTECTED_ROUTE_VERIFY_OK"
-    detail_line "Admin UI temporary URL" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
-    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
+    group_heading "Deployment"
+    detail_line "Docker dir" "$DOCKER_DIR"
+    detail_line "Compose dir" "$COMPOSE_DIR"
+    detail_line "Domain" "$DOMAIN_VALUE"
+    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
+    detail_line "Admin UI URL" "$ADMIN_UI_URL"
+    echo ""
+    group_heading "Selected stacks"
+    display_selected_stack_lines
+    echo ""
+    group_heading "Deployed stacks"
+    stack_list_lines "$DEPLOYED_STACKS"
+    echo ""
+    group_heading "Failed stacks"
+    stack_list_lines "$FAILED_STACKS"
+    echo ""
+    group_heading "Access"
+    detail_line "Traefik URL" "https://${TRAEFIK_DASHBOARD_HOST:-traefik.${DOMAIN_VALUE}}"
+    detail_line "Authentik URL" "${AUTHENTIK_EXTERNAL_URL:-https://${AUTHENTIK_ROUTE_HOST}}"
+    detail_line "Admin UI URL" "$ADMIN_UI_URL"
+    detail_line "Bootstrap access" "${ADMIN_UI_BOOTSTRAP_ACCESS_URL:-not confirmed}"
+    detail_line "Cloudflare companion" "$CF_COMPANION_SECRET_OK"
+    detail_line "Public routes" "$PROTECTED_ROUTE_VERIFY_OK" "$(status_color_for_value "$PROTECTED_ROUTE_VERIFY_OK")"
+    echo ""
+    group_heading "Files"
+    detail_line "Compose dir" "$COMPOSE_DIR"
+    detail_line "Created" "$SAFE_WRITE_CREATED_COUNT"
+    detail_line "Updated" "$SAFE_WRITE_UPDATED_COUNT"
+    detail_line "Unchanged" "$SAFE_WRITE_UNCHANGED_COUNT"
+    detail_line "Backups" "$SAFE_WRITE_BACKUP_COUNT"
     detail_line "Verify log" "$VERIFY_LOG"
-
+    detail_line "Display log" "$VERIFY_DISPLAY_LOG"
+    detail_line "Marker" "$COMPLETED_MARKER"
     echo ""
-    echo -e "${YW}${ADMIN_UI_DISPLAY_NAME} is temporarily available by direct IP for bootstrap:${CL}"
-    echo -e "${GN}${ADMIN_UI_BOOTSTRAP_ACCESS_URL}${CL}"
-    echo -e "${YW}Script 7 will close this direct bootstrap port and leave access through Traefik/AuthentiK.${CL}"
+    group_heading "Verification"
+    detail_line "Status" "$VERIFY_STATUS" "$(status_color_for_value "$VERIFY_STATUS")"
+    detail_line "Pass" "$VERIFY_PASS_COUNT"
+    detail_line "Warn" "$VERIFY_WARN_COUNT" "$YW"
+    detail_line "Fail" "$VERIFY_FAIL_COUNT" "$RD"
+    detail_line "Verify log" "$VERIFY_LOG"
+    detail_line "Display log" "$VERIFY_DISPLAY_LOG"
     echo ""
-    echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Review the route verification results above.${CL}"
-    echo -e "${YW}When protected domain access is confirmed, run Script 7 for final hardening, cleanup and bootstrap-port closure.${CL}"
+    group_heading "Next Step"
+    echo -e "  ${YW}Review route verification results, then run Script 7 for final hardening, cleanup and bootstrap-port closure.${CL}"
     echo ""
 }
 
@@ -3981,80 +4700,93 @@ function show_final_summary() {
 
 # --- 47. MAIN FUNCTION ---
 # Runs Docker network + socket-proxy + Admin UI bootstrap in safe order.
-# --- READY TO APPLY SUMMARY ---
+# --- SETUP PLAN SUMMARY ---
 # Confirms all collected bootstrap answers before networks, compose downloads, firewall changes or containers are changed.
 function show_ready_to_apply() {
     local apply_yn=""
+    local cf_guard="not selected"
+    local required_status=""
 
-    section "READY TO APPLY"
+    section "SETUP PLAN"
+    [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]] && cf_guard="ready"
+    required_status="$(all_required_readiness_status)"
 
-    echo -e "${YW}All questions have been collected. No Docker networks, compose files, firewall rules or containers have been changed yet.${CL}"
-    echo ""
-    detail_line "Docker user" "$DOCKER_USER"
-    detail_line "Docker directory" "$DOCKER_DIR"
-    detail_line "Compose directory" "$COMPOSE_DIR"
-    detail_line ".env file" "$ENV_FILE"
-    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
-    detail_line "Admin UI host" "$ADMIN_UI_HOST"
-    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
-    detail_line "GitHub raw base" "$GITHUB_RAW_BASE"
-    echo ""
-    echo -e "${BL}DEPENDENCY / STACK PLAN:${CL}"
-    detail_line "Required" "Socket Proxy + ${ADMIN_UI_DISPLAY_NAME} bootstrap"
-    if [ "${#SELECTED_STACK_FILES[@]}" -eq 0 ]; then
-        detail_line "Additional stacks" "none selected"
-    else
-        local i=""
-        for i in "${!SELECTED_STACK_FILES[@]}"; do
-            detail_line "${SELECTED_STACK_FILES[$i]}" "${DEPENDENCY_REASONS[$i]}"
-        done
-    fi
-    echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will create networks, download fixed compose files, open bootstrap access and deploy selected containers in safe order.${CL}"
+    group_heading "Script 6 dependency"
+    plan_line "Status" "$SCRIPT6_PREFLIGHT_STATUS" "$(status_color_for_value "$SCRIPT6_PREFLIGHT_STATUS")"
+    plan_line "Docker dir" "$DOCKER_DIR"
+    plan_line "Compose dir" "$COMPOSE_DIR"
+    plan_line "Domain" "$DOMAIN_VALUE"
+    plan_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$GN"
     echo ""
 
-    apply_yn="$(timed_yes_no "Apply this Docker Bootstrap setup plan now?" "y")"
+    group_heading "Deployment"
+    plan_line "Compose source" "$COMPOSE_SOURCE_LABEL"
+    plan_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$GN"
+    plan_line "Bootstrap access" "${ADMIN_UI_BOOTSTRAP_BIND}:${ADMIN_UI_BOOTSTRAP_PORT}" "$GN"
+    plan_line "Compose files" "$(compose_plan_selected_count) selected"
+    plan_line "Compose drift" "backup if changed"
+    echo ""
 
+    group_heading "Selected stacks"
+    selected_stack_plan_list
+    echo ""
+
+    group_heading "Readiness"
+    plan_line "Required checks" "$required_status" "$(status_color_for_value "$required_status")"
+    plan_line "Optional htpasswd" "$SCRIPT6_HTPASSWD_STATUS" "$(status_color_for_value "$SCRIPT6_HTPASSWD_STATUS")"
+    echo ""
+
+    group_heading "Safety"
+    plan_line "Backups" "enabled"
+    plan_line "cf-companion" "$cf_guard" "$(status_color_for_value "$cf_guard")"
+    plan_line "Changes applied" "no" "$GN"
+    echo ""
+
+    echo -e "${RD}${CLF}After confirmation, Script 6.5 will:${CL}"
+    echo -e "  ${YW}create networks, install compose files,${CL}"
+    echo -e "  ${YW}deploy selected stacks and verify routes.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Apply this Docker stack deployment plan now?" "y")"
     if [[ "$apply_yn" =~ ^[Nn] ]]; then
-        echo -e "${YW}Docker Bootstrap Setup cancelled. No Docker/bootstrap-changing actions were applied.${CL}"
+        echo -e "${YW}Docker stack deployment cancelled. No Docker/bootstrap-changing actions were applied.${CL}"
         exit 0
     fi
-
     return 0
+}
+
+function verify_existing_deployment_state() {
+    apply_group_heading "Post-deploy verification"
+    if docker_cmd network inspect socket_proxy >/dev/null 2>&1 && docker_cmd network inspect t2_proxy >/dev/null 2>&1 && docker_cmd network inspect database >/dev/null 2>&1; then NETWORKS_VERIFIED="yes"; NETWORKS_CREATED="yes"; msg_ok "Existing Docker networks verified"; else NETWORKS_VERIFIED="no"; msg_warn "One or more Docker networks are missing"; fi
+    SOCKET_PROXY_SUBNET_ACTUAL="$(docker_cmd network inspect socket_proxy --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"; T2_PROXY_SUBNET_ACTUAL="$(docker_cmd network inspect t2_proxy --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"; DATABASE_NETWORK_NAME="$(docker_cmd network inspect database --format '{{.Name}}' 2>/dev/null || true)"
+    if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'socket-proxy'; then SOCKET_PROXY_DEPLOYED="yes"; msg_ok "Socket proxy running"; else SOCKET_PROXY_DEPLOYED="no"; msg_warn "Socket proxy is not running"; fi
+    if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx "$ADMIN_UI_SERVICE_NAME"; then ADMIN_UI_DEPLOYED="yes"; ADMIN_UI_VALIDATED="yes"; msg_ok "${ADMIN_UI_DISPLAY_NAME} running"; else ADMIN_UI_DEPLOYED="no"; msg_warn "${ADMIN_UI_DISPLAY_NAME} is not running"; fi
+    detect_admin_ui_access_ip
+}
+function run_verify_only_mode() {
+    verify_admin_ui_selection; validate_required_secret_files; validate_traefik_config_files_predeploy; verify_existing_deployment_state; create_verification_report; write_completion_marker; show_final_summary; exit 0
+}
+function run_apply_changes() {
+    section "APPLY CHANGES"
+    CURRENT_APPLY_GROUP=""
+    create_shared_networks; verify_shared_networks; download_selected_compose_files; verify_admin_ui_bootstrap_override_file; verify_selected_compose_env_coverage; validate_selected_compose_files; prepare_postgres_runtime_prereqs; prepare_redis_runtime_prereqs; configure_bootstrap_firewall; deploy_selected_stacks; verify_bootstrap_containers; verify_cf_companion_runtime_if_selected; configure_authentik_and_verify_routes; apply_group_heading "Marker / logs"; create_verification_report; write_completion_marker
 }
 
 function main() {
     init_script
-
+    section "ENVIRONMENT CHECK"
     detect_docker_access
+    validate_project_paths
     check_previous_marker
+    if [ "$VERIFY_ONLY_MODE" == "yes" ]; then run_verify_only_mode; fi
     start_confirmation
     collect_bootstrap_settings
-    validate_project_paths
     verify_admin_ui_selection
     collect_stack_deployment_choices
     verify_selected_stack_preflight
     show_ready_to_apply
-
-    create_shared_networks
-    verify_shared_networks
-
-    download_selected_compose_files
-    verify_admin_ui_bootstrap_override_file
-    verify_selected_compose_env_coverage
-    validate_selected_compose_files
-    prepare_postgres_runtime_prereqs
-    prepare_redis_runtime_prereqs
-
-    configure_bootstrap_firewall
-    deploy_selected_stacks
-    verify_bootstrap_containers
-    verify_cf_companion_runtime_if_selected
-    configure_authentik_and_verify_routes
-    create_verification_report
-    write_completion_marker
+    run_apply_changes
     show_final_summary
-
     exit 0
 }
 

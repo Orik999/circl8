@@ -76,7 +76,7 @@ services:
       TZ: ${TZ}
 
       # Public URL.
-      KOMODO_HOST: https://komodo.${DOMAIN}
+      KOMODO_HOST: ${ADMIN_UI_URL}
 
       # Database via FerretDB.
       KOMODO_DATABASE_ADDRESS: ferretdb:27017
@@ -96,7 +96,7 @@ services:
     labels:
       traefik.enable: "true"
 
-      traefik.http.routers.komodo.rule: Host(`komodo.${DOMAIN}`)
+      traefik.http.routers.komodo.rule: Host(`${ADMIN_UI_HOST}`)
       traefik.http.routers.komodo.entrypoints: https
       traefik.http.routers.komodo.tls: "true"
       traefik.http.routers.komodo.middlewares: chain-authentik@file
