@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.11"
+SCRIPT_VERSION="v2.1.12"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="user-detect-token-plan-polish"
+SCRIPT_BUILD="setup-options-grouping-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1177,9 +1177,7 @@ function collect_username() {
 
     section "SETUP OPTIONS"
 
-    if detect_vm_username; then
-        msg_ok "Ubuntu VM user detected: ${USERNAME}"
-    else
+    if ! detect_vm_username; then
         USERNAME_SOURCE="manual-fallback"
         msg_warn "Could not safely detect the Ubuntu VM user; manual fallback required"
         while true; do
@@ -1216,13 +1214,16 @@ function collect_username() {
         SOURCE_KEYS=""
     fi
 
+    LOCK_USER_PASSWORD="$(timed_yes_no "Lock password for SSH-key-only user?" "y")"
+    APPLY_SSH_HARDENING="$(timed_yes_no "Apply SSH key-only hardening after keys are verified?" "y")"
+
     echo -e "${YW}User / SSH:${CL}"
     plan_line "Username" "$USERNAME" "$GN"
     plan_line "Source" "$USERNAME_SOURCE" "$GN"
     plan_line "Existing user" "$EXISTING_USER" "$GN"
-
-    LOCK_USER_PASSWORD="$(timed_yes_no "Lock password for SSH-key-only user?" "y")"
-    APPLY_SSH_HARDENING="$(timed_yes_no "Apply SSH key-only hardening after keys are verified?" "y")"
+    plan_line "SSH key source" "${SOURCE_KEYS:-none detected}" "$GN"
+    plan_line "Lock password" "$(yes_no_label "$LOCK_USER_PASSWORD")" "$ANS"
+    plan_line "SSH hardening" "$(yes_no_label "$APPLY_SSH_HARDENING")" "$ANS"
 
     return 0
 }
@@ -1296,6 +1297,9 @@ function collect_system_action_inputs() {
         CONFIGURE_UFW="$(timed_yes_no "Install and enable UFW firewall baseline?" "y")"
     fi
 
+    RUN_SYSTEM_CLEANUP="$(timed_yes_no "Run package cleanup at the end?" "y")"
+    REBOOT_AFTER_FINISH="$(timed_yes_no "Reboot automatically after setup finishes?" "y")"
+
     echo ""
     echo -e "${YW}CrowdSec:${CL}"
     crowdsec_yn="$(timed_yes_no "Install CrowdSec security agent?" "y")"
@@ -1335,9 +1339,6 @@ function collect_system_action_inputs() {
             CROWDSEC_CONSOLE_ENROLLMENT="skipped"
         fi
     fi
-
-    RUN_SYSTEM_CLEANUP="$(timed_yes_no "Run package cleanup at the end?" "y")"
-    REBOOT_AFTER_FINISH="$(timed_yes_no "Reboot automatically after setup finishes?" "y")"
 
     return 0
 }
