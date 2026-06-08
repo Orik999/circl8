@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.10"
+SCRIPT_VERSION="v2.1.11"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="crowdsec-options-plan-ui"
+SCRIPT_BUILD="user-detect-token-plan-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -64,7 +64,7 @@ VERIFY_FIRST_ISSUE_FIX=""
 COMPLETED_MARKER="/root/.ubuntu-vm-setup-completed"
 
 HOSTNAME_SHORT="$(hostname -s 2>/dev/null || echo ubuntu-vm)"
-DEFAULT_USERNAME="${DEFAULT_USERNAME:-orik}"
+DEFAULT_USERNAME="${DEFAULT_USERNAME:-}"
 
 SUDO_CMD=""
 TEMP_FILES=()
@@ -80,6 +80,7 @@ SOURCE_KEYS=""
 DEST_KEYS=""
 
 USERNAME=""
+USERNAME_SOURCE="not-detected"
 LOCK_USER_PASSWORD="y"
 ATTACH_UBUNTU_PRO="n"
 PRO_TOKEN=""
@@ -813,6 +814,105 @@ function marker_key_value_or_empty() {
     echo "$value"
 }
 
+function passwd_home_for_user() {
+    local username="$1"
+
+    awk -F: -v user="$username" '$1 == user {print $6; exit}' /etc/passwd 2>/dev/null || true
+}
+
+function valid_detected_vm_user() {
+    local username="${1:-}"
+    local home_dir=""
+
+    [ -n "$username" ] || return 1
+    [ "$username" != "root" ] || return 1
+    validate_linux_username "$username" || return 1
+    id "$username" >/dev/null 2>&1 || return 1
+
+    home_dir="$(passwd_home_for_user "$username")"
+    [ -n "$home_dir" ] || return 1
+    [ -d "$home_dir" ] || return 1
+
+    return 0
+}
+
+function detect_vm_username() {
+    local candidate=""
+    local marker_user=""
+
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-}" != "root" ]; then
+        candidate="$SUDO_USER"
+        if valid_detected_vm_user "$candidate"; then
+            USERNAME="$candidate"
+            USERNAME_SOURCE="detected"
+            return 0
+        fi
+    fi
+
+    if command -v logname >/dev/null 2>&1; then
+        candidate="$(logname 2>/dev/null || true)"
+        if valid_detected_vm_user "$candidate"; then
+            USERNAME="$candidate"
+            USERNAME_SOURCE="detected"
+            return 0
+        fi
+    fi
+
+    candidate="$(id -un 2>/dev/null || true)"
+    if valid_detected_vm_user "$candidate"; then
+        USERNAME="$candidate"
+        USERNAME_SOURCE="detected"
+        return 0
+    fi
+
+    marker_user="$(marker_value_or_unknown_for_display "Username" "$COMPLETED_MARKER")"
+    if [ -n "$marker_user" ] && [ "$marker_user" != "unknown" ] && valid_detected_vm_user "$marker_user"; then
+        USERNAME="$marker_user"
+        USERNAME_SOURCE="marker"
+        return 0
+    fi
+
+    return 1
+}
+
+function normalize_dns_label_text() {
+    local value="${1:-}"
+
+    value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-+//; s/-+$//')"
+    printf '%s' "$value"
+}
+
+function derive_crowdsec_engine_name() {
+    local raw_host="${1:-}"
+    local label=""
+    local fallback=""
+
+    label="$(normalize_dns_label_text "$raw_host")"
+    fallback="$label"
+
+    while [[ "$label" =~ ^(ubuntu|vm|server|host)- ]]; do
+        label="${label#*-}"
+    done
+
+    while [[ "$label" =~ -(ubuntu|vm|server|host)$ ]]; do
+        label="${label%-*}"
+    done
+
+    label="$(normalize_dns_label_text "$label")"
+    if [ -z "$label" ]; then
+        label="${fallback:-vm}"
+    fi
+
+    printf 'ubuntu-%s' "$label"
+}
+
+function crowdsec_enrollment_needs_console_approval() {
+    case "${CROWDSEC_CONSOLE_ENROLLMENT:-}" in
+        submitted|pending) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 function previous_marker_action_menu() {
     local action=""
     local action_label=""
@@ -1073,17 +1173,32 @@ function start_confirmation() {
 
 # --- 30. USERNAME INPUT ---
 function collect_username() {
+    local manual_username=""
+
     section "SETUP OPTIONS"
 
-    while true; do
-        USERNAME="$(timed_text_input "Enter username" "$DEFAULT_USERNAME")"
+    if detect_vm_username; then
+        msg_ok "Ubuntu VM user detected: ${USERNAME}"
+    else
+        USERNAME_SOURCE="manual-fallback"
+        msg_warn "Could not safely detect the Ubuntu VM user; manual fallback required"
+        while true; do
+            manual_username="$(timed_text_input "Enter Ubuntu VM username" "${DEFAULT_USERNAME:-}")"
+            manual_username="$(printf '%s' "$manual_username" | xargs || true)"
 
-        if validate_linux_username "$USERNAME"; then
-            break
-        fi
+            if [ "$manual_username" == "root" ]; then
+                msg_warn "Root is not a valid Script 4 target user. Enter the Ubuntu VM user account."
+                continue
+            fi
 
-        msg_warn "Invalid username. Use lowercase Linux username format, for example: orik"
-    done
+            if validate_linux_username "$manual_username"; then
+                USERNAME="$manual_username"
+                break
+            fi
+
+            msg_warn "Invalid username. Use lowercase Linux username format, for example: lowercase-name"
+        done
+    fi
 
     if id "$USERNAME" >/dev/null 2>&1; then
         EXISTING_USER="yes"
@@ -1100,6 +1215,11 @@ function collect_username() {
     else
         SOURCE_KEYS=""
     fi
+
+    echo -e "${YW}User / SSH:${CL}"
+    plan_line "Username" "$USERNAME" "$GN"
+    plan_line "Source" "$USERNAME_SOURCE" "$GN"
+    plan_line "Existing user" "$EXISTING_USER" "$GN"
 
     LOCK_USER_PASSWORD="$(timed_yes_no "Lock password for SSH-key-only user?" "y")"
     APPLY_SSH_HARDENING="$(timed_yes_no "Apply SSH key-only hardening after keys are verified?" "y")"
@@ -1140,6 +1260,8 @@ function collect_ubuntu_pro_inputs() {
             ENABLE_LIVEPATCH="n"
             return 0
         fi
+
+        msg_ok "Ubuntu Pro token captured"
 
         ENABLE_ESM_APPS="$(timed_yes_no "Enable Ubuntu Pro ESM Apps?" "y")"
         ENABLE_ESM_INFRA="$(timed_yes_no "Enable Ubuntu Pro ESM Infra?" "y")"
@@ -1188,7 +1310,7 @@ function collect_system_action_inputs() {
         CROWDSEC_BOUNCER_STATUS="skipped"
     else
         ENABLE_CROWDSEC="y"
-        CROWDSEC_CONSOLE_ENGINE_NAME="ubuntu-${HOSTNAME_SHORT}"
+        CROWDSEC_CONSOLE_ENGINE_NAME="$(derive_crowdsec_engine_name "$HOSTNAME_SHORT")"
         enroll_yn="$(timed_yes_no "Attach CrowdSec console/enrollment token?" "n")"
         if [[ "$enroll_yn" =~ ^[Yy] ]]; then
             CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="yes"
@@ -1227,7 +1349,8 @@ function show_ready_summary_and_confirm() {
     section "SETUP PLAN"
 
     echo -e "${YW}User / SSH:${CL}"
-    plan_line "Username" "$USERNAME" "$ANS"
+    plan_line "Username" "$USERNAME" "$GN"
+    plan_line "Source" "$USERNAME_SOURCE" "$GN"
     plan_line "Existing user" "$EXISTING_USER" "$GN"
     plan_line "SSH key source" "${SOURCE_KEYS:-none detected}" "$GN"
     plan_line "Lock password" "$(yes_no_label "$LOCK_USER_PASSWORD")" "$ANS"
@@ -1262,7 +1385,12 @@ function show_ready_summary_and_confirm() {
         plan_line "Install" "yes" "$ANS"
         plan_line "Collections" "linux, sshd, http-cve" "$GN"
         plan_line "Bouncer" "firewall" "$GN"
-        plan_line "Console attach" "$(yes_no_label "$CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED")" "$ANS"
+        if [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" == "yes" ]; then
+            plan_line "Console enroll" "selected" "$ANS"
+            plan_line "Engine name" "${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}" "$GN"
+        else
+            plan_line "Console enroll" "no" "$ANS"
+        fi
     else
         plan_line "Install" "no" "$ANS"
         plan_line "Action" "skipped" "$GN"
@@ -1787,15 +1915,15 @@ function enroll_crowdsec_console() {
         return 0
     fi
 
-    CROWDSEC_CONSOLE_ENGINE_NAME="${CROWDSEC_CONSOLE_ENGINE_NAME:-ubuntu-${HOSTNAME_SHORT}}"
+    CROWDSEC_CONSOLE_ENGINE_NAME="${CROWDSEC_CONSOLE_ENGINE_NAME:-$(derive_crowdsec_engine_name "$HOSTNAME_SHORT")}"
     err_file="$(mktemp)"
     TEMP_FILES+=("$err_file")
 
     msg_info "Enrolling CrowdSec engine in Console as ${CROWDSEC_CONSOLE_ENGINE_NAME}"
     if [ -n "$SUDO_CMD" ]; then
         if "$SUDO_CMD" cscli console enroll --name "$CROWDSEC_CONSOLE_ENGINE_NAME" "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" >/dev/null 2> "$err_file"; then
-            CROWDSEC_CONSOLE_ENROLLMENT="pending"
-            msg_ok "CROWDSEC CONSOLE ENROLLMENT REQUESTED"
+            CROWDSEC_CONSOLE_ENROLLMENT="submitted"
+            msg_ok "CROWDSEC CONSOLE ENROLLMENT SUBMITTED"
             run_optional cscli console enable --all
         else
             CROWDSEC_CONSOLE_ENROLLMENT="failed"
@@ -1803,8 +1931,8 @@ function enroll_crowdsec_console() {
         fi
     else
         if cscli console enroll --name "$CROWDSEC_CONSOLE_ENGINE_NAME" "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" >/dev/null 2> "$err_file"; then
-            CROWDSEC_CONSOLE_ENROLLMENT="pending"
-            msg_ok "CROWDSEC CONSOLE ENROLLMENT REQUESTED"
+            CROWDSEC_CONSOLE_ENROLLMENT="submitted"
+            msg_ok "CROWDSEC CONSOLE ENROLLMENT SUBMITTED"
             run_optional cscli console enable --all
         else
             CROWDSEC_CONSOLE_ENROLLMENT="failed"
@@ -1978,6 +2106,7 @@ function write_completion_marker() {
         "$SUDO_CMD" bash -c "cat > '$COMPLETED_MARKER'" <<EOF_MARKER
 Ubuntu VM Setup completed on: $(date)
 Username: $USERNAME
+Username Source: $USERNAME_SOURCE
 User Created: $SUDO_USER_CREATED
 User Added To Sudo: $USER_ADDED_TO_SUDO
 User Password Locked: $USER_PASSWORD_LOCKED
@@ -1995,7 +2124,7 @@ QEMU Agent: $QEMU_AGENT_INSTALLED
 Root Expanded: $ROOT_EXPANDED
 UFW: $UFW_ENABLED
 CrowdSec Selected: $(yes_no_label "$ENABLE_CROWDSEC")
-CrowdSec Console Attach: $CROWDSEC_CONSOLE_ENROLLMENT
+CrowdSec Console Enrollment: $CROWDSEC_CONSOLE_ENROLLMENT
 CrowdSec Console Engine Name: ${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
 CrowdSec Package: $CROWDSEC_PACKAGE_INSTALLED
 CrowdSec Service: $CROWDSEC_SERVICE_STATUS
@@ -2015,10 +2144,11 @@ SCRIPT4_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
 SCRIPT4_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
 SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-displayed
 SCRIPT4_USERNAME=$USERNAME
+SCRIPT4_USERNAME_SOURCE=$USERNAME_SOURCE
 SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
 SCRIPT4_UFW_ENABLED=$UFW_ENABLED
 SCRIPT4_CROWDSEC_SELECTED=$(yes_no_label "$ENABLE_CROWDSEC")
-SCRIPT4_CROWDSEC_CONSOLE_ATTACH=$CROWDSEC_CONSOLE_ENROLLMENT
+SCRIPT4_CROWDSEC_CONSOLE_ENROLLMENT=$CROWDSEC_CONSOLE_ENROLLMENT
 SCRIPT4_CROWDSEC_CONSOLE_ENGINE_NAME=${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
 SCRIPT4_CROWDSEC_PACKAGE=$CROWDSEC_PACKAGE_INSTALLED
 SCRIPT4_CROWDSEC_SERVICE=$CROWDSEC_SERVICE_STATUS
@@ -2032,6 +2162,7 @@ EOF_MARKER
         cat > "$COMPLETED_MARKER" <<EOF_MARKER
 Ubuntu VM Setup completed on: $(date)
 Username: $USERNAME
+Username Source: $USERNAME_SOURCE
 User Created: $SUDO_USER_CREATED
 User Added To Sudo: $USER_ADDED_TO_SUDO
 User Password Locked: $USER_PASSWORD_LOCKED
@@ -2049,7 +2180,7 @@ QEMU Agent: $QEMU_AGENT_INSTALLED
 Root Expanded: $ROOT_EXPANDED
 UFW: $UFW_ENABLED
 CrowdSec Selected: $(yes_no_label "$ENABLE_CROWDSEC")
-CrowdSec Console Attach: $CROWDSEC_CONSOLE_ENROLLMENT
+CrowdSec Console Enrollment: $CROWDSEC_CONSOLE_ENROLLMENT
 CrowdSec Console Engine Name: ${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
 CrowdSec Package: $CROWDSEC_PACKAGE_INSTALLED
 CrowdSec Service: $CROWDSEC_SERVICE_STATUS
@@ -2069,10 +2200,11 @@ SCRIPT4_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
 SCRIPT4_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
 SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-displayed
 SCRIPT4_USERNAME=$USERNAME
+SCRIPT4_USERNAME_SOURCE=$USERNAME_SOURCE
 SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
 SCRIPT4_UFW_ENABLED=$UFW_ENABLED
 SCRIPT4_CROWDSEC_SELECTED=$(yes_no_label "$ENABLE_CROWDSEC")
-SCRIPT4_CROWDSEC_CONSOLE_ATTACH=$CROWDSEC_CONSOLE_ENROLLMENT
+SCRIPT4_CROWDSEC_CONSOLE_ENROLLMENT=$CROWDSEC_CONSOLE_ENROLLMENT
 SCRIPT4_CROWDSEC_CONSOLE_ENGINE_NAME=${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
 SCRIPT4_CROWDSEC_PACKAGE=$CROWDSEC_PACKAGE_INSTALLED
 SCRIPT4_CROWDSEC_SERVICE=$CROWDSEC_SERVICE_STATUS
@@ -2278,7 +2410,7 @@ function create_verification_report() {
 
         if [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" == "yes" ]; then
             case "${CROWDSEC_CONSOLE_ENROLLMENT:-unknown}" in
-                pending|attached|already-attached) verify_pass "CrowdSec Console enrollment requested" ;;
+                submitted|pending|attached|already-attached) verify_pass "CrowdSec Console enrollment submitted" ;;
                 failed) verify_warn "CrowdSec Console enrollment" "enrollment failed" "review sudo cscli console status" ;;
                 *) verify_info "CrowdSec Console enrollment state: ${CROWDSEC_CONSOLE_ENROLLMENT:-unknown}" ;;
             esac
@@ -2360,15 +2492,17 @@ function load_state_from_completion_marker() {
     local value=""
 
     marker_username="$(marker_value_or_unknown_for_display "Username" "$marker_file")"
-    if [ -n "$marker_username" ] && [ "$marker_username" != "unknown" ]; then
+    if [ -n "$marker_username" ] && [ "$marker_username" != "unknown" ] && valid_detected_vm_user "$marker_username"; then
         USERNAME="$marker_username"
-    elif [ -n "${SUDO_USER:-}" ]; then
-        USERNAME="$SUDO_USER"
-    elif [ -n "${USER:-}" ] && [ "${USER:-}" != "root" ]; then
-        USERNAME="$USER"
+        USERNAME_SOURCE="marker"
+    elif detect_vm_username; then
+        :
     else
-        USERNAME="$DEFAULT_USERNAME"
+        USERNAME="${DEFAULT_USERNAME:-unknown}"
+        USERNAME_SOURCE="fallback"
     fi
+
+    value="$(marker_value_or_unknown_for_display "Username Source" "$marker_file")"; [ "$value" != "unknown" ] && USERNAME_SOURCE="$value"
 
     value="$(marker_value_or_unknown_for_display "Virt Type" "$marker_file")"; [ "$value" != "unknown" ] && VIRT_TYPE="$value"
     value="$(marker_value_or_unknown_for_display "Container" "$marker_file")"; [ "$value" != "unknown" ] && IS_CONTAINER="$value"
@@ -2382,7 +2516,10 @@ function load_state_from_completion_marker() {
     value="$(marker_value_or_unknown_for_display "System Updated" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_UPDATED="$value"
     value="$(marker_value_or_unknown_for_display "System Cleaned" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_CLEANED="$value"
     value="$(marker_value_or_unknown_for_display "CrowdSec Selected" "$marker_file")"; [ "$value" != "unknown" ] && { if [ "$value" == "yes" ]; then ENABLE_CROWDSEC="y"; else ENABLE_CROWDSEC="n"; fi; }
-    value="$(marker_value_or_unknown_for_display "CrowdSec Console Attach" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_CONSOLE_ENROLLMENT="$value"
+    value="$(marker_value_or_unknown_for_display "CrowdSec Console Enrollment" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_CONSOLE_ENROLLMENT="$value"
+    if [ "${CROWDSEC_CONSOLE_ENROLLMENT:-}" == "no" ] || [ -z "${CROWDSEC_CONSOLE_ENROLLMENT:-}" ]; then
+        value="$(marker_value_or_unknown_for_display "CrowdSec Console Attach" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_CONSOLE_ENROLLMENT="$value"
+    fi
     value="$(marker_value_or_unknown_for_display "CrowdSec Console Engine Name" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_CONSOLE_ENGINE_NAME="$value"
     value="$(marker_value_or_unknown_for_display "CrowdSec Package" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_PACKAGE_INSTALLED="$value"
     value="$(marker_value_or_unknown_for_display "CrowdSec Service" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_SERVICE_STATUS="$value"
@@ -2398,7 +2535,7 @@ function load_state_from_completion_marker() {
     if [ "$SYSTEM_UPDATED" == "yes" ]; then RUN_SYSTEM_UPDATE="y"; else RUN_SYSTEM_UPDATE="n"; fi
     if [ "$SYSTEM_CLEANED" == "yes" ]; then RUN_SYSTEM_CLEANUP="y"; else RUN_SYSTEM_CLEANUP="n"; fi
     if [ "$CROWDSEC_PACKAGE_INSTALLED" == "skipped" ] || [ "$CROWDSEC_SERVICE_STATUS" == "skipped" ]; then ENABLE_CROWDSEC="n"; fi
-    if [ "$CROWDSEC_CONSOLE_ENROLLMENT" == "pending" ] || [ "$CROWDSEC_CONSOLE_ENROLLMENT" == "failed" ]; then CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="yes"; fi
+    if [ "$CROWDSEC_CONSOLE_ENROLLMENT" == "submitted" ] || [ "$CROWDSEC_CONSOLE_ENROLLMENT" == "pending" ] || [ "$CROWDSEC_CONSOLE_ENROLLMENT" == "failed" ]; then CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="yes"; fi
 
     ROOT_FS_BEFORE_GB="$(get_root_filesystem_size_gb)"
     ROOT_FS_AFTER_GB="$ROOT_FS_BEFORE_GB"
@@ -2472,7 +2609,10 @@ function write_verify_display_log() {
         echo -e "  ${BL}Service:${CL} ${GN}${CROWDSEC_SERVICE_STATUS}${CL}"
         echo -e "  ${BL}Collections:${CL} ${GN}${CROWDSEC_COLLECTIONS_STATUS}${CL}"
         echo -e "  ${BL}Bouncer:${CL} ${GN}${CROWDSEC_BOUNCER_STATUS}${CL}"
-        echo -e "  ${BL}Console attach:${CL} ${GN}${CROWDSEC_CONSOLE_ENROLLMENT}${CL}"
+        echo -e "  ${BL}Console enroll:${CL} ${GN}${CROWDSEC_CONSOLE_ENROLLMENT}${CL}"
+        if [ -n "${CROWDSEC_CONSOLE_ENGINE_NAME:-}" ] && [ "${CROWDSEC_CONSOLE_ENGINE_NAME:-}" != "not-set" ]; then
+            echo -e "  ${BL}Engine name:${CL} ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME}${CL}"
+        fi
         echo ""
         echo -e "${YW}Storage:${CL}"
         echo -e "  ${BL}Root filesystem:${CL} ${GN}${ROOT_FS_AFTER_GB}${CL}"
@@ -2486,6 +2626,9 @@ function write_verify_display_log() {
         echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
         echo ""
         echo -e "${YW}Next Step:${CL}"
+        if crowdsec_enrollment_needs_console_approval; then
+            echo -e "  ${YW}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
+        fi
         echo -e "  ${YW}Run ${ANS}Script 5${YW}.${CL}"
     } > "$display_tmp"
 
@@ -2593,7 +2736,7 @@ function update_completion_marker_script4_fields() {
         echo "SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED"
         echo "SCRIPT4_UFW_ENABLED=$UFW_ENABLED"
         echo "SCRIPT4_CROWDSEC_SELECTED=$(yes_no_label "$ENABLE_CROWDSEC")"
-        echo "SCRIPT4_CROWDSEC_CONSOLE_ATTACH=$CROWDSEC_CONSOLE_ENROLLMENT"
+        echo "SCRIPT4_CROWDSEC_CONSOLE_ENROLLMENT=$CROWDSEC_CONSOLE_ENROLLMENT"
         echo "SCRIPT4_CROWDSEC_CONSOLE_ENGINE_NAME=${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}"
         echo "SCRIPT4_CROWDSEC_PACKAGE=$CROWDSEC_PACKAGE_INSTALLED"
         echo "SCRIPT4_CROWDSEC_SERVICE=$CROWDSEC_SERVICE_STATUS"
@@ -2641,6 +2784,9 @@ function show_verify_only_summary() {
 
     echo ""
     echo -e "${BL}Next Step:${CL}"
+    if crowdsec_enrollment_needs_console_approval; then
+        echo -e "  ${YW}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
+    fi
     echo -e "  ${YW}Run ${ANS}Script 5${YW}.${CL}"
     echo ""
 }
@@ -2691,6 +2837,10 @@ function show_final_summary() {
     echo -e "  ${BL}Service:${CL} ${GN}${CROWDSEC_SERVICE_STATUS}${CL}"
     echo -e "  ${BL}Collections:${CL} ${GN}${CROWDSEC_COLLECTIONS_STATUS}${CL}"
     echo -e "  ${BL}Bouncer:${CL} ${GN}${CROWDSEC_BOUNCER_STATUS}${CL}"
+    echo -e "  ${BL}Console enroll:${CL} ${GN}${CROWDSEC_CONSOLE_ENROLLMENT}${CL}"
+    if [ -n "${CROWDSEC_CONSOLE_ENGINE_NAME:-}" ] && [ "${CROWDSEC_CONSOLE_ENGINE_NAME:-}" != "not-set" ]; then
+        echo -e "  ${BL}Engine name:${CL} ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME}${CL}"
+    fi
 
     echo ""
     echo -e "${YW}Storage:${CL}"
@@ -2725,6 +2875,10 @@ function show_final_summary() {
     echo ""
     echo -e "${BL}Next Step${CL}"
     echo ""
+    if crowdsec_enrollment_needs_console_approval; then
+        echo -e "${YW}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
+        echo ""
+    fi
     if [[ "$REBOOT_AFTER_FINISH" =~ ^[Yy] ]]; then
         echo -e "${YW}Reboot the VM, SSH back in, then run ${ANS}Script 5${YW}.${CL}"
     else
