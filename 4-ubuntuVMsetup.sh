@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.8"
-SCRIPT_UPDATED="2026-06-06"
-SCRIPT_BUILD="post-reboot-display-colors"
+SCRIPT_VERSION="v2.1.9"
+SCRIPT_UPDATED="2026-06-07"
+SCRIPT_BUILD="crowdsec-install-parity"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -89,6 +89,7 @@ RUN_SYSTEM_UPDATE="y"
 INSTALL_QEMU_AGENT="y"
 EXPAND_ROOT_LVM="y"
 CONFIGURE_UFW="y"
+ENABLE_CROWDSEC="y"
 APPLY_SSH_HARDENING="y"
 RUN_SYSTEM_CLEANUP="y"
 REBOOT_AFTER_FINISH="y"
@@ -101,6 +102,12 @@ SSH_KEYS_CONFIGURED="no"
 SSH_HARDENING_APPLIED="no"
 QEMU_AGENT_INSTALLED="no"
 UFW_ENABLED="no"
+CROWDSEC_PACKAGE_INSTALLED="no"
+CROWDSEC_SERVICE_STATUS="no"
+CROWDSEC_COLLECTIONS_STATUS="no"
+CROWDSEC_BOUNCER_PACKAGE="none"
+CROWDSEC_BOUNCER_STATUS="none"
+UNATTENDED_UPGRADES_CONFIGURED="no"
 ROOT_EXPANDED="no"
 UBUNTU_PRO_ATTACHED="no"
 UBUNTU_PRO_ESM_APPS="not-requested"
@@ -776,6 +783,7 @@ function show_previous_marker_compact_summary() {
     echo -e "  ${BL}SSH hardened:${CL} ${GN}$(marker_value_or_unknown_for_display "SSH Hardened" "$marker_file")${CL}"
     echo -e "  ${BL}Root expanded:${CL} ${GN}$(marker_value_or_unknown_for_display "Root Expanded" "$marker_file")${CL}"
     echo -e "  ${BL}UFW firewall:${CL} ${GN}$(marker_value_or_unknown_for_display "UFW" "$marker_file")${CL}"
+    echo -e "  ${BL}CrowdSec:${CL} ${GN}$(marker_value_or_unknown_for_display "CrowdSec Service" "$marker_file")${CL}"
     echo -e "  ${BL}QEMU guest agent:${CL} ${GN}$(marker_value_or_unknown_for_display "QEMU Agent" "$marker_file")${CL}"
     echo -e "  ${BL}Verify log:${CL} ${GN}$(marker_value_or_unknown_for_display "Verify Log" "$marker_file")${CL}"
 }
@@ -1189,6 +1197,7 @@ function show_ready_summary_and_confirm() {
     echo -e "  ${BL}QEMU guest agent:${CL} ${ANS}$(yes_no_label "$INSTALL_QEMU_AGENT")${CL}"
     echo -e "  ${BL}Root expansion:${CL} ${ANS}$(yes_no_label "$EXPAND_ROOT_LVM")${CL}"
     echo -e "  ${BL}UFW firewall:${CL} ${ANS}$(yes_no_label "$CONFIGURE_UFW")${CL}"
+    echo -e "  ${BL}CrowdSec:${CL} ${ANS}install${CL}"
     echo -e "  ${BL}Cleanup:${CL} ${ANS}$(yes_no_label "$RUN_SYSTEM_CLEANUP")${CL}"
     echo -e "  ${BL}Reboot:${CL} ${ANS}$(yes_no_label "$REBOOT_AFTER_FINISH")${CL}"
 
@@ -1661,6 +1670,159 @@ function harden_ssh() {
     echo -e "  ${DGN}ROOT SSH LOGIN DISABLED${CL}"
 }
 
+
+# --- 42. CROWDSEC SECURITY ---
+function crowdsec_collection_installed() {
+    local collection="$1"
+
+    command -v cscli >/dev/null 2>&1 || return 1
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cscli collections list 2>/dev/null | grep -q "$collection"
+    else
+        cscli collections list 2>/dev/null | grep -q "$collection"
+    fi
+}
+
+function install_crowdsec_collection_if_missing() {
+    local collection="$1"
+
+    command -v cscli >/dev/null 2>&1 || return 1
+
+    if crowdsec_collection_installed "$collection"; then
+        return 0
+    fi
+
+    run_optional cscli collections install "$collection"
+    crowdsec_collection_installed "$collection"
+}
+
+function apply_crowdsec_security() {
+    apply_group_header "CrowdSec"
+
+    if [ "$ENABLE_CROWDSEC" != "y" ]; then
+        CROWDSEC_PACKAGE_INSTALLED="skipped"
+        CROWDSEC_SERVICE_STATUS="skipped"
+        CROWDSEC_COLLECTIONS_STATUS="skipped"
+        msg_skip "CROWDSEC SECURITY SUITE SKIPPED"
+        return 0
+    fi
+
+    msg_info "Installing CrowdSec dependency packages"
+    run_optional env DEBIAN_FRONTEND=noninteractive apt-get install -y curl gnupg ca-certificates
+    msg_ok "CROWDSEC INSTALL DEPENDENCIES READY"
+
+    if ! grep -Rqs 'crowdsec' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+        if command -v curl >/dev/null 2>&1; then
+            msg_info "Running CrowdSec repository installer"
+            if [ -n "$SUDO_CMD" ]; then
+                curl -fsSL https://install.crowdsec.net | "$SUDO_CMD" sh >/dev/null 2>&1 || true
+            else
+                curl -fsSL https://install.crowdsec.net | sh >/dev/null 2>&1 || true
+            fi
+            msg_ok "CROWDSEC REPOSITORY INSTALLER EXECUTED"
+        else
+            msg_warn "curl not found after dependency install; CrowdSec repository installer skipped"
+        fi
+    else
+        msg_ok "CROWDSEC REPOSITORY ALREADY CONFIGURED"
+    fi
+
+    msg_info "Updating APT package lists for CrowdSec"
+    run_optional env DEBIAN_FRONTEND=noninteractive apt-get update
+    msg_ok "APT PACKAGE LISTS UPDATED FOR CROWDSEC"
+
+    msg_info "Installing CrowdSec and unattended-upgrades"
+    run_optional env DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec unattended-upgrades
+    if command -v crowdsec >/dev/null 2>&1 && command -v cscli >/dev/null 2>&1; then
+        CROWDSEC_PACKAGE_INSTALLED="installed"
+        msg_ok "CROWDSEC PACKAGE INSTALLED"
+    else
+        CROWDSEC_PACKAGE_INSTALLED="not-installed"
+        msg_warn "CrowdSec package install did not confirm crowdsec/cscli binaries"
+    fi
+
+    msg_info "Checking available CrowdSec firewall bouncer package"
+    if apt-cache show crowdsec-firewall-bouncer-nftables >/dev/null 2>&1; then
+        run_optional env DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-firewall-bouncer-nftables
+        CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-nftables"
+        msg_ok "CROWDSEC NFTABLES FIREWALL BOUNCER INSTALLED"
+    elif apt-cache show crowdsec-firewall-bouncer-iptables >/dev/null 2>&1; then
+        run_optional env DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-firewall-bouncer-iptables
+        CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-iptables"
+        msg_ok "CROWDSEC IPTABLES FIREWALL BOUNCER INSTALLED"
+    else
+        CROWDSEC_BOUNCER_PACKAGE="none"
+        msg_warn "CrowdSec firewall bouncer package not found"
+    fi
+
+    if command -v cscli >/dev/null 2>&1; then
+        msg_info "Installing CrowdSec collections"
+        run_optional cscli hub update
+        install_crowdsec_collection_if_missing "crowdsecurity/linux" || true
+        install_crowdsec_collection_if_missing "crowdsecurity/sshd" || true
+        install_crowdsec_collection_if_missing "crowdsecurity/http-cve" || true
+
+        if crowdsec_collection_installed 'crowdsecurity/linux' && \
+           crowdsec_collection_installed 'crowdsecurity/sshd' && \
+           crowdsec_collection_installed 'crowdsecurity/http-cve'; then
+            CROWDSEC_COLLECTIONS_STATUS="ready"
+            msg_ok "CROWDSEC COLLECTIONS READY"
+        else
+            CROWDSEC_COLLECTIONS_STATUS="partial"
+            msg_warn "CrowdSec collections were not fully confirmed"
+        fi
+    else
+        CROWDSEC_COLLECTIONS_STATUS="unavailable"
+        msg_warn "cscli not found after install; CrowdSec collection install skipped"
+    fi
+
+    msg_info "Enabling CrowdSec service"
+    run_optional systemctl enable --now crowdsec
+    run_optional systemctl restart crowdsec
+
+    if systemctl is-active --quiet crowdsec 2>/dev/null; then
+        CROWDSEC_SERVICE_STATUS="active"
+        msg_ok "CROWDSEC SERVICE ACTIVE"
+    else
+        CROWDSEC_SERVICE_STATUS="not-active"
+        msg_warn "CrowdSec service is not active after install"
+    fi
+
+    msg_info "Checking CrowdSec firewall bouncer service"
+    if systemctl list-unit-files 'crowdsec-firewall-bouncer*' --no-pager --no-legend 2>/dev/null | grep -q "crowdsec-firewall-bouncer"; then
+        run_optional systemctl enable --now crowdsec-firewall-bouncer
+        run_optional systemctl restart crowdsec-firewall-bouncer
+        if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+            CROWDSEC_BOUNCER_STATUS="active"
+            msg_ok "CROWDSEC FIREWALL BOUNCER ACTIVE"
+        else
+            CROWDSEC_BOUNCER_STATUS="installed-not-active"
+            msg_warn "CrowdSec firewall bouncer service is installed but not active"
+        fi
+    else
+        CROWDSEC_BOUNCER_STATUS="not-found"
+        msg_warn "CrowdSec firewall bouncer service was not found after install"
+    fi
+
+    msg_info "Writing unattended-upgrades config"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" bash -c "cat > /etc/apt/apt.conf.d/20auto-upgrades" <<'EOF_AUTO_UPGRADES'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF_AUTO_UPGRADES
+    else
+        cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF_AUTO_UPGRADES'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF_AUTO_UPGRADES
+    fi
+    UNATTENDED_UPGRADES_CONFIGURED="yes"
+    msg_ok "UNATTENDED UPGRADES CONFIGURED"
+
+    msg_ok "CROWDSEC SECURITY COMPLETE"
+}
+
 # --- 42. SYSTEM CLEANUP ---
 function clean_system() {
     apply_group_header "System"
@@ -1708,6 +1870,12 @@ System Updated: $SYSTEM_UPDATED
 QEMU Agent: $QEMU_AGENT_INSTALLED
 Root Expanded: $ROOT_EXPANDED
 UFW: $UFW_ENABLED
+CrowdSec Package: $CROWDSEC_PACKAGE_INSTALLED
+CrowdSec Service: $CROWDSEC_SERVICE_STATUS
+CrowdSec Collections: $CROWDSEC_COLLECTIONS_STATUS
+CrowdSec Bouncer Package: $CROWDSEC_BOUNCER_PACKAGE
+CrowdSec Bouncer: $CROWDSEC_BOUNCER_STATUS
+Unattended Upgrades: $UNATTENDED_UPGRADES_CONFIGURED
 SSH Hardened: $SSH_HARDENING_APPLIED
 System Cleaned: $SYSTEM_CLEANED
 Verify Log: $VERIFY_LOG
@@ -1722,6 +1890,11 @@ SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-dis
 SCRIPT4_USERNAME=$USERNAME
 SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
 SCRIPT4_UFW_ENABLED=$UFW_ENABLED
+SCRIPT4_CROWDSEC_PACKAGE=$CROWDSEC_PACKAGE_INSTALLED
+SCRIPT4_CROWDSEC_SERVICE=$CROWDSEC_SERVICE_STATUS
+SCRIPT4_CROWDSEC_COLLECTIONS=$CROWDSEC_COLLECTIONS_STATUS
+SCRIPT4_CROWDSEC_BOUNCER_PACKAGE=$CROWDSEC_BOUNCER_PACKAGE
+SCRIPT4_CROWDSEC_BOUNCER=$CROWDSEC_BOUNCER_STATUS
 SCRIPT4_QEMU_AGENT=$QEMU_AGENT_INSTALLED
 SCRIPT4_SSH_HARDENED=$SSH_HARDENING_APPLIED
 EOF_MARKER
@@ -1745,6 +1918,12 @@ System Updated: $SYSTEM_UPDATED
 QEMU Agent: $QEMU_AGENT_INSTALLED
 Root Expanded: $ROOT_EXPANDED
 UFW: $UFW_ENABLED
+CrowdSec Package: $CROWDSEC_PACKAGE_INSTALLED
+CrowdSec Service: $CROWDSEC_SERVICE_STATUS
+CrowdSec Collections: $CROWDSEC_COLLECTIONS_STATUS
+CrowdSec Bouncer Package: $CROWDSEC_BOUNCER_PACKAGE
+CrowdSec Bouncer: $CROWDSEC_BOUNCER_STATUS
+Unattended Upgrades: $UNATTENDED_UPGRADES_CONFIGURED
 SSH Hardened: $SSH_HARDENING_APPLIED
 System Cleaned: $SYSTEM_CLEANED
 Verify Log: $VERIFY_LOG
@@ -1759,6 +1938,11 @@ SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-dis
 SCRIPT4_USERNAME=$USERNAME
 SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
 SCRIPT4_UFW_ENABLED=$UFW_ENABLED
+SCRIPT4_CROWDSEC_PACKAGE=$CROWDSEC_PACKAGE_INSTALLED
+SCRIPT4_CROWDSEC_SERVICE=$CROWDSEC_SERVICE_STATUS
+SCRIPT4_CROWDSEC_COLLECTIONS=$CROWDSEC_COLLECTIONS_STATUS
+SCRIPT4_CROWDSEC_BOUNCER_PACKAGE=$CROWDSEC_BOUNCER_PACKAGE
+SCRIPT4_CROWDSEC_BOUNCER=$CROWDSEC_BOUNCER_STATUS
 SCRIPT4_QEMU_AGENT=$QEMU_AGENT_INSTALLED
 SCRIPT4_SSH_HARDENED=$SSH_HARDENING_APPLIED
 EOF_MARKER
@@ -1910,6 +2094,44 @@ function create_verification_report() {
         verify_info "UFW setup skipped by user choice"
     fi
 
+
+    if command -v crowdsec >/dev/null 2>&1 && command -v cscli >/dev/null 2>&1; then
+        CROWDSEC_PACKAGE_INSTALLED="installed"
+        verify_pass "CrowdSec package installed"
+    else
+        CROWDSEC_PACKAGE_INSTALLED="missing"
+        verify_warn "CrowdSec package" "crowdsec/cscli command not found" "rerun Script 4 CrowdSec setup or install crowdsec"
+    fi
+
+    if systemctl is-enabled --quiet crowdsec 2>/dev/null; then
+        verify_pass "CrowdSec service enabled"
+    else
+        verify_warn "CrowdSec service enabled" "service is not enabled" "run sudo systemctl enable --now crowdsec"
+    fi
+
+    if systemctl is-active --quiet crowdsec 2>/dev/null; then
+        CROWDSEC_SERVICE_STATUS="active"
+        verify_pass "CrowdSec service active"
+    else
+        CROWDSEC_SERVICE_STATUS="not-active"
+        verify_warn "CrowdSec service active" "service is not active" "run sudo systemctl status crowdsec"
+    fi
+
+    if command -v cscli >/dev/null 2>&1; then
+        if crowdsec_collection_installed 'crowdsecurity/linux' && \
+           crowdsec_collection_installed 'crowdsecurity/sshd' && \
+           crowdsec_collection_installed 'crowdsecurity/http-cve'; then
+            CROWDSEC_COLLECTIONS_STATUS="ready"
+            verify_pass "CrowdSec collections ready"
+        else
+            CROWDSEC_COLLECTIONS_STATUS="partial"
+            verify_warn "CrowdSec collections" "baseline linux/sshd/http-cve collections not fully confirmed" "run sudo cscli collections list"
+        fi
+    else
+        CROWDSEC_COLLECTIONS_STATUS="unavailable"
+        verify_warn "CrowdSec collections" "cscli is unavailable" "install crowdsec and rerun verification"
+    fi
+
     if [[ "$RUN_SYSTEM_CLEANUP" =~ ^[Yy] ]]; then
         if [ "$SYSTEM_CLEANED" == "yes" ]; then verify_pass "System cleanup completed"; else verify_warn "System cleanup" "state is ${SYSTEM_CLEANED}" "review apt autoremove/clean output"; fi
     else
@@ -2004,6 +2226,12 @@ function load_state_from_completion_marker() {
     value="$(marker_value_or_unknown_for_display "Ubuntu Pro Attached" "$marker_file")"; [ "$value" != "unknown" ] && UBUNTU_PRO_ATTACHED="$value"
     value="$(marker_value_or_unknown_for_display "System Updated" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_UPDATED="$value"
     value="$(marker_value_or_unknown_for_display "System Cleaned" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_CLEANED="$value"
+    value="$(marker_value_or_unknown_for_display "CrowdSec Package" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_PACKAGE_INSTALLED="$value"
+    value="$(marker_value_or_unknown_for_display "CrowdSec Service" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_SERVICE_STATUS="$value"
+    value="$(marker_value_or_unknown_for_display "CrowdSec Collections" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_COLLECTIONS_STATUS="$value"
+    value="$(marker_value_or_unknown_for_display "CrowdSec Bouncer Package" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_BOUNCER_PACKAGE="$value"
+    value="$(marker_value_or_unknown_for_display "CrowdSec Bouncer" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_BOUNCER_STATUS="$value"
+    value="$(marker_value_or_unknown_for_display "Unattended Upgrades" "$marker_file")"; [ "$value" != "unknown" ] && UNATTENDED_UPGRADES_CONFIGURED="$value"
 
     if [ "$SSH_HARDENING_APPLIED" == "yes" ]; then APPLY_SSH_HARDENING="y"; else APPLY_SSH_HARDENING="n"; fi
     if [ "$UFW_ENABLED" == "yes" ]; then CONFIGURE_UFW="y"; else CONFIGURE_UFW="n"; fi
@@ -2037,9 +2265,9 @@ function write_verify_display_log() {
     user_lines="$(printf '%s
 ' "$result_lines" | grep -E 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled' || true)"
     system_lines="$(printf '%s
-' "$result_lines" | grep -E 'IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists' || true)"
+' "$result_lines" | grep -E 'IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready' || true)"
     other_lines="$(printf '%s
-' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists' || true)"
+' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready' || true)"
 
     case "$VERIFY_STATUS" in
         PASS) status_color="$GN" ;;
@@ -2078,6 +2306,12 @@ function write_verify_display_log() {
         echo -e "${YW}System:${CL}"
         display_colorize_lines "$system_lines" "No System verification lines recorded"
         if [ -n "$other_lines" ]; then display_colorize_lines "$other_lines" ""; fi
+        echo ""
+        echo -e "${YW}CrowdSec:${CL}"
+        echo -e "  ${BL}Package:${CL} ${GN}${CROWDSEC_PACKAGE_INSTALLED}${CL}"
+        echo -e "  ${BL}Service:${CL} ${GN}${CROWDSEC_SERVICE_STATUS}${CL}"
+        echo -e "  ${BL}Collections:${CL} ${GN}${CROWDSEC_COLLECTIONS_STATUS}${CL}"
+        echo -e "  ${BL}Bouncer:${CL} ${GN}${CROWDSEC_BOUNCER_STATUS}${CL}"
         echo ""
         echo -e "${YW}Storage:${CL}"
         echo -e "  ${BL}Root filesystem:${CL} ${GN}${ROOT_FS_AFTER_GB}${CL}"
@@ -2197,6 +2431,11 @@ function update_completion_marker_script4_fields() {
         echo "SCRIPT4_USERNAME=$USERNAME"
         echo "SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED"
         echo "SCRIPT4_UFW_ENABLED=$UFW_ENABLED"
+        echo "SCRIPT4_CROWDSEC_PACKAGE=$CROWDSEC_PACKAGE_INSTALLED"
+        echo "SCRIPT4_CROWDSEC_SERVICE=$CROWDSEC_SERVICE_STATUS"
+        echo "SCRIPT4_CROWDSEC_COLLECTIONS=$CROWDSEC_COLLECTIONS_STATUS"
+        echo "SCRIPT4_CROWDSEC_BOUNCER_PACKAGE=$CROWDSEC_BOUNCER_PACKAGE"
+        echo "SCRIPT4_CROWDSEC_BOUNCER=$CROWDSEC_BOUNCER_STATUS"
         echo "SCRIPT4_QEMU_AGENT=$QEMU_AGENT_INSTALLED"
         echo "SCRIPT4_SSH_HARDENED=$SSH_HARDENING_APPLIED"
     } > "$marker_tmp"
@@ -2278,8 +2517,16 @@ function show_final_summary() {
     detail_line "QEMU GUEST AGENT" "$QEMU_AGENT_INSTALLED"
     detail_line "ROOT EXPANDED" "$ROOT_EXPANDED"
     detail_line "UFW FIREWALL" "$UFW_ENABLED"
+    detail_line "CROWDSEC" "$CROWDSEC_SERVICE_STATUS"
     detail_line "SSH HARDENING" "$SSH_HARDENING_APPLIED"
     detail_line "SYSTEM CLEANED" "$SYSTEM_CLEANED"
+
+    echo ""
+    echo -e "${YW}CrowdSec:${CL}"
+    echo -e "  ${BL}Package:${CL} ${GN}${CROWDSEC_PACKAGE_INSTALLED}${CL}"
+    echo -e "  ${BL}Service:${CL} ${GN}${CROWDSEC_SERVICE_STATUS}${CL}"
+    echo -e "  ${BL}Collections:${CL} ${GN}${CROWDSEC_COLLECTIONS_STATUS}${CL}"
+    echo -e "  ${BL}Bouncer:${CL} ${GN}${CROWDSEC_BOUNCER_STATUS}${CL}"
 
     echo ""
     echo -e "${YW}Storage:${CL}"
@@ -2371,6 +2618,7 @@ function main() {
     install_qemu_guest_agent
     expand_root_lvm_if_possible
     configure_ufw_firewall
+    apply_crowdsec_security
     harden_ssh
     clean_system
 
