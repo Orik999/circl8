@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.12"
-SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="setup-options-grouping-polish"
+SCRIPT_VERSION="v2.1.13"
+SCRIPT_UPDATED="2026-06-08"
+SCRIPT_BUILD="apply-finished-output-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -116,6 +116,7 @@ CROWDSEC_BOUNCER_STATUS="none"
 UNATTENDED_UPGRADES_CONFIGURED="no"
 ROOT_EXPANDED="no"
 UBUNTU_PRO_ATTACHED="no"
+UBUNTU_PRO_ATTACH_REASON="none"
 UBUNTU_PRO_ESM_APPS="not-requested"
 UBUNTU_PRO_ESM_INFRA="not-requested"
 UBUNTU_PRO_LIVEPATCH="not-requested"
@@ -224,7 +225,7 @@ function get_root_filesystem_size_gb() {
 function detail_line() {
     local label="${1:-}"
     local value="${2:-}"
-    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+    printf '  %b%-18s%b %b%s%b\n' "$BL" "${label}:" "$CL" "$GN" "$value" "$CL"
 }
 
 function plan_line() {
@@ -233,6 +234,24 @@ function plan_line() {
     local color="${3:-$GN}"
 
     printf '  %b%-18s%b %b%s%b\n' "$BL" "${label}:" "$CL" "$color" "$value" "$CL"
+}
+
+function final_line() {
+    local label="${1:-}"
+    local value="${2:-}"
+    local color="${3:-$GN}"
+
+    printf '  %b%-18s%b %b%s%b\n' "$BL" "${label}:" "$CL" "$color" "$value" "$CL"
+}
+
+function status_color_for_value() {
+    local value="${1:-}"
+
+    case "$value" in
+        failed|fail|FAIL|missing|not-active|not-installed|unavailable) echo "$RD" ;;
+        partial|skipped-empty-token|installed-not-active|PASS_WITH_WARNINGS|timeout|contracts-timeout|read-timeout) echo "$YW" ;;
+        *) echo "$GN" ;;
+    esac
 }
 
 # --- 6. TTY PRINT HELPERS ---
@@ -1502,20 +1521,72 @@ function run_pro_enable_service() {
     fi
 }
 
+function get_ubuntu_pro_status_text() {
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" pro status 2>/dev/null || true
+    else
+        pro status 2>/dev/null || true
+    fi
+}
+
+function wait_for_ubuntu_pro_idle() {
+    local i=""
+    local status_text=""
+
+    command -v pro >/dev/null 2>&1 || return 1
+
+    msg_info "Waiting for Ubuntu Pro operation to settle"
+
+    for i in {1..30}; do
+        status_text="$(get_ubuntu_pro_status_text)"
+        if ! grep -qi 'Operation in progress' <<< "$status_text"; then
+            msg_ok "UBUNTU PRO READY"
+            UBUNTU_PRO_ATTACH_REASON="none"
+            return 0
+        fi
+        sleep 2
+    done
+
+    UBUNTU_PRO_ATTACH_REASON="operation-timeout"
+    msg_warn "Ubuntu Pro operation did not settle in time; Pro service enablement skipped"
+    return 1
+}
+
+function classify_ubuntu_pro_attach_failure() {
+    local err_file="${1:-}"
+    local err_text=""
+
+    [ -n "$err_file" ] && [ -f "$err_file" ] && err_text="$(cat "$err_file" 2>/dev/null || true)"
+
+    if grep -qiE 'timed out|timeout|read.*time|contract|contracts|operation.*progress' <<< "$err_text"; then
+        UBUNTU_PRO_ATTACH_REASON="timeout"
+        msg_warn "UBUNTU PRO ATTACHMENT TIMED OUT"
+        msg_warn "REASON: Canonical contracts service did not respond in time"
+    else
+        UBUNTU_PRO_ATTACH_REASON="attach-failed"
+        msg_warn "UBUNTU PRO ATTACHMENT FAILED"
+        msg_warn "REASON: Ubuntu Pro client did not complete attachment"
+    fi
+
+    msg_ok "SCRIPT CONTINUED SAFELY"
+}
+
 # --- 36. UBUNTU PRO APPLY ---
 function apply_ubuntu_pro() {
-    apply_group_header "System"
+    apply_group_header "Ubuntu Pro"
 
     if [[ ! "$ATTACH_UBUNTU_PRO" =~ ^[Yy] ]]; then
-        UBUNTU_PRO_ATTACHED="no"
+        UBUNTU_PRO_ATTACHED="skipped"
+        UBUNTU_PRO_ATTACH_REASON="not-selected"
         msg_skip "UBUNTU PRO ATTACHMENT SKIPPED"
         return 0
     fi
 
     ensure_ubuntu_pro_client
 
-    if pro status 2>/dev/null | grep -qi 'Subscription:'; then
+    if get_ubuntu_pro_status_text | grep -qi 'Subscription:'; then
         UBUNTU_PRO_ATTACHED="already-attached"
+        UBUNTU_PRO_ATTACH_REASON="none"
         msg_ok "UBUNTU PRO ALREADY ATTACHED"
     else
         local err_file=""
@@ -1527,22 +1598,20 @@ function apply_ubuntu_pro() {
         if [ -n "$SUDO_CMD" ]; then
             if "$SUDO_CMD" pro attach "$PRO_TOKEN" --no-auto-enable > /dev/null 2> "$err_file"; then
                 UBUNTU_PRO_ATTACHED="yes"
+                UBUNTU_PRO_ATTACH_REASON="none"
                 msg_ok "UBUNTU PRO ATTACHED"
             else
                 UBUNTU_PRO_ATTACHED="failed"
-                msg_warn "Ubuntu Pro attachment failed"
-                echo -e "${YW}Real error:${CL}"
-                sed -E 's/[A-Za-z0-9_-]{20,}/[redacted]/g' "$err_file" || true
+                classify_ubuntu_pro_attach_failure "$err_file"
             fi
         else
             if pro attach "$PRO_TOKEN" --no-auto-enable > /dev/null 2> "$err_file"; then
                 UBUNTU_PRO_ATTACHED="yes"
+                UBUNTU_PRO_ATTACH_REASON="none"
                 msg_ok "UBUNTU PRO ATTACHED"
             else
                 UBUNTU_PRO_ATTACHED="failed"
-                msg_warn "Ubuntu Pro attachment failed"
-                echo -e "${YW}Real error:${CL}"
-                sed -E 's/[A-Za-z0-9_-]{20,}/[redacted]/g' "$err_file" || true
+                classify_ubuntu_pro_attach_failure "$err_file"
             fi
         fi
 
@@ -1553,23 +1622,39 @@ function apply_ubuntu_pro() {
     PRO_TOKEN=""
 
     if [ "$UBUNTU_PRO_ATTACHED" == "failed" ]; then
+        UBUNTU_PRO_ESM_APPS="skipped-attach-failed"
+        UBUNTU_PRO_ESM_INFRA="skipped-attach-failed"
+        UBUNTU_PRO_LIVEPATCH="skipped-attach-failed"
         msg_warn "Pro service enablement skipped because attach failed"
+        return 0
+    fi
+
+    if ! wait_for_ubuntu_pro_idle; then
+        UBUNTU_PRO_ESM_APPS="skipped-pro-busy"
+        UBUNTU_PRO_ESM_INFRA="skipped-pro-busy"
+        UBUNTU_PRO_LIVEPATCH="skipped-pro-busy"
         return 0
     fi
 
     if [[ "$ENABLE_ESM_APPS" =~ ^[Yy] ]]; then
         msg_info "Enabling Ubuntu Pro ESM Apps"
         if run_pro_enable_service "esm-apps"; then UBUNTU_PRO_ESM_APPS="yes"; msg_ok "ESM APPS ENABLED"; else UBUNTU_PRO_ESM_APPS="failed"; msg_warn "ESM Apps could not be enabled"; fi
+    else
+        UBUNTU_PRO_ESM_APPS="skipped"
     fi
 
     if [[ "$ENABLE_ESM_INFRA" =~ ^[Yy] ]]; then
         msg_info "Enabling Ubuntu Pro ESM Infra"
         if run_pro_enable_service "esm-infra"; then UBUNTU_PRO_ESM_INFRA="yes"; msg_ok "ESM INFRA ENABLED"; else UBUNTU_PRO_ESM_INFRA="failed"; msg_warn "ESM Infra could not be enabled"; fi
+    else
+        UBUNTU_PRO_ESM_INFRA="skipped"
     fi
 
     if [[ "$ENABLE_LIVEPATCH" =~ ^[Yy] ]]; then
         msg_info "Enabling Ubuntu Pro Livepatch"
         if run_pro_enable_service "livepatch"; then UBUNTU_PRO_LIVEPATCH="yes"; msg_ok "LIVEPATCH ENABLED"; else UBUNTU_PRO_LIVEPATCH="failed"; msg_warn "Livepatch could not be enabled"; fi
+    else
+        UBUNTU_PRO_LIVEPATCH="skipped"
     fi
 }
 
@@ -1697,9 +1782,7 @@ function expand_root_lvm_if_possible() {
     if [ -z "$ROOT_LV_PATH" ] || [ -z "$VG_NAME" ]; then
         ROOT_EXPANDED="not-needed"
         ROOT_FS_AFTER_GB="$ROOT_FS_BEFORE_GB"
-        msg_ok "ROOT FILESYSTEM LVM EXPANSION NOT NEEDED"
-        detail_line "Root source" "${ROOT_SOURCE:-unknown}"
-        detail_line "Resolved root source" "${root_candidate:-unknown}"
+        msg_ok "ROOT FILESYSTEM ALREADY USES AVAILABLE SPACE"
         return 0
     fi
 
@@ -1714,25 +1797,20 @@ function expand_root_lvm_if_possible() {
     [ -z "$vg_free_int" ] && vg_free_int="0"
     VG_FREE_BYTES="$vg_free_int"
 
-    echo -e "${YW}Root disk expansion:${CL}"
-    echo -e "  ${BL}Root LV:${CL} ${GN}${ROOT_LV_PATH}${CL}"
-    echo -e "  ${BL}Volume group:${CL} ${GN}${VG_NAME}${CL}"
-    echo -e "  ${BL}Free LVM space:${CL} ${GN}$(bytes_to_gb_display "$VG_FREE_BYTES")${CL}"
+    msg_ok "ROOT LV DETECTED"
 
     if [[ "$VG_FREE_BYTES" =~ ^[0-9]+$ ]] && [ "$VG_FREE_BYTES" -gt "$min_expand_bytes" ]; then
-        msg_ok "FOUND EMPTY LVM SPACE"
+        msg_ok "FREE LVM SPACE FOUND"
 
         msg_info "Expanding Ubuntu root filesystem"
         run_cmd "expanding Ubuntu root filesystem" lvextend -r -l +100%FREE "$ROOT_LV_PATH"
         ROOT_EXPANDED="yes"
         ROOT_FS_AFTER_GB="$(get_root_filesystem_size_gb)"
         msg_ok "UBUNTU ROOT FILESYSTEM EXPANDED"
-        echo -e "  ${BL}Result:${CL} ${GN}expanded${CL}"
     else
         ROOT_EXPANDED="not-needed"
         ROOT_FS_AFTER_GB="$(get_root_filesystem_size_gb)"
-        msg_ok "NO EMPTY LVM SPACE FOUND"
-        echo -e "  ${BL}Result:${CL} ${GN}not needed${CL}"
+        msg_ok "ROOT FILESYSTEM ALREADY USES AVAILABLE SPACE"
     fi
 }
 
@@ -1971,12 +2049,12 @@ function apply_crowdsec_security() {
             else
                 curl -fsSL https://install.crowdsec.net | sh >/dev/null 2>&1 || true
             fi
-            msg_ok "CROWDSEC REPOSITORY INSTALLER EXECUTED"
+            msg_ok "CROWDSEC REPOSITORY READY"
         else
             msg_warn "curl not found after dependency install; CrowdSec repository installer skipped"
         fi
     else
-        msg_ok "CROWDSEC REPOSITORY ALREADY CONFIGURED"
+        msg_ok "CROWDSEC REPOSITORY READY"
     fi
 
     msg_info "Updating APT package lists for CrowdSec"
@@ -2078,7 +2156,7 @@ EOF_AUTO_UPGRADES
 
 # --- 42. SYSTEM CLEANUP ---
 function clean_system() {
-    apply_group_header "System"
+    apply_group_header "Cleanup"
 
     if [[ ! "$RUN_SYSTEM_CLEANUP" =~ ^[Yy] ]]; then
         SYSTEM_CLEANED="skipped"
@@ -2117,6 +2195,7 @@ Container: $IS_CONTAINER
 LXC: $IS_LXC
 VM: $IS_VM
 Ubuntu Pro Attached: $UBUNTU_PRO_ATTACHED
+Ubuntu Pro Attach Reason: $UBUNTU_PRO_ATTACH_REASON
 Ubuntu Pro ESM Apps: $UBUNTU_PRO_ESM_APPS
 Ubuntu Pro ESM Infra: $UBUNTU_PRO_ESM_INFRA
 Ubuntu Pro Livepatch: $UBUNTU_PRO_LIVEPATCH
@@ -2146,6 +2225,7 @@ SCRIPT4_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
 SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-displayed
 SCRIPT4_USERNAME=$USERNAME
 SCRIPT4_USERNAME_SOURCE=$USERNAME_SOURCE
+SCRIPT4_UBUNTU_PRO_ATTACH_REASON=$UBUNTU_PRO_ATTACH_REASON
 SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
 SCRIPT4_UFW_ENABLED=$UFW_ENABLED
 SCRIPT4_CROWDSEC_SELECTED=$(yes_no_label "$ENABLE_CROWDSEC")
@@ -2173,6 +2253,7 @@ Container: $IS_CONTAINER
 LXC: $IS_LXC
 VM: $IS_VM
 Ubuntu Pro Attached: $UBUNTU_PRO_ATTACHED
+Ubuntu Pro Attach Reason: $UBUNTU_PRO_ATTACH_REASON
 Ubuntu Pro ESM Apps: $UBUNTU_PRO_ESM_APPS
 Ubuntu Pro ESM Infra: $UBUNTU_PRO_ESM_INFRA
 Ubuntu Pro Livepatch: $UBUNTU_PRO_LIVEPATCH
@@ -2202,6 +2283,7 @@ SCRIPT4_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
 SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-displayed
 SCRIPT4_USERNAME=$USERNAME
 SCRIPT4_USERNAME_SOURCE=$USERNAME_SOURCE
+SCRIPT4_UBUNTU_PRO_ATTACH_REASON=$UBUNTU_PRO_ATTACH_REASON
 SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
 SCRIPT4_UFW_ENABLED=$UFW_ENABLED
 SCRIPT4_CROWDSEC_SELECTED=$(yes_no_label "$ENABLE_CROWDSEC")
@@ -2325,7 +2407,7 @@ function create_verification_report() {
     fi
 
     if [[ "$ATTACH_UBUNTU_PRO" =~ ^[Yy] ]]; then
-        if [ "$UBUNTU_PRO_ATTACHED" == "yes" ] || [ "$UBUNTU_PRO_ATTACHED" == "already-attached" ]; then verify_pass "Ubuntu Pro attached"; else verify_warn "Ubuntu Pro attachment" "state is ${UBUNTU_PRO_ATTACHED}" "run pro status and attach manually if needed"; fi
+        if [ "$UBUNTU_PRO_ATTACHED" == "yes" ] || [ "$UBUNTU_PRO_ATTACHED" == "already-attached" ]; then verify_pass "Ubuntu Pro attached"; else verify_warn "Ubuntu Pro attachment" "state is ${UBUNTU_PRO_ATTACHED}; reason is ${UBUNTU_PRO_ATTACH_REASON:-unknown}" "run pro status and attach manually if needed"; fi
     else
         verify_info "Ubuntu Pro attachment skipped by user choice"
     fi
@@ -2514,6 +2596,7 @@ function load_state_from_completion_marker() {
     value="$(marker_value_or_unknown_for_display "QEMU Agent" "$marker_file")"; [ "$value" != "unknown" ] && QEMU_AGENT_INSTALLED="$value"
     value="$(marker_value_or_unknown_for_display "Root Expanded" "$marker_file")"; [ "$value" != "unknown" ] && ROOT_EXPANDED="$value"
     value="$(marker_value_or_unknown_for_display "Ubuntu Pro Attached" "$marker_file")"; [ "$value" != "unknown" ] && UBUNTU_PRO_ATTACHED="$value"
+    value="$(marker_value_or_unknown_for_display "Ubuntu Pro Attach Reason" "$marker_file")"; [ "$value" != "unknown" ] && UBUNTU_PRO_ATTACH_REASON="$value"
     value="$(marker_value_or_unknown_for_display "System Updated" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_UPDATED="$value"
     value="$(marker_value_or_unknown_for_display "System Cleaned" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_CLEANED="$value"
     value="$(marker_value_or_unknown_for_display "CrowdSec Selected" "$marker_file")"; [ "$value" != "unknown" ] && { if [ "$value" == "yes" ]; then ENABLE_CROWDSEC="y"; else ENABLE_CROWDSEC="n"; fi; }
@@ -2628,9 +2711,9 @@ function write_verify_display_log() {
         echo ""
         echo -e "${YW}Next Step:${CL}"
         if crowdsec_enrollment_needs_console_approval; then
-            echo -e "  ${YW}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
+            echo -e "  ${BL}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
         fi
-        echo -e "  ${YW}Run ${ANS}Script 5${YW}.${CL}"
+        echo -e "  ${BL}Run ${ANS}Script 5${BL}.${CL}"
     } > "$display_tmp"
 
     if [ -n "$SUDO_CMD" ]; then
@@ -2784,11 +2867,11 @@ function show_verify_only_summary() {
     fi
 
     echo ""
-    echo -e "${BL}Next Step:${CL}"
+    echo -e "${YW}Next Step:${CL}"
     if crowdsec_enrollment_needs_console_approval; then
-        echo -e "  ${YW}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
+        echo -e "  ${BL}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
     fi
-    echo -e "  ${YW}Run ${ANS}Script 5${YW}.${CL}"
+    echo -e "  ${BL}Run ${ANS}Script 5${BL}.${CL}"
     echo ""
 }
 
@@ -2806,88 +2889,95 @@ function run_verify_only_mode() {
 
 # --- 45. FINAL SUMMARY ---
 function show_final_summary() {
+    local status_color="$YW"
+    local password_lock_display="${USER_PASSWORD_LOCKED}"
+    local ssh_hardening_display="${SSH_HARDENING_APPLIED}"
+    local qemu_display="${QEMU_AGENT_INSTALLED}"
+    local root_display="${ROOT_EXPANDED}"
+    local cleanup_display="${SYSTEM_CLEANED}"
+    local reboot_display="$(yes_no_label "$REBOOT_AFTER_FINISH")"
+
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
-    detail_line "USERNAME" "$USERNAME"
-    detail_line "USER CREATED" "$SUDO_USER_CREATED"
-    detail_line "USER ADDED TO SUDO" "$USER_ADDED_TO_SUDO"
-    detail_line "PASSWORD LOCKED" "$USER_PASSWORD_LOCKED"
-    detail_line "SSH KEYS" "$SSH_KEYS_CONFIGURED"
+    case "$VERIFY_STATUS" in
+        PASS) status_color="$GN" ;;
+        PASS_WITH_WARNINGS) status_color="$YW" ;;
+        FAIL) status_color="$RD" ;;
+        *) status_color="$YW" ;;
+    esac
 
-    if [ "$IS_CONTAINER" == "yes" ]; then
-        detail_line "ENVIRONMENT" "LXC/Container (${VIRT_TYPE})"
-    else
-        detail_line "ENVIRONMENT" "VM (${VIRT_TYPE})"
+    [ "$USER_PASSWORD_LOCKED" == "yes" ] && password_lock_display="yes"
+    [ "$SSH_HARDENING_APPLIED" == "yes" ] && ssh_hardening_display="enabled"
+    [ "$QEMU_AGENT_INSTALLED" == "yes" ] && qemu_display="active"
+    [ "$ROOT_EXPANDED" == "yes" ] && root_display="expanded"
+    [ "$ROOT_EXPANDED" == "not-needed" ] && root_display="already-expanded"
+    [ "$SYSTEM_CLEANED" == "yes" ] && cleanup_display="complete"
+
+    echo -e "${YW}User / SSH:${CL}"
+    final_line "Username" "$USERNAME" "$GN"
+    final_line "Existing user" "$EXISTING_USER" "$GN"
+    final_line "SSH keys" "$SSH_KEYS_CONFIGURED" "$(status_color_for_value "$SSH_KEYS_CONFIGURED")"
+    final_line "Password lock" "$password_lock_display" "$(status_color_for_value "$password_lock_display")"
+    final_line "SSH hardening" "$ssh_hardening_display" "$(status_color_for_value "$ssh_hardening_display")"
+
+    echo ""
+    echo -e "${YW}Ubuntu Pro:${CL}"
+    final_line "Attach" "$UBUNTU_PRO_ATTACHED" "$(status_color_for_value "$UBUNTU_PRO_ATTACHED")"
+    if [ -n "${UBUNTU_PRO_ATTACH_REASON:-}" ] && [ "${UBUNTU_PRO_ATTACH_REASON:-none}" != "none" ]; then
+        final_line "Reason" "$UBUNTU_PRO_ATTACH_REASON" "$(status_color_for_value "$UBUNTU_PRO_ATTACH_REASON")"
     fi
+    final_line "ESM Apps" "$UBUNTU_PRO_ESM_APPS" "$(status_color_for_value "$UBUNTU_PRO_ESM_APPS")"
+    final_line "ESM Infra" "$UBUNTU_PRO_ESM_INFRA" "$(status_color_for_value "$UBUNTU_PRO_ESM_INFRA")"
+    final_line "Livepatch" "$UBUNTU_PRO_LIVEPATCH" "$(status_color_for_value "$UBUNTU_PRO_LIVEPATCH")"
 
-    detail_line "UBUNTU PRO ATTACHED" "$UBUNTU_PRO_ATTACHED"
-    detail_line "ESM APPS" "$UBUNTU_PRO_ESM_APPS"
-    detail_line "ESM INFRA" "$UBUNTU_PRO_ESM_INFRA"
-    detail_line "LIVEPATCH" "$UBUNTU_PRO_LIVEPATCH"
-    detail_line "SYSTEM UPDATED" "$SYSTEM_UPDATED"
-    detail_line "QEMU GUEST AGENT" "$QEMU_AGENT_INSTALLED"
-    detail_line "ROOT EXPANDED" "$ROOT_EXPANDED"
-    detail_line "UFW FIREWALL" "$UFW_ENABLED"
-    detail_line "CROWDSEC" "$CROWDSEC_SERVICE_STATUS"
-    detail_line "SSH HARDENING" "$SSH_HARDENING_APPLIED"
-    detail_line "SYSTEM CLEANED" "$SYSTEM_CLEANED"
+    echo ""
+    echo -e "${YW}System:${CL}"
+    final_line "Upgrade" "$SYSTEM_UPDATED" "$(status_color_for_value "$SYSTEM_UPDATED")"
+    final_line "QEMU agent" "$qemu_display" "$(status_color_for_value "$qemu_display")"
+    final_line "Root disk" "$root_display" "$(status_color_for_value "$root_display")"
+    final_line "UFW" "$UFW_ENABLED" "$(status_color_for_value "$UFW_ENABLED")"
+    final_line "Cleanup" "$cleanup_display" "$(status_color_for_value "$cleanup_display")"
+    final_line "Reboot" "$reboot_display" "$ANS"
 
     echo ""
     echo -e "${YW}CrowdSec:${CL}"
-    echo -e "  ${BL}Package:${CL} ${GN}${CROWDSEC_PACKAGE_INSTALLED}${CL}"
-    echo -e "  ${BL}Service:${CL} ${GN}${CROWDSEC_SERVICE_STATUS}${CL}"
-    echo -e "  ${BL}Collections:${CL} ${GN}${CROWDSEC_COLLECTIONS_STATUS}${CL}"
-    echo -e "  ${BL}Bouncer:${CL} ${GN}${CROWDSEC_BOUNCER_STATUS}${CL}"
-    echo -e "  ${BL}Console enroll:${CL} ${GN}${CROWDSEC_CONSOLE_ENROLLMENT}${CL}"
+    final_line "Package" "$CROWDSEC_PACKAGE_INSTALLED" "$(status_color_for_value "$CROWDSEC_PACKAGE_INSTALLED")"
+    final_line "Service" "$CROWDSEC_SERVICE_STATUS" "$(status_color_for_value "$CROWDSEC_SERVICE_STATUS")"
+    final_line "Collections" "$CROWDSEC_COLLECTIONS_STATUS" "$(status_color_for_value "$CROWDSEC_COLLECTIONS_STATUS")"
+    final_line "Bouncer" "$CROWDSEC_BOUNCER_STATUS" "$(status_color_for_value "$CROWDSEC_BOUNCER_STATUS")"
+    final_line "Console enroll" "$CROWDSEC_CONSOLE_ENROLLMENT" "$(status_color_for_value "$CROWDSEC_CONSOLE_ENROLLMENT")"
     if [ -n "${CROWDSEC_CONSOLE_ENGINE_NAME:-}" ] && [ "${CROWDSEC_CONSOLE_ENGINE_NAME:-}" != "not-set" ]; then
-        echo -e "  ${BL}Engine name:${CL} ${GN}${CROWDSEC_CONSOLE_ENGINE_NAME}${CL}"
+        final_line "Engine name" "$CROWDSEC_CONSOLE_ENGINE_NAME" "$GN"
     fi
 
     echo ""
-    echo -e "${YW}Storage:${CL}"
-    echo -e "  ${BL}Root filesystem before:${CL} ${GN}${ROOT_FS_BEFORE_GB}${CL}"
-    echo -e "  ${BL}Root filesystem after:${CL} ${GN}${ROOT_FS_AFTER_GB}${CL}"
-    echo -e "  ${BL}Root expansion:${CL} ${GN}${ROOT_EXPANDED}${CL}"
-
-    echo ""
     echo -e "${YW}Verification:${CL}"
-    case "$VERIFY_STATUS" in
-        PASS) echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}" ;;
-        PASS_WITH_WARNINGS) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}" ;;
-        FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
-        *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
-    esac
-    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
-    echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
-    echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
-    echo -e "  ${BL}Setup log:${CL} ${GN}${LOG_FILE}${CL}"
-    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+    final_line "Status" "$VERIFY_STATUS" "$status_color"
+    final_line "Pass" "$VERIFY_PASS_COUNT" "$GN"
+    final_line "Warn" "$VERIFY_WARN_COUNT" "$YW"
+    final_line "Fail" "$VERIFY_FAIL_COUNT" "$RD"
+    final_line "Setup log" "$LOG_FILE" "$GN"
+    final_line "Verify log" "$VERIFY_LOG" "$GN"
+    final_line "Display log" "$VERIFY_DISPLAY_LOG" "$GN"
+    final_line "Marker" "$COMPLETED_MARKER" "$GN"
 
     if [ -n "$VERIFY_FIRST_ISSUE_TYPE" ]; then
         echo ""
         echo -e "${YW}${VERIFY_FIRST_ISSUE_TYPE} 1:${CL}"
-        echo -e "  ${BL}Check:${CL} ${GN}${VERIFY_FIRST_ISSUE_CHECK}${CL}"
-        echo -e "  ${BL}Reason:${CL} ${YW}${VERIFY_FIRST_ISSUE_REASON}${CL}"
-        echo -e "  ${BL}Fix:${CL} ${GN}${VERIFY_FIRST_ISSUE_FIX}${CL}"
+        final_line "Check" "$VERIFY_FIRST_ISSUE_CHECK" "$GN"
+        final_line "Reason" "$VERIFY_FIRST_ISSUE_REASON" "$YW"
+        final_line "Fix" "$VERIFY_FIRST_ISSUE_FIX" "$GN"
     fi
 
     echo ""
-    echo -e "${GN}Ubuntu setup completed successfully.${CL}"
-    echo ""
-    echo -e "${BL}Next Step${CL}"
-    echo ""
+    echo -e "${YW}Next Step:${CL}"
     if crowdsec_enrollment_needs_console_approval; then
-        echo -e "${YW}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
-        echo ""
+        echo -e "  ${BL}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
     fi
     if [[ "$REBOOT_AFTER_FINISH" =~ ^[Yy] ]]; then
-        echo -e "${YW}Reboot the VM, SSH back in, then run ${ANS}Script 5${YW}.${CL}"
+        echo -e "  ${BL}Reboot the VM, SSH back in, then run ${ANS}Script 5${BL}.${CL}"
     else
-        echo -e "${YW}Option A - ${GN}reboot first:${CL}"
-        echo -e "  ${YW}Reboot the VM manually, SSH back in, then run ${ANS}Script 5${YW}.${CL}"
-        echo ""
-        echo -e "${YW}Option B - ${GN}continue now:${CL}"
-        echo -e "  ${YW}Run ${ANS}Script 5${YW} when you are ready.${CL}"
+        echo -e "  ${BL}Run ${ANS}Script 5${BL} when you are ready.${CL}"
     fi
 }
 
