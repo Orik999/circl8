@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.14"
+SCRIPT_VERSION="v2.1.15"
 SCRIPT_UPDATED="2026-06-08"
-SCRIPT_BUILD="ubuntu-pro-attach-retry-polish"
+SCRIPT_BUILD="user-ssh-options-order-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1233,14 +1233,15 @@ function collect_username() {
         SOURCE_KEYS=""
     fi
 
-    LOCK_USER_PASSWORD="$(timed_yes_no "Lock password for SSH-key-only user?" "y")"
-    APPLY_SSH_HARDENING="$(timed_yes_no "Apply SSH key-only hardening after keys are verified?" "y")"
-
     echo -e "${YW}User / SSH:${CL}"
     plan_line "Username" "$USERNAME" "$GN"
     plan_line "Source" "$USERNAME_SOURCE" "$GN"
     plan_line "Existing user" "$EXISTING_USER" "$GN"
     plan_line "SSH key source" "${SOURCE_KEYS:-none detected}" "$GN"
+    echo ""
+
+    LOCK_USER_PASSWORD="$(timed_yes_no "Lock password for SSH-key-only user?" "y")"
+    APPLY_SSH_HARDENING="$(timed_yes_no "Apply SSH key-only hardening after keys are verified?" "y")"
 
     return 0
 }
