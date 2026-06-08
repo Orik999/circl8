@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.24"
+SCRIPT_VERSION="v1.2.25"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="prompt-redraw-display-polish"
+SCRIPT_BUILD="vm-selection-plan-final-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -1757,14 +1757,11 @@ vm_network_summary() {
     group_answer_line "Selected VM" "${TARGET_VM_NAME} (${TARGET_VMID})"
     group_status_line "Status" "$TARGET_VM_STATUS"
     [ -n "${TARGET_VM_MAC:-}" ] && group_status_line "MAC" "$TARGET_VM_MAC"
-    echo ""
-    group_heading "Network"
-    group_answer_line "Mode" "$NETWORK_MODE"
-    group_status_line "Router reminder" "yes" "$GN"
+    group_status_line "Network" "$NETWORK_MODE"
     if [ "$NETWORK_MODE" == "static" ]; then
-        group_answer_line "Static IP/CIDR" "$STATIC_IP_CIDR"
-        group_answer_line "Gateway" "$STATIC_GATEWAY"
-        group_answer_line "DNS" "$STATIC_DNS"
+        group_status_line "Static IP/CIDR" "$STATIC_IP_CIDR"
+        group_status_line "Gateway" "$STATIC_GATEWAY"
+        group_status_line "DNS" "$STATIC_DNS"
     fi
 }
 
@@ -2543,7 +2540,6 @@ show_apply_summary() {
     group_heading "VM"
     group_answer_line "Target" "${TARGET_VM_NAME} (${TARGET_VMID})"
     group_status_line "Action" "wipe disk and install Ubuntu" "$YW"
-    group_status_line "Shutdown needed" "$(vm_shutdown_display)"
     group_answer_line "Start after cleanup" "$(yn_word "$POST_INSTALL_START_VM")"
     echo ""
 
@@ -2855,7 +2851,6 @@ show_final_output() {
         status_line "SSH into Ubuntu" "ssh ${TARGET_USERNAME}@<assigned-ip>" "$GN" 22
     fi
     status_line "Run inside Ubuntu" "4-ubuntuVMsetup.sh" "$GN" 22
-    status_line "Reserve MAC in router" "${TARGET_VM_MAC} for fixed VM IP" "$GN" 22
     echo ""
     echo -e "${FLASH_ON}${RD}DO NOT RUN 4-ubuntuVMsetup.sh ON THE PROXMOX HOST.${FLASH_OFF}${CL}"
     echo ""
@@ -2939,7 +2934,6 @@ demo_vm_selection() {
     msg_ok "Selected VM: ${TARGET_VM_NAME} (${TARGET_VMID})"
     demo_line "VM MAC address: ${TARGET_VM_MAC}"
     demo_line "Ubuntu network mode: DHCP"
-    demo_line "Reserve this MAC in your router if you want a fixed VM IP."
 }
 
 demo_identity_locale() {
@@ -2983,7 +2977,6 @@ demo_preflight_questions() {
     demo_line "missing ISO tools: $(missing_iso_tools_display)"
     demo_line "install missing ISO tools: $(install_missing_tools_display)"
     demo_line "VM status before apply: ${VM_STATUS_AT_PREFLIGHT}"
-    demo_line "shutdown before apply: $(vm_shutdown_display)"
     echo -e "${WARN} ${RD}Starting Ubuntu autoinstall will wipe VM disk.${CL}"
     demo_line "start unattended Ubuntu install: $(attach_start_display)"
 }
@@ -3006,7 +2999,6 @@ demo_ready_to_apply() {
     echo -e "  ${GN}${TARGET_VM_NAME} (${TARGET_VMID})${CL}"
     echo -e "  MAC: ${GN}${TARGET_VM_MAC}${CL}"
     echo -e "  status before apply: ${GN}${VM_STATUS_AT_PREFLIGHT}${CL}"
-    echo -e "  shutdown before apply: ${GN}$(vm_shutdown_display)${CL}"
     echo ""
 
     echo -e "${YW}UBUNTU IDENTITY:${CL}"
