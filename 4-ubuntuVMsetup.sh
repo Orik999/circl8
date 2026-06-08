@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.16"
+SCRIPT_VERSION="v2.1.17"
 SCRIPT_UPDATED="2026-06-08"
-SCRIPT_BUILD="crowdsec-bouncer-ufw-polish"
+SCRIPT_BUILD="crowdsec-bouncer-settle-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -2122,6 +2122,69 @@ function repair_broken_crowdsec_nftables_bouncer_if_needed() {
     msg_ok "CROWDSEC NFTABLES BOUNCER REMOVED"
 }
 
+function wait_for_crowdsec_firewall_bouncer_active() {
+    local max_seconds="75"
+    local interval_seconds="5"
+    local elapsed="0"
+    local state="unknown"
+
+    msg_info "Waiting for CrowdSec firewall bouncer to become active"
+
+    while [ "$elapsed" -le "$max_seconds" ]; do
+        if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+            CROWDSEC_BOUNCER_STATUS="active"
+            msg_ok "CROWDSEC FIREWALL BOUNCER ACTIVE"
+            return 0
+        fi
+
+        state="$(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || true)"
+
+        case "$state" in
+            activating|deactivating|reloading|inactive|failed|unknown|*) ;;
+        esac
+
+        if [ "$elapsed" -ge "$max_seconds" ]; then
+            break
+        fi
+
+        sleep "$interval_seconds"
+        elapsed="$(( elapsed + interval_seconds ))"
+    done
+
+    state="$(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || true)"
+    if [ "$state" == "failed" ]; then
+        CROWDSEC_BOUNCER_STATUS="failed"
+    else
+        CROWDSEC_BOUNCER_STATUS="installed-not-active"
+    fi
+
+    msg_warn "CROWDSEC FIREWALL BOUNCER NOT ACTIVE"
+    return 1
+}
+
+function refresh_crowdsec_bouncer_runtime_status() {
+    if [ "${ENABLE_CROWDSEC:-y}" != "y" ]; then
+        CROWDSEC_BOUNCER_STATUS="skipped"
+        return 0
+    fi
+
+    if [ "${CROWDSEC_BOUNCER_PACKAGE:-none}" == "none" ]; then
+        if dpkg_package_configured "crowdsec-firewall-bouncer-iptables"; then
+            CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-iptables"
+        elif dpkg_package_configured "crowdsec-firewall-bouncer-nftables"; then
+            CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-nftables"
+        fi
+    fi
+
+    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+        CROWDSEC_BOUNCER_STATUS="active"
+    elif [ "${CROWDSEC_BOUNCER_STATUS:-none}" == "active" ]; then
+        CROWDSEC_BOUNCER_STATUS="installed-not-active"
+    elif [ -z "${CROWDSEC_BOUNCER_STATUS:-}" ] || [ "${CROWDSEC_BOUNCER_STATUS:-none}" == "none" ]; then
+        CROWDSEC_BOUNCER_STATUS="installed-not-active"
+    fi
+}
+
 function ensure_crowdsec_firewall_bouncer() {
     local chosen_package=""
     local package_state=""
@@ -2153,7 +2216,7 @@ function ensure_crowdsec_firewall_bouncer() {
         return 0
     fi
 
-    msg_ok "CROWDSEC FIREWALL BOUNCER PACKAGE CONFIGURED"
+    msg_ok "CROWDSEC FIREWALL BOUNCER PACKAGE INSTALLED"
 
     msg_info "Restarting CrowdSec before bouncer activation"
     run_optional systemctl restart crowdsec
@@ -2163,13 +2226,7 @@ function ensure_crowdsec_firewall_bouncer() {
     run_optional systemctl enable --now crowdsec-firewall-bouncer
     run_optional systemctl restart crowdsec-firewall-bouncer
 
-    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
-        CROWDSEC_BOUNCER_STATUS="active"
-        msg_ok "CROWDSEC FIREWALL BOUNCER ACTIVE"
-    else
-        CROWDSEC_BOUNCER_STATUS="installed-not-active"
-        msg_warn "CrowdSec firewall bouncer is installed but not active"
-    fi
+    wait_for_crowdsec_firewall_bouncer_active || true
 }
 
 function enroll_crowdsec_console() {
@@ -2687,6 +2744,7 @@ function create_verification_report() {
             verify_warn "CrowdSec bouncer package" "no CrowdSec firewall bouncer package confirmed" "rerun Script 4 CrowdSec setup"
         fi
 
+        refresh_crowdsec_bouncer_runtime_status
         if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
             CROWDSEC_BOUNCER_STATUS="active"
             verify_pass "CrowdSec bouncer active"
@@ -3009,13 +3067,20 @@ function update_completion_marker_script4_fields() {
     marker_tmp="$(mktemp)"
     TEMP_FILES+=("$marker_tmp")
 
+    refresh_crowdsec_bouncer_runtime_status
+
     if root_file_exists "$COMPLETED_MARKER"; then
-        existing_marker="$(root_cat_file "$COMPLETED_MARKER" 2>/dev/null | grep -Ev '^SCRIPT4_' || true)"
+        existing_marker="$(root_cat_file "$COMPLETED_MARKER" 2>/dev/null | grep -Ev '^(SCRIPT4_|CrowdSec Bouncer Package:|CrowdSec Bouncer:|CrowdSec Package:|CrowdSec Service:|CrowdSec Collections:)' || true)"
     fi
 
     {
         [ -n "$existing_marker" ] && printf '%s
 ' "$existing_marker"
+        echo "CrowdSec Package: $CROWDSEC_PACKAGE_INSTALLED"
+        echo "CrowdSec Service: $CROWDSEC_SERVICE_STATUS"
+        echo "CrowdSec Collections: $CROWDSEC_COLLECTIONS_STATUS"
+        echo "CrowdSec Bouncer Package: $CROWDSEC_BOUNCER_PACKAGE"
+        echo "CrowdSec Bouncer: $CROWDSEC_BOUNCER_STATUS"
         echo "SCRIPT4_STATUS=completed"
         echo "SCRIPT4_VERSION=$SCRIPT_VERSION"
         echo "SCRIPT4_BUILD=$SCRIPT_BUILD"
