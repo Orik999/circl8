@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.13"
+SCRIPT_VERSION="v2.1.14"
 SCRIPT_UPDATED="2026-06-08"
-SCRIPT_BUILD="apply-finished-output-polish"
+SCRIPT_BUILD="ubuntu-pro-attach-retry-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -249,7 +249,7 @@ function status_color_for_value() {
 
     case "$value" in
         failed|fail|FAIL|missing|not-active|not-installed|unavailable) echo "$RD" ;;
-        partial|skipped-empty-token|installed-not-active|PASS_WITH_WARNINGS|timeout|contracts-timeout|read-timeout) echo "$YW" ;;
+        partial|skipped-empty-token|installed-not-active|PASS_WITH_WARNINGS|timeout|contracts-timeout|read-timeout|invalid-token|transient-service-error|operation-timeout|attach-failed|empty-token|skipped-attach-failed|skipped-pro-busy) echo "$YW" ;;
         *) echo "$GN" ;;
     esac
 }
@@ -1241,8 +1241,6 @@ function collect_username() {
     plan_line "Source" "$USERNAME_SOURCE" "$GN"
     plan_line "Existing user" "$EXISTING_USER" "$GN"
     plan_line "SSH key source" "${SOURCE_KEYS:-none detected}" "$GN"
-    plan_line "Lock password" "$(yes_no_label "$LOCK_USER_PASSWORD")" "$ANS"
-    plan_line "SSH hardening" "$(yes_no_label "$APPLY_SSH_HARDENING")" "$ANS"
 
     return 0
 }
@@ -1373,8 +1371,6 @@ function show_ready_summary_and_confirm() {
     plan_line "Source" "$USERNAME_SOURCE" "$GN"
     plan_line "Existing user" "$EXISTING_USER" "$GN"
     plan_line "SSH key source" "${SOURCE_KEYS:-none detected}" "$GN"
-    plan_line "Lock password" "$(yes_no_label "$LOCK_USER_PASSWORD")" "$ANS"
-    plan_line "SSH hardening" "$(yes_no_label "$APPLY_SSH_HARDENING")" "$ANS"
     if [ "$IS_CONTAINER" == "yes" ]; then
         plan_line "Environment" "Container/LXC (${VIRT_TYPE})" "$GN"
     else
@@ -1552,14 +1548,36 @@ function wait_for_ubuntu_pro_idle() {
     return 1
 }
 
+function ubuntu_pro_attach_error_text() {
+    local err_file="${1:-}"
+
+    [ -n "$err_file" ] && [ -f "$err_file" ] && cat "$err_file" 2>/dev/null || true
+}
+
+function ubuntu_pro_attach_error_is_invalid_token() {
+    local err_text="${1:-}"
+
+    grep -qiE 'invalid[[:space:]-]*token' <<< "$err_text"
+}
+
+function ubuntu_pro_attach_error_is_transient() {
+    local err_text="${1:-}"
+
+    grep -qiE '503|Service Unavailable|timed out|timeout|read operation timed out|temporarily unavailable|connection reset|contract|contracts|operation.*progress' <<< "$err_text"
+}
+
 function classify_ubuntu_pro_attach_failure() {
     local err_file="${1:-}"
     local err_text=""
 
-    [ -n "$err_file" ] && [ -f "$err_file" ] && err_text="$(cat "$err_file" 2>/dev/null || true)"
+    err_text="$(ubuntu_pro_attach_error_text "$err_file")"
 
-    if grep -qiE 'timed out|timeout|read.*time|contract|contracts|operation.*progress' <<< "$err_text"; then
-        UBUNTU_PRO_ATTACH_REASON="timeout"
+    if ubuntu_pro_attach_error_is_invalid_token "$err_text"; then
+        UBUNTU_PRO_ATTACH_REASON="invalid-token"
+        msg_warn "UBUNTU PRO ATTACHMENT FAILED"
+        msg_warn "REASON: invalid token"
+    elif ubuntu_pro_attach_error_is_transient "$err_text"; then
+        UBUNTU_PRO_ATTACH_REASON="transient-service-error"
         msg_warn "UBUNTU PRO ATTACHMENT TIMED OUT"
         msg_warn "REASON: Canonical contracts service did not respond in time"
     else
@@ -1569,6 +1587,100 @@ function classify_ubuntu_pro_attach_failure() {
     fi
 
     msg_ok "SCRIPT CONTINUED SAFELY"
+}
+
+function run_ubuntu_pro_attach_once() {
+    local err_file="$1"
+
+    : > "$err_file"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" pro attach "$PRO_TOKEN" --no-auto-enable > /dev/null 2> "$err_file"
+    else
+        pro attach "$PRO_TOKEN" --no-auto-enable > /dev/null 2> "$err_file"
+    fi
+}
+
+function ubuntu_pro_attach_with_retry() {
+    local err_file=""
+    local err_text=""
+    local attempt=""
+    local delay=""
+
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    for attempt in 1 2 3; do
+        msg_info "Attaching Ubuntu Pro"
+
+        if run_ubuntu_pro_attach_once "$err_file"; then
+            rm -f "$err_file"
+            UBUNTU_PRO_ATTACHED="yes"
+            UBUNTU_PRO_ATTACH_REASON="none"
+            msg_ok "UBUNTU PRO ATTACHED"
+            return 0
+        fi
+
+        err_text="$(ubuntu_pro_attach_error_text "$err_file")"
+
+        if ubuntu_pro_attach_error_is_invalid_token "$err_text"; then
+            rm -f "$err_file"
+            UBUNTU_PRO_ATTACHED="failed"
+            UBUNTU_PRO_ATTACH_REASON="invalid-token"
+            msg_warn "UBUNTU PRO ATTACHMENT FAILED"
+            msg_warn "REASON: invalid token"
+            msg_ok "SCRIPT CONTINUED SAFELY"
+            return 1
+        fi
+
+        if ubuntu_pro_attach_error_is_transient "$err_text" && [ "$attempt" -lt 3 ]; then
+            if [ "$attempt" -eq 1 ]; then delay="15"; else delay="30"; fi
+            msg_warn "UBUNTU PRO ATTACH ATTEMPT ${attempt} FAILED: transient service error"
+            msg_info "Retrying Ubuntu Pro attach in ${delay} seconds"
+            sleep "$delay"
+            continue
+        fi
+
+        UBUNTU_PRO_ATTACHED="failed"
+        classify_ubuntu_pro_attach_failure "$err_file"
+        rm -f "$err_file"
+        return 1
+    done
+
+    rm -f "$err_file"
+    UBUNTU_PRO_ATTACHED="failed"
+    UBUNTU_PRO_ATTACH_REASON="transient-service-error"
+    msg_warn "UBUNTU PRO ATTACHMENT TIMED OUT"
+    msg_warn "REASON: Canonical contracts service did not respond in time"
+    msg_ok "SCRIPT CONTINUED SAFELY"
+    return 1
+}
+
+function ubuntu_pro_manual_action_needed() {
+    [[ "$ATTACH_UBUNTU_PRO" =~ ^[Yy] ]] || return 1
+    [ "$UBUNTU_PRO_ATTACHED" == "failed" ] && return 0
+
+    case "${UBUNTU_PRO_ATTACH_REASON:-none}" in
+        invalid-token|transient-service-error|timeout|operation-timeout|attach-failed|empty-token) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+function print_ubuntu_pro_manual_next_steps() {
+    ubuntu_pro_manual_action_needed || return 0
+
+    if [ "${UBUNTU_PRO_ATTACH_REASON:-}" == "invalid-token" ]; then
+        echo -e "  ${BL}Get a fresh Ubuntu Pro token from the Ubuntu Pro dashboard.${CL}"
+        echo -e "  ${BL}Attach Ubuntu Pro manually:${CL}"
+    else
+        echo -e "  ${BL}Retry Ubuntu Pro attachment manually if needed:${CL}"
+    fi
+
+    echo -e "    ${GN}sudo pro attach <token>${CL}"
+    echo -e "    ${GN}sudo pro enable esm-apps --assume-yes${CL}"
+    echo -e "    ${GN}sudo pro enable esm-infra --assume-yes${CL}"
+    echo -e "    ${GN}sudo pro enable livepatch --assume-yes${CL}"
+    echo -e "    ${GN}sudo apt update && sudo apt full-upgrade -y${CL}"
 }
 
 # --- 36. UBUNTU PRO APPLY ---
@@ -1582,6 +1694,18 @@ function apply_ubuntu_pro() {
         return 0
     fi
 
+    PRO_TOKEN="$(printf '%s' "${PRO_TOKEN:-}" | tr -d '\r\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    if [ -z "$PRO_TOKEN" ]; then
+        UBUNTU_PRO_ATTACHED="failed"
+        UBUNTU_PRO_ATTACH_REASON="empty-token"
+        UBUNTU_PRO_ESM_APPS="skipped-attach-failed"
+        UBUNTU_PRO_ESM_INFRA="skipped-attach-failed"
+        UBUNTU_PRO_LIVEPATCH="skipped-attach-failed"
+        msg_warn "Ubuntu Pro token was empty after trimming; attachment skipped"
+        msg_ok "SCRIPT CONTINUED SAFELY"
+        return 0
+    fi
+
     ensure_ubuntu_pro_client
 
     if get_ubuntu_pro_status_text | grep -qi 'Subscription:'; then
@@ -1589,33 +1713,7 @@ function apply_ubuntu_pro() {
         UBUNTU_PRO_ATTACH_REASON="none"
         msg_ok "UBUNTU PRO ALREADY ATTACHED"
     else
-        local err_file=""
-        err_file="$(mktemp)"
-        TEMP_FILES+=("$err_file")
-
-        msg_info "Attaching Ubuntu Pro"
-
-        if [ -n "$SUDO_CMD" ]; then
-            if "$SUDO_CMD" pro attach "$PRO_TOKEN" --no-auto-enable > /dev/null 2> "$err_file"; then
-                UBUNTU_PRO_ATTACHED="yes"
-                UBUNTU_PRO_ATTACH_REASON="none"
-                msg_ok "UBUNTU PRO ATTACHED"
-            else
-                UBUNTU_PRO_ATTACHED="failed"
-                classify_ubuntu_pro_attach_failure "$err_file"
-            fi
-        else
-            if pro attach "$PRO_TOKEN" --no-auto-enable > /dev/null 2> "$err_file"; then
-                UBUNTU_PRO_ATTACHED="yes"
-                UBUNTU_PRO_ATTACH_REASON="none"
-                msg_ok "UBUNTU PRO ATTACHED"
-            else
-                UBUNTU_PRO_ATTACHED="failed"
-                classify_ubuntu_pro_attach_failure "$err_file"
-            fi
-        fi
-
-        rm -f "$err_file"
+        ubuntu_pro_attach_with_retry || true
     fi
 
     unset PRO_TOKEN
@@ -2713,6 +2811,9 @@ function write_verify_display_log() {
         if crowdsec_enrollment_needs_console_approval; then
             echo -e "  ${BL}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
         fi
+        if ubuntu_pro_manual_action_needed; then
+            print_ubuntu_pro_manual_next_steps
+        fi
         echo -e "  ${BL}Run ${ANS}Script 5${BL}.${CL}"
     } > "$display_tmp"
 
@@ -2817,6 +2918,7 @@ function update_completion_marker_script4_fields() {
         echo "SCRIPT4_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK"
         echo "SCRIPT4_POST_REBOOT_DISPLAY_MARKER=$display_marker"
         echo "SCRIPT4_USERNAME=$USERNAME"
+        echo "SCRIPT4_UBUNTU_PRO_ATTACH_REASON=$UBUNTU_PRO_ATTACH_REASON"
         echo "SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED"
         echo "SCRIPT4_UFW_ENABLED=$UFW_ENABLED"
         echo "SCRIPT4_CROWDSEC_SELECTED=$(yes_no_label "$ENABLE_CROWDSEC")"
@@ -2870,6 +2972,9 @@ function show_verify_only_summary() {
     echo -e "${YW}Next Step:${CL}"
     if crowdsec_enrollment_needs_console_approval; then
         echo -e "  ${BL}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
+    fi
+    if ubuntu_pro_manual_action_needed; then
+        print_ubuntu_pro_manual_next_steps
     fi
     echo -e "  ${BL}Run ${ANS}Script 5${BL}.${CL}"
     echo ""
@@ -2973,6 +3078,9 @@ function show_final_summary() {
     echo -e "${YW}Next Step:${CL}"
     if crowdsec_enrollment_needs_console_approval; then
         echo -e "  ${BL}Approve the CrowdSec enrollment in the CrowdSec Console.${CL}"
+    fi
+    if ubuntu_pro_manual_action_needed; then
+        print_ubuntu_pro_manual_next_steps
     fi
     if [[ "$REBOOT_AFTER_FINISH" =~ ^[Yy] ]]; then
         echo -e "  ${BL}Reboot the VM, SSH back in, then run ${ANS}Script 5${BL}.${CL}"
