@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.25"
+SCRIPT_VERSION="v1.2.26"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="vm-selection-plan-final-polish"
+SCRIPT_BUILD="setup-plan-iso-dedupe"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -2540,6 +2540,7 @@ show_apply_summary() {
     group_heading "VM"
     group_answer_line "Target" "${TARGET_VM_NAME} (${TARGET_VMID})"
     group_status_line "Action" "wipe disk and install Ubuntu" "$YW"
+    group_status_line "Autoinstall ISO" "$(display_iso_ref "$AUTOINSTALL_ISO_REF")"
     group_answer_line "Start after cleanup" "$(yn_word "$POST_INSTALL_START_VM")"
     echo ""
 
@@ -2549,12 +2550,6 @@ show_apply_summary() {
     group_answer_line "Network" "$NETWORK_MODE"
     echo ""
 
-    group_heading "ISO"
-    group_answer_line "Source" "$(display_iso_ref "$INSTALL_ISO_REF")"
-    group_status_line "Generated" "$(display_iso_ref "$AUTOINSTALL_ISO_REF")"
-    group_status_line "Missing tools" "$(missing_iso_tools_display)"
-    group_status_line "Tool action" "$(iso_tool_action_display)"
-    echo ""
 
     group_heading "Proxmox identity"
     group_status_line "Hostname" "$(proxmox_identity_value_or_not_detected "$PROXMOX_HOSTNAME")"
