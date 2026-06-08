@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.17"
-SCRIPT_UPDATED="2026-06-08"
-SCRIPT_BUILD="crowdsec-bouncer-settle-polish"
+SCRIPT_VERSION="v2.1.18"
+SCRIPT_UPDATED="2026-06-09"
+SCRIPT_BUILD="crowdsec-bouncer-startup-order"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -2122,8 +2122,116 @@ function repair_broken_crowdsec_nftables_bouncer_if_needed() {
     msg_ok "CROWDSEC NFTABLES BOUNCER REMOVED"
 }
 
+function write_crowdsec_apt_preferences_pin() {
+    local pin_tmp=""
+    local pin_path="/etc/apt/preferences.d/crowdsec"
+
+    pin_tmp="$(mktemp)"
+    TEMP_FILES+=("$pin_tmp")
+
+    cat > "$pin_tmp" <<'EOF_CROWDSEC_PIN'
+Package: *
+Pin: release o=packagecloud.io/crowdsec/crowdsec,a=any,n=any,c=main
+Pin-Priority: 1001
+EOF_CROWDSEC_PIN
+
+    msg_info "Writing CrowdSec APT pin"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" mkdir -p /etc/apt/preferences.d 2>/dev/null || true
+        "$SUDO_CMD" cp "$pin_tmp" "$pin_path" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$pin_path" 2>/dev/null || true
+    else
+        mkdir -p /etc/apt/preferences.d 2>/dev/null || true
+        cp "$pin_tmp" "$pin_path" 2>/dev/null || true
+        chmod 0644 "$pin_path" 2>/dev/null || true
+    fi
+    msg_ok "CROWDSEC APT PIN READY"
+
+    rm -f "$pin_tmp"
+}
+
+function install_crowdsec_firewall_bouncer_systemd_override() {
+    local override_tmp=""
+    local override_dir="/etc/systemd/system/crowdsec-firewall-bouncer.service.d"
+    local override_path="${override_dir}/override.conf"
+
+    override_tmp="$(mktemp)"
+    TEMP_FILES+=("$override_tmp")
+
+    cat > "$override_tmp" <<'EOF_CROWDSEC_BOUNCER_OVERRIDE'
+[Unit]
+Wants=network-online.target crowdsec.service
+After=network-online.target crowdsec.service
+
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/health >/dev/null && exit 0; sleep 2; done; exit 1'
+RestartSec=10
+EOF_CROWDSEC_BOUNCER_OVERRIDE
+
+    msg_info "Installing CrowdSec firewall bouncer service override"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" mkdir -p "$override_dir" 2>/dev/null || true
+        "$SUDO_CMD" cp "$override_tmp" "$override_path" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$override_path" 2>/dev/null || true
+    else
+        mkdir -p "$override_dir" 2>/dev/null || true
+        cp "$override_tmp" "$override_path" 2>/dev/null || true
+        chmod 0644 "$override_path" 2>/dev/null || true
+    fi
+    run_optional systemctl daemon-reload
+    msg_ok "CROWDSEC FIREWALL BOUNCER OVERRIDE READY"
+
+    rm -f "$override_tmp"
+}
+
+function wait_for_crowdsec_service_active() {
+    local max_seconds="120"
+    local interval_seconds="5"
+    local elapsed="0"
+
+    msg_info "Waiting for CrowdSec service readiness"
+
+    while [ "$elapsed" -le "$max_seconds" ]; do
+        if systemctl is-active --quiet crowdsec 2>/dev/null; then
+            CROWDSEC_SERVICE_STATUS="active"
+            msg_ok "CROWDSEC SERVICE READY"
+            return 0
+        fi
+
+        [ "$elapsed" -ge "$max_seconds" ] && break
+        sleep "$interval_seconds"
+        elapsed="$(( elapsed + interval_seconds ))"
+    done
+
+    CROWDSEC_SERVICE_STATUS="not-active"
+    msg_warn "CROWDSEC SERVICE NOT READY"
+    return 1
+}
+
+function wait_for_crowdsec_local_api_ready() {
+    local max_seconds="120"
+    local interval_seconds="5"
+    local elapsed="0"
+
+    msg_info "Waiting for CrowdSec local API"
+
+    while [ "$elapsed" -le "$max_seconds" ]; do
+        if command -v curl >/dev/null 2>&1 && curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+            msg_ok "CROWDSEC LOCAL API READY"
+            return 0
+        fi
+
+        [ "$elapsed" -ge "$max_seconds" ] && break
+        sleep "$interval_seconds"
+        elapsed="$(( elapsed + interval_seconds ))"
+    done
+
+    msg_warn "CROWDSEC LOCAL API NOT READY"
+    return 1
+}
+
 function wait_for_crowdsec_firewall_bouncer_active() {
-    local max_seconds="75"
+    local max_seconds="120"
     local interval_seconds="5"
     local elapsed="0"
     local state="unknown"
@@ -2138,15 +2246,11 @@ function wait_for_crowdsec_firewall_bouncer_active() {
         fi
 
         state="$(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || true)"
-
         case "$state" in
             activating|deactivating|reloading|inactive|failed|unknown|*) ;;
         esac
 
-        if [ "$elapsed" -ge "$max_seconds" ]; then
-            break
-        fi
-
+        [ "$elapsed" -ge "$max_seconds" ] && break
         sleep "$interval_seconds"
         elapsed="$(( elapsed + interval_seconds ))"
     done
@@ -2218,13 +2322,28 @@ function ensure_crowdsec_firewall_bouncer() {
 
     msg_ok "CROWDSEC FIREWALL BOUNCER PACKAGE INSTALLED"
 
+    install_crowdsec_firewall_bouncer_systemd_override
+
+    msg_info "Stopping CrowdSec firewall bouncer for ordered start"
+    run_optional systemctl stop crowdsec-firewall-bouncer
+    run_optional systemctl reset-failed crowdsec-firewall-bouncer
+    msg_ok "CROWDSEC FIREWALL BOUNCER STOPPED FOR ORDERED START"
+
     msg_info "Restarting CrowdSec before bouncer activation"
     run_optional systemctl restart crowdsec
-    sleep 3
+    msg_ok "CROWDSEC RESTART REQUESTED"
+
+    wait_for_crowdsec_service_active || true
+    wait_for_crowdsec_local_api_ready || true
+
+    msg_info "Allowing CrowdSec decision stream to settle"
+    sleep 10
+    msg_ok "CROWDSEC DECISION STREAM READY"
 
     msg_info "Enabling CrowdSec firewall bouncer"
-    run_optional systemctl enable --now crowdsec-firewall-bouncer
+    run_optional systemctl enable crowdsec-firewall-bouncer
     run_optional systemctl restart crowdsec-firewall-bouncer
+    msg_ok "CROWDSEC FIREWALL BOUNCER START REQUESTED"
 
     wait_for_crowdsec_firewall_bouncer_active || true
 }
@@ -2314,6 +2433,8 @@ function apply_crowdsec_security() {
     else
         msg_ok "CROWDSEC REPOSITORY READY"
     fi
+
+    write_crowdsec_apt_preferences_pin
 
     msg_info "Updating APT package lists for CrowdSec"
     run_optional env DEBIAN_FRONTEND=noninteractive apt-get update
