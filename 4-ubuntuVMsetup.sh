@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.15"
+SCRIPT_VERSION="v2.1.16"
 SCRIPT_UPDATED="2026-06-08"
-SCRIPT_BUILD="user-ssh-options-order-polish"
+SCRIPT_BUILD="crowdsec-bouncer-ufw-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -248,7 +248,7 @@ function status_color_for_value() {
     local value="${1:-}"
 
     case "$value" in
-        failed|fail|FAIL|missing|not-active|not-installed|unavailable) echo "$RD" ;;
+        failed|fail|FAIL|missing|not-active|not-installed|unavailable|failed-package-state) echo "$RD" ;;
         partial|skipped-empty-token|installed-not-active|PASS_WITH_WARNINGS|timeout|contracts-timeout|read-timeout|invalid-token|transient-service-error|operation-timeout|attach-failed|empty-token|skipped-attach-failed|skipped-pro-busy) echo "$YW" ;;
         *) echo "$GN" ;;
     esac
@@ -1401,7 +1401,7 @@ function show_ready_summary_and_confirm() {
     if [ "$ENABLE_CROWDSEC" == "y" ]; then
         plan_line "Install" "yes" "$ANS"
         plan_line "Collections" "linux, sshd, http-cve" "$GN"
-        plan_line "Bouncer" "firewall" "$GN"
+        plan_line "Bouncer" "iptables firewall" "$GN"
         if [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" == "yes" ]; then
             plan_line "Console enroll" "selected" "$ANS"
             plan_line "Engine name" "${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}" "$GN"
@@ -2070,6 +2070,108 @@ function install_crowdsec_collection_if_missing() {
     crowdsec_collection_installed "$collection"
 }
 
+function apt_package_available() {
+    local package="$1"
+    apt-cache show "$package" >/dev/null 2>&1
+}
+
+function dpkg_package_status_abbrev() {
+    local package="$1"
+
+    dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true
+}
+
+function dpkg_package_configured() {
+    local package="$1"
+    local state=""
+
+    state="$(dpkg_package_status_abbrev "$package")"
+    [[ "$state" == ii* ]]
+}
+
+function choose_crowdsec_firewall_bouncer_package() {
+    # Script 4 is the Ubuntu VM/UFW path, so prefer the iptables bouncer.
+    if apt_package_available "crowdsec-firewall-bouncer-iptables"; then
+        echo "crowdsec-firewall-bouncer-iptables"
+        return 0
+    fi
+
+    if apt_package_available "crowdsec-firewall-bouncer-nftables"; then
+        echo "crowdsec-firewall-bouncer-nftables"
+        return 0
+    fi
+
+    echo "none"
+}
+
+function repair_broken_crowdsec_nftables_bouncer_if_needed() {
+    local chosen_package="$1"
+    local nft_state=""
+
+    [ "$chosen_package" == "crowdsec-firewall-bouncer-iptables" ] || return 0
+
+    nft_state="$(dpkg_package_status_abbrev "crowdsec-firewall-bouncer-nftables")"
+    [ -n "$nft_state" ] || return 0
+
+    msg_info "Removing incompatible CrowdSec nftables bouncer"
+    run_optional systemctl stop crowdsec-firewall-bouncer
+    run_optional systemctl disable crowdsec-firewall-bouncer
+    run_optional systemctl reset-failed crowdsec-firewall-bouncer
+    run_optional env DEBIAN_FRONTEND=noninteractive apt-get purge -y crowdsec-firewall-bouncer-nftables
+    run_optional env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+    msg_ok "CROWDSEC NFTABLES BOUNCER REMOVED"
+}
+
+function ensure_crowdsec_firewall_bouncer() {
+    local chosen_package=""
+    local package_state=""
+
+    chosen_package="$(choose_crowdsec_firewall_bouncer_package)"
+    CROWDSEC_BOUNCER_PACKAGE="$chosen_package"
+
+    if [ "$chosen_package" == "none" ]; then
+        CROWDSEC_BOUNCER_STATUS="not-found"
+        msg_warn "CrowdSec firewall bouncer package not found"
+        return 0
+    fi
+
+    repair_broken_crowdsec_nftables_bouncer_if_needed "$chosen_package"
+
+    if dpkg_package_configured "$chosen_package" && systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+        CROWDSEC_BOUNCER_STATUS="active"
+        msg_ok "CROWDSEC FIREWALL BOUNCER ACTIVE"
+        return 0
+    fi
+
+    msg_info "Installing CrowdSec firewall bouncer (${chosen_package})"
+    run_optional env DEBIAN_FRONTEND=noninteractive apt-get install -y "$chosen_package"
+
+    package_state="$(dpkg_package_status_abbrev "$chosen_package")"
+    if [[ ! "$package_state" == ii* ]]; then
+        CROWDSEC_BOUNCER_STATUS="failed-package-state"
+        msg_warn "CrowdSec firewall bouncer package state is ${package_state:-unknown}; expected ii"
+        return 0
+    fi
+
+    msg_ok "CROWDSEC FIREWALL BOUNCER PACKAGE CONFIGURED"
+
+    msg_info "Restarting CrowdSec before bouncer activation"
+    run_optional systemctl restart crowdsec
+    sleep 3
+
+    msg_info "Enabling CrowdSec firewall bouncer"
+    run_optional systemctl enable --now crowdsec-firewall-bouncer
+    run_optional systemctl restart crowdsec-firewall-bouncer
+
+    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+        CROWDSEC_BOUNCER_STATUS="active"
+        msg_ok "CROWDSEC FIREWALL BOUNCER ACTIVE"
+    else
+        CROWDSEC_BOUNCER_STATUS="installed-not-active"
+        msg_warn "CrowdSec firewall bouncer is installed but not active"
+    fi
+}
+
 function enroll_crowdsec_console() {
     local err_file=""
 
@@ -2170,20 +2272,6 @@ function apply_crowdsec_security() {
         msg_warn "CrowdSec package install did not confirm crowdsec/cscli binaries"
     fi
 
-    msg_info "Checking available CrowdSec firewall bouncer package"
-    if apt-cache show crowdsec-firewall-bouncer-nftables >/dev/null 2>&1; then
-        run_optional env DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-firewall-bouncer-nftables
-        CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-nftables"
-        msg_ok "CROWDSEC NFTABLES FIREWALL BOUNCER INSTALLED"
-    elif apt-cache show crowdsec-firewall-bouncer-iptables >/dev/null 2>&1; then
-        run_optional env DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-firewall-bouncer-iptables
-        CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-iptables"
-        msg_ok "CROWDSEC IPTABLES FIREWALL BOUNCER INSTALLED"
-    else
-        CROWDSEC_BOUNCER_PACKAGE="none"
-        msg_warn "CrowdSec firewall bouncer package not found"
-    fi
-
     if command -v cscli >/dev/null 2>&1; then
         msg_info "Installing CrowdSec collections"
         run_optional cscli hub update
@@ -2217,21 +2305,7 @@ function apply_crowdsec_security() {
         msg_warn "CrowdSec service is not active after install"
     fi
 
-    msg_info "Checking CrowdSec firewall bouncer service"
-    if systemctl list-unit-files 'crowdsec-firewall-bouncer*' --no-pager --no-legend 2>/dev/null | grep -q "crowdsec-firewall-bouncer"; then
-        run_optional systemctl enable --now crowdsec-firewall-bouncer
-        run_optional systemctl restart crowdsec-firewall-bouncer
-        if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
-            CROWDSEC_BOUNCER_STATUS="active"
-            msg_ok "CROWDSEC FIREWALL BOUNCER ACTIVE"
-        else
-            CROWDSEC_BOUNCER_STATUS="installed-not-active"
-            msg_warn "CrowdSec firewall bouncer service is installed but not active"
-        fi
-    else
-        CROWDSEC_BOUNCER_STATUS="not-found"
-        msg_warn "CrowdSec firewall bouncer service was not found after install"
-    fi
+    ensure_crowdsec_firewall_bouncer
 
     enroll_crowdsec_console
 
@@ -2590,6 +2664,38 @@ function create_verification_report() {
             verify_warn "CrowdSec collections" "cscli is unavailable" "install crowdsec and rerun verification"
         fi
 
+        if [ "${CROWDSEC_BOUNCER_PACKAGE:-none}" == "none" ]; then
+            if dpkg_package_configured "crowdsec-firewall-bouncer-iptables"; then
+                CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-iptables"
+            elif dpkg_package_configured "crowdsec-firewall-bouncer-nftables"; then
+                CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-nftables"
+            fi
+        fi
+
+        if [ "${CROWDSEC_BOUNCER_PACKAGE:-none}" != "none" ]; then
+            local bouncer_package_state=""
+            bouncer_package_state="$(dpkg_package_status_abbrev "$CROWDSEC_BOUNCER_PACKAGE")"
+
+            if [[ "$bouncer_package_state" == ii* ]]; then
+                verify_pass "CrowdSec bouncer package configured"
+            else
+                CROWDSEC_BOUNCER_STATUS="failed-package-state"
+                verify_warn "CrowdSec bouncer package" "${CROWDSEC_BOUNCER_PACKAGE} state is ${bouncer_package_state:-unknown}, expected ii" "purge broken bouncer package and rerun Script 4"
+            fi
+        else
+            CROWDSEC_BOUNCER_STATUS="not-found"
+            verify_warn "CrowdSec bouncer package" "no CrowdSec firewall bouncer package confirmed" "rerun Script 4 CrowdSec setup"
+        fi
+
+        if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+            CROWDSEC_BOUNCER_STATUS="active"
+            verify_pass "CrowdSec bouncer active"
+        else
+            [ "$CROWDSEC_BOUNCER_STATUS" == "active" ] && CROWDSEC_BOUNCER_STATUS="installed-not-active"
+            [ "$CROWDSEC_BOUNCER_STATUS" == "none" ] && CROWDSEC_BOUNCER_STATUS="installed-not-active"
+            verify_warn "CrowdSec bouncer active" "state is ${CROWDSEC_BOUNCER_STATUS}" "run sudo systemctl status crowdsec-firewall-bouncer"
+        fi
+
         if [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" == "yes" ]; then
             case "${CROWDSEC_CONSOLE_ENROLLMENT:-unknown}" in
                 submitted|pending|attached|already-attached) verify_pass "CrowdSec Console enrollment submitted" ;;
@@ -2745,9 +2851,9 @@ function write_verify_display_log() {
     user_lines="$(printf '%s
 ' "$result_lines" | grep -E 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled' || true)"
     system_lines="$(printf '%s
-' "$result_lines" | grep -E 'IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready' || true)"
+' "$result_lines" | grep -E 'IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active' || true)"
     other_lines="$(printf '%s
-' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready' || true)"
+' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active' || true)"
 
     case "$VERIFY_STATUS" in
         PASS) status_color="$GN" ;;
