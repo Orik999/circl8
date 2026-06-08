@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.23"
+SCRIPT_VERSION="v1.2.24"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="setup-plan-redraw-polish"
+SCRIPT_BUILD="prompt-redraw-display-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -1108,6 +1108,16 @@ yn_word() {
     fi
 }
 
+
+display_iso_ref() {
+    local value="${1:-}"
+
+    value="${value#local:iso/}"
+    value="${value##*/}"
+
+    printf '%s' "$value"
+}
+
 # Extracts the first IPv4 from possibly polluted multiline text.
 extract_first_ipv4() {
     printf '%s
@@ -1750,7 +1760,7 @@ vm_network_summary() {
     echo ""
     group_heading "Network"
     group_answer_line "Mode" "$NETWORK_MODE"
-    group_status_line "Router reminder" "yes" "$YW"
+    group_status_line "Router reminder" "yes" "$GN"
     if [ "$NETWORK_MODE" == "static" ]; then
         group_answer_line "Static IP/CIDR" "$STATIC_IP_CIDR"
         group_answer_line "Gateway" "$STATIC_GATEWAY"
@@ -1776,8 +1786,8 @@ install_options_summary() {
     group_answer_line "Start after cleanup" "$(yn_word "$POST_INSTALL_START_VM")"
     echo ""
     group_heading "ISO"
-    group_answer_line "Source ISO" "$INSTALL_ISO_REF"
-    group_status_line "Generated ISO" "$AUTOINSTALL_ISO_REF"
+    group_answer_line "Source ISO" "$(display_iso_ref "$INSTALL_ISO_REF")"
+    group_status_line "Generated ISO" "$(display_iso_ref "$AUTOINSTALL_ISO_REF")"
     group_status_line "Missing tools" "$(missing_iso_tools_display)"
     group_status_line "Tool action" "$(iso_tool_action_display)"
 }
@@ -1797,28 +1807,28 @@ collect_early_cleanup_preferences() {
     echo -e "  ${YW}Recommended: remove temporary ISO tools/workspace from the Proxmox host.${CL}"
     echo ""
 
-    tool_cleanup_yn="$(timed_yes_no_quiet "Remove ISO generation tools after finish?" "y")"
+    tool_cleanup_yn="$(timed_yes_no "Remove ISO tools" "y")"
     if [[ "$tool_cleanup_yn" =~ ^[Nn] ]]; then
         CLEANUP_INSTALLED_TOOLS="no"
     else
         CLEANUP_INSTALLED_TOOLS="yes"
     fi
 
-    temp_cleanup_yn="$(timed_yes_no_quiet "Remove temporary ISO build workspace when finished?" "y")"
+    temp_cleanup_yn="$(timed_yes_no "Remove workspace" "y")"
     if [[ "$temp_cleanup_yn" =~ ^[Nn] ]]; then
         CLEANUP_TEMP_WORKFILES="no"
     else
         CLEANUP_TEMP_WORKFILES="yes"
     fi
 
-    iso_cleanup_yn="$(timed_yes_no_quiet "Delete generated autoinstall ISO after successful install?" "y")"
+    iso_cleanup_yn="$(timed_yes_no "Remove autoinstall ISO" "y")"
     if [[ "$iso_cleanup_yn" =~ ^[Nn] ]]; then
         DELETE_GENERATED_ISO_AFTER_INSTALL="n"
     else
         DELETE_GENERATED_ISO_AFTER_INSTALL="y"
     fi
 
-    clear_terminal_lines 4
+    clear_terminal_lines 7
     cleanup_preference_summary
 }
 
@@ -1997,8 +2007,8 @@ select_vm() {
 
     [ "${#VM_LINES[@]}" -eq 1 ] && default_vm_index="1"
 
-    vm_index="$(timed_number_input_quiet "Select VM for Ubuntu autoinstall" "$default_vm_index" "1" "${#VM_LINES[@]}")"
-    clear_terminal_lines "$list_lines"
+    vm_index="$(timed_number_input "Select VM for Ubuntu autoinstall" "$default_vm_index" "1" "${#VM_LINES[@]}")"
+    clear_terminal_lines "$((list_lines + 1))"
 
     TARGET_VMID="$(echo "${VM_LINES[$((vm_index-1))]}" | cut -d'|' -f1)"
     TARGET_VM_NAME="$(echo "${VM_LINES[$((vm_index-1))]}" | cut -d'|' -f2)"
@@ -2090,7 +2100,7 @@ collect_user_locale_inputs() {
     section "IDENTITY / LOCALE"
 
     while true; do
-        TARGET_USERNAME="$(timed_text_input_quiet "Enter Ubuntu admin username" "$DEFAULT_USERNAME")"
+        TARGET_USERNAME="$(timed_text_input "Enter Ubuntu admin username" "$DEFAULT_USERNAME")"
 
         if validate_linux_username "$TARGET_USERNAME"; then
             break
@@ -2099,8 +2109,8 @@ collect_user_locale_inputs() {
         msg_warn "Invalid username. Use lowercase Linux username format."
     done
 
-    TARGET_TIMEZONE="$(timed_text_input_quiet "Enter timezone" "$DEFAULT_TIMEZONE")"
-    TARGET_LOCALE="$(timed_text_input_quiet "Enter Ubuntu locale" "$DEFAULT_LOCALE")"
+    TARGET_TIMEZONE="$(timed_text_input "Enter timezone" "$DEFAULT_TIMEZONE")"
+    TARGET_LOCALE="$(timed_text_input "Enter Ubuntu locale" "$DEFAULT_LOCALE")"
 
     keyboard_choice="$(timed_menu_select "Keyboard Layout" "1" \
         "UK / British keyboard (gb)" \
@@ -2124,6 +2134,11 @@ collect_user_locale_inputs() {
 
     TARGET_HOSTNAME="$(safe_hostname "$TARGET_VM_NAME")"
 
+    if [ -n "${TARGET_KEYBOARD_VARIANT:-}" ]; then
+        clear_terminal_lines 5
+    else
+        clear_terminal_lines 3
+    fi
     identity_locale_summary
 }
 
@@ -2169,7 +2184,7 @@ detect_ssh_keys() {
 collect_network_inputs() {
     local dhcp_yn=""
 
-    dhcp_yn="$(timed_yes_no_quiet "Use DHCP networking inside Ubuntu?" "y")"
+    dhcp_yn="$(timed_yes_no "Use DHCP networking inside Ubuntu?" "y")"
 
     if [[ "$dhcp_yn" =~ ^[Nn] ]]; then
         NETWORK_MODE="static"
@@ -2197,7 +2212,10 @@ collect_network_inputs() {
         NETWORK_MODE="dhcp"
     fi
 
-    echo ""
+    if [ "$NETWORK_MODE" == "dhcp" ]; then
+        clear_terminal_lines 1
+    fi
+
     vm_network_summary
 }
 # --- 44. POST-INSTALL INPUTS ---
@@ -2206,11 +2224,12 @@ collect_post_install_options() {
 
     section "INSTALL OPTIONS"
 
-    INSTALL_WAIT_MINUTES="$(timed_number_input_quiet "Enter autoinstall wait timeout in minutes" "$DEFAULT_INSTALL_WAIT_MINUTES" "10" "240")"
-    SSH_IP_DETECT_TIMEOUT_SECONDS="$(timed_number_input_quiet "Enter VM IPv4 detection timeout in seconds" "$SSH_IP_DETECT_TIMEOUT_SECONDS" "30" "600")"
+    INSTALL_WAIT_MINUTES="$(timed_number_input "Enter autoinstall wait timeout in minutes" "$DEFAULT_INSTALL_WAIT_MINUTES" "10" "240")"
+    SSH_IP_DETECT_TIMEOUT_SECONDS="$(timed_number_input "Enter VM IPv4 detection timeout in seconds" "$SSH_IP_DETECT_TIMEOUT_SECONDS" "30" "600")"
 
-    start_installed_yn="$(timed_yes_no_quiet "Start installed Ubuntu VM after cleanup?" "y")"
+    start_installed_yn="$(timed_yes_no "Start installed Ubuntu VM after cleanup?" "y")"
     [[ "$start_installed_yn" =~ ^[Nn] ]] && POST_INSTALL_START_VM="n" || POST_INSTALL_START_VM="y"
+    clear_terminal_lines 3
 }
 
 # --- 45. UBUNTU ISO SELECTION ---
@@ -2239,14 +2258,13 @@ select_ubuntu_iso() {
         list_lines=$((list_lines + 1))
     done
 
-    iso_index="$(timed_number_input_quiet "Select Ubuntu ISO number" "$default_iso_index" "1" "${#ISOS[@]}")"
-    clear_terminal_lines "$list_lines"
+    iso_index="$(timed_number_input "Select Ubuntu ISO number" "$default_iso_index" "1" "${#ISOS[@]}")"
+    clear_terminal_lines "$((list_lines + 1))"
     INSTALL_ISO_PATH="${ISOS[$((iso_index-1))]}"
     INSTALL_ISO_REF="local:iso/$(basename "$INSTALL_ISO_PATH")"
 
     set_autoinstall_iso_paths
     detect_missing_iso_tools
-    echo ""
     install_options_summary
 }
 
@@ -2281,7 +2299,7 @@ verify_reused_generated_iso() {
     fi
 
     msg_ok "Existing generated ISO check complete."
-    detail_line "Generated ISO" "$AUTOINSTALL_ISO_REF"
+    detail_line "Generated ISO" "$(display_iso_ref "$AUTOINSTALL_ISO_REF")"
 
     if command -v xorriso >/dev/null 2>&1; then
         msg_info "Quick-checking reused ISO boot data"
@@ -2458,7 +2476,7 @@ build_generated_iso() {
         msg_error "Generated Ubuntu autoinstall ISO was not created."
     fi
 
-    msg_ok "Generated autoinstall ISO created. (${AUTOINSTALL_ISO_REF})"
+    msg_ok "Generated autoinstall ISO created. ($(display_iso_ref "$AUTOINSTALL_ISO_REF"))"
 }
 
 # --- 55. VERIFY GENERATED ISO ---
@@ -2525,7 +2543,7 @@ show_apply_summary() {
     group_heading "VM"
     group_answer_line "Target" "${TARGET_VM_NAME} (${TARGET_VMID})"
     group_status_line "Action" "wipe disk and install Ubuntu" "$YW"
-    group_answer_line "Shutdown before apply" "$(vm_shutdown_display)"
+    group_status_line "Shutdown needed" "$(vm_shutdown_display)"
     group_answer_line "Start after cleanup" "$(yn_word "$POST_INSTALL_START_VM")"
     echo ""
 
@@ -2536,8 +2554,8 @@ show_apply_summary() {
     echo ""
 
     group_heading "ISO"
-    group_answer_line "Source" "$INSTALL_ISO_REF"
-    group_answer_line "Generated" "$AUTOINSTALL_ISO_REF"
+    group_answer_line "Source" "$(display_iso_ref "$INSTALL_ISO_REF")"
+    group_status_line "Generated" "$(display_iso_ref "$AUTOINSTALL_ISO_REF")"
     group_status_line "Missing tools" "$(missing_iso_tools_display)"
     group_status_line "Tool action" "$(iso_tool_action_display)"
     echo ""
@@ -2761,7 +2779,7 @@ show_generated_iso_only_summary() {
     section "GENERATED ISO READY"
 
     status_line "VM" "${TARGET_VMID} / ${TARGET_VM_NAME}" "$GN" 16
-    status_line "Generated ISO" "${AUTOINSTALL_ISO_REF}" "$GN" 16
+    status_line "Generated ISO" "$(display_iso_ref "$AUTOINSTALL_ISO_REF")" "$GN" 16
     status_line "Host path" "${AUTOINSTALL_ISO_PATH}" "$GN" 16
     echo ""
     echo -e "${YW}The ISO was generated and verified but was not attached or started.${CL}"
@@ -2951,8 +2969,8 @@ demo_post_install_options() {
 
 demo_iso_selection() {
     section "ISO SELECTION"
-    demo_line "source ISO: ${INSTALL_ISO_REF}"
-    demo_line "generated ISO: ${AUTOINSTALL_ISO_REF}"
+    demo_line "source ISO: $(display_iso_ref "$INSTALL_ISO_REF")"
+    demo_line "generated ISO: $(display_iso_ref "$AUTOINSTALL_ISO_REF")"
 }
 
 demo_ubuntu_pro_note() {
@@ -3004,8 +3022,8 @@ demo_ready_to_apply() {
     echo ""
 
     echo -e "${YW}ISO:${CL}"
-    echo -e "  source: ${GN}${INSTALL_ISO_REF}${CL}"
-    echo -e "  generated: ${GN}${AUTOINSTALL_ISO_REF}${CL}"
+    echo -e "  source: ${GN}$(display_iso_ref "$INSTALL_ISO_REF")${CL}"
+    echo -e "  generated: ${GN}$(display_iso_ref "$AUTOINSTALL_ISO_REF")${CL}"
     echo -e "  generated ISO action: ${GN}${GENERATED_ISO_ACTION}${CL}"
     echo -e "  missing ISO tools: ${GN}$(missing_iso_tools_display)${CL}"
     echo -e "  install missing ISO tools: ${GN}$(install_missing_tools_display)${CL}"
