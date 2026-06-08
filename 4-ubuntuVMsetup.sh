@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.9"
+SCRIPT_VERSION="v2.1.10"
 SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="crowdsec-install-parity"
+SCRIPT_BUILD="crowdsec-options-plan-ui"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -63,6 +63,7 @@ VERIFY_FIRST_ISSUE_REASON=""
 VERIFY_FIRST_ISSUE_FIX=""
 COMPLETED_MARKER="/root/.ubuntu-vm-setup-completed"
 
+HOSTNAME_SHORT="$(hostname -s 2>/dev/null || echo ubuntu-vm)"
 DEFAULT_USERNAME="${DEFAULT_USERNAME:-orik}"
 
 SUDO_CMD=""
@@ -90,6 +91,10 @@ INSTALL_QEMU_AGENT="y"
 EXPAND_ROOT_LVM="y"
 CONFIGURE_UFW="y"
 ENABLE_CROWDSEC="y"
+CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
+CROWDSEC_CONSOLE_ENROLLMENT="no"
+CROWDSEC_CONSOLE_ENGINE_NAME=""
+CROWDSEC_CONSOLE_ENROLLMENT_KEY=""
 APPLY_SSH_HARDENING="y"
 RUN_SYSTEM_CLEANUP="y"
 REBOOT_AFTER_FINISH="y"
@@ -219,6 +224,14 @@ function detail_line() {
     local label="${1:-}"
     local value="${2:-}"
     echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+}
+
+function plan_line() {
+    local label="${1:-}"
+    local value="${2:-}"
+    local color="${3:-$GN}"
+
+    printf '  %b%-18s%b %b%s%b\n' "$BL" "${label}:" "$CL" "$color" "$value" "$CL"
 }
 
 # --- 6. TTY PRINT HELPERS ---
@@ -817,8 +830,7 @@ function previous_marker_action_menu() {
             IFS= read -r action || action=""
         fi
 
-        action="$(printf '%s' "$action" | tr -d '
-' | xargs || true)"
+        action="$(printf '%s' "$action" | tr -d '\r\n' | xargs || true)"
         [ -z "$action" ] && action="1"
 
         case "$action" in
@@ -1143,6 +1155,10 @@ function collect_ubuntu_pro_inputs() {
 
 # --- 32. SYSTEM ACTION INPUTS ---
 function collect_system_action_inputs() {
+    local crowdsec_yn=""
+    local enroll_yn=""
+    local engine_name=""
+
     echo ""
     echo -e "${YW}System:${CL}"
 
@@ -1158,6 +1174,46 @@ function collect_system_action_inputs() {
         CONFIGURE_UFW="$(timed_yes_no "Install and enable UFW firewall baseline?" "y")"
     fi
 
+    echo ""
+    echo -e "${YW}CrowdSec:${CL}"
+    crowdsec_yn="$(timed_yes_no "Install CrowdSec security agent?" "y")"
+
+    if [[ "$crowdsec_yn" =~ ^[Nn] ]]; then
+        ENABLE_CROWDSEC="n"
+        CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
+        CROWDSEC_CONSOLE_ENROLLMENT="skipped"
+        CROWDSEC_PACKAGE_INSTALLED="skipped"
+        CROWDSEC_SERVICE_STATUS="skipped"
+        CROWDSEC_COLLECTIONS_STATUS="skipped"
+        CROWDSEC_BOUNCER_STATUS="skipped"
+    else
+        ENABLE_CROWDSEC="y"
+        CROWDSEC_CONSOLE_ENGINE_NAME="ubuntu-${HOSTNAME_SHORT}"
+        enroll_yn="$(timed_yes_no "Attach CrowdSec console/enrollment token?" "n")"
+        if [[ "$enroll_yn" =~ ^[Yy] ]]; then
+            CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="yes"
+            CROWDSEC_CONSOLE_ENROLLMENT="requested"
+            engine_name="$(timed_text_input "Enter CrowdSec Console engine name" "$CROWDSEC_CONSOLE_ENGINE_NAME")"
+            CROWDSEC_CONSOLE_ENGINE_NAME="${engine_name:-$CROWDSEC_CONSOLE_ENGINE_NAME}"
+
+            disable_logging
+            CROWDSEC_CONSOLE_ENROLLMENT_KEY="$(sensitive_line_input "Paste CrowdSec Console enrollment key")"
+            enable_logging
+
+            CROWDSEC_CONSOLE_ENROLLMENT_KEY="$(printf '%s' "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [ -z "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" ]; then
+                CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
+                CROWDSEC_CONSOLE_ENROLLMENT="skipped-empty-token"
+                msg_warn "CrowdSec Console enrollment key was empty; enrollment will be skipped"
+            else
+                msg_ok "CrowdSec enrollment token captured"
+            fi
+        else
+            CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="no"
+            CROWDSEC_CONSOLE_ENROLLMENT="skipped"
+        fi
+    fi
+
     RUN_SYSTEM_CLEANUP="$(timed_yes_no "Run package cleanup at the end?" "y")"
     REBOOT_AFTER_FINISH="$(timed_yes_no "Reboot automatically after setup finishes?" "y")"
 
@@ -1171,35 +1227,46 @@ function show_ready_summary_and_confirm() {
     section "SETUP PLAN"
 
     echo -e "${YW}User / SSH:${CL}"
-    echo -e "  ${BL}Username:${CL} ${ANS}${USERNAME}${CL}"
-    echo -e "  ${BL}Existing user:${CL} ${ANS}${EXISTING_USER}${CL}"
-    echo -e "  ${BL}SSH key source:${CL} ${ANS}${SOURCE_KEYS:-none detected}${CL}"
-    echo -e "  ${BL}Lock password login:${CL} ${ANS}$(yes_no_label "$LOCK_USER_PASSWORD")${CL}"
-    echo -e "  ${BL}SSH hardening:${CL} ${ANS}$(yes_no_label "$APPLY_SSH_HARDENING")${CL}"
+    plan_line "Username" "$USERNAME" "$ANS"
+    plan_line "Existing user" "$EXISTING_USER" "$GN"
+    plan_line "SSH key source" "${SOURCE_KEYS:-none detected}" "$GN"
+    plan_line "Lock password" "$(yes_no_label "$LOCK_USER_PASSWORD")" "$ANS"
+    plan_line "SSH hardening" "$(yes_no_label "$APPLY_SSH_HARDENING")" "$ANS"
     if [ "$IS_CONTAINER" == "yes" ]; then
-        echo -e "  ${BL}Environment:${CL} ${ANS}Container/LXC (${VIRT_TYPE})${CL}"
+        plan_line "Environment" "Container/LXC (${VIRT_TYPE})" "$GN"
     else
-        echo -e "  ${BL}Environment:${CL} ${ANS}VM (${VIRT_TYPE})${CL}"
+        plan_line "Environment" "VM (${VIRT_TYPE})" "$GN"
     fi
 
     echo ""
     echo -e "${YW}Ubuntu Pro:${CL}"
-    echo -e "  ${BL}Attach:${CL} ${ANS}$(yes_no_label "$ATTACH_UBUNTU_PRO")${CL}"
+    plan_line "Attach" "$(yes_no_label "$ATTACH_UBUNTU_PRO")" "$ANS"
     if [[ "$ATTACH_UBUNTU_PRO" =~ ^[Yy] ]]; then
-        echo -e "  ${BL}ESM Apps:${CL} ${ANS}$(yes_no_label "$ENABLE_ESM_APPS")${CL}"
-        echo -e "  ${BL}ESM Infra:${CL} ${ANS}$(yes_no_label "$ENABLE_ESM_INFRA")${CL}"
-        echo -e "  ${BL}Livepatch:${CL} ${ANS}$(yes_no_label "$ENABLE_LIVEPATCH")${CL}"
+        plan_line "ESM Apps" "$(yes_no_label "$ENABLE_ESM_APPS")" "$ANS"
+        plan_line "ESM Infra" "$(yes_no_label "$ENABLE_ESM_INFRA")" "$ANS"
+        plan_line "Livepatch" "$(yes_no_label "$ENABLE_LIVEPATCH")" "$ANS"
     fi
 
     echo ""
     echo -e "${YW}System:${CL}"
-    echo -e "  ${BL}Upgrade:${CL} ${ANS}$(yes_no_label "$RUN_SYSTEM_UPDATE")${CL}"
-    echo -e "  ${BL}QEMU guest agent:${CL} ${ANS}$(yes_no_label "$INSTALL_QEMU_AGENT")${CL}"
-    echo -e "  ${BL}Root expansion:${CL} ${ANS}$(yes_no_label "$EXPAND_ROOT_LVM")${CL}"
-    echo -e "  ${BL}UFW firewall:${CL} ${ANS}$(yes_no_label "$CONFIGURE_UFW")${CL}"
-    echo -e "  ${BL}CrowdSec:${CL} ${ANS}install${CL}"
-    echo -e "  ${BL}Cleanup:${CL} ${ANS}$(yes_no_label "$RUN_SYSTEM_CLEANUP")${CL}"
-    echo -e "  ${BL}Reboot:${CL} ${ANS}$(yes_no_label "$REBOOT_AFTER_FINISH")${CL}"
+    plan_line "Upgrade" "$(yes_no_label "$RUN_SYSTEM_UPDATE")" "$ANS"
+    plan_line "QEMU agent" "$(yes_no_label "$INSTALL_QEMU_AGENT")" "$ANS"
+    plan_line "Root expansion" "$(yes_no_label "$EXPAND_ROOT_LVM")" "$ANS"
+    plan_line "UFW firewall" "$(yes_no_label "$CONFIGURE_UFW")" "$ANS"
+    plan_line "Cleanup" "$(yes_no_label "$RUN_SYSTEM_CLEANUP")" "$ANS"
+    plan_line "Reboot" "$(yes_no_label "$REBOOT_AFTER_FINISH")" "$ANS"
+
+    echo ""
+    echo -e "${YW}CrowdSec:${CL}"
+    if [ "$ENABLE_CROWDSEC" == "y" ]; then
+        plan_line "Install" "yes" "$ANS"
+        plan_line "Collections" "linux, sshd, http-cve" "$GN"
+        plan_line "Bouncer" "firewall" "$GN"
+        plan_line "Console attach" "$(yes_no_label "$CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED")" "$ANS"
+    else
+        plan_line "Install" "no" "$ANS"
+        plan_line "Action" "skipped" "$GN"
+    fi
 
     echo ""
     echo -e "${YW}After confirmation, Ubuntu VM setup changes will be applied.${CL}"
@@ -1697,6 +1764,59 @@ function install_crowdsec_collection_if_missing() {
     crowdsec_collection_installed "$collection"
 }
 
+function enroll_crowdsec_console() {
+    local err_file=""
+
+    if [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" != "yes" ]; then
+        CROWDSEC_CONSOLE_ENROLLMENT="skipped"
+        return 0
+    fi
+
+    if ! command -v cscli >/dev/null 2>&1; then
+        CROWDSEC_CONSOLE_ENROLLMENT="unavailable"
+        CROWDSEC_CONSOLE_ENROLLMENT_KEY=""
+        unset CROWDSEC_CONSOLE_ENROLLMENT_KEY || true
+        msg_warn "cscli not found; CrowdSec Console enrollment skipped"
+        return 0
+    fi
+
+    if [ -z "${CROWDSEC_CONSOLE_ENROLLMENT_KEY:-}" ]; then
+        CROWDSEC_CONSOLE_ENROLLMENT="skipped-empty-token"
+        unset CROWDSEC_CONSOLE_ENROLLMENT_KEY || true
+        msg_warn "CrowdSec Console enrollment was selected but no token is available"
+        return 0
+    fi
+
+    CROWDSEC_CONSOLE_ENGINE_NAME="${CROWDSEC_CONSOLE_ENGINE_NAME:-ubuntu-${HOSTNAME_SHORT}}"
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    msg_info "Enrolling CrowdSec engine in Console as ${CROWDSEC_CONSOLE_ENGINE_NAME}"
+    if [ -n "$SUDO_CMD" ]; then
+        if "$SUDO_CMD" cscli console enroll --name "$CROWDSEC_CONSOLE_ENGINE_NAME" "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" >/dev/null 2> "$err_file"; then
+            CROWDSEC_CONSOLE_ENROLLMENT="pending"
+            msg_ok "CROWDSEC CONSOLE ENROLLMENT REQUESTED"
+            run_optional cscli console enable --all
+        else
+            CROWDSEC_CONSOLE_ENROLLMENT="failed"
+            msg_warn "CrowdSec Console enrollment failed; review cscli console status manually"
+        fi
+    else
+        if cscli console enroll --name "$CROWDSEC_CONSOLE_ENGINE_NAME" "$CROWDSEC_CONSOLE_ENROLLMENT_KEY" >/dev/null 2> "$err_file"; then
+            CROWDSEC_CONSOLE_ENROLLMENT="pending"
+            msg_ok "CROWDSEC CONSOLE ENROLLMENT REQUESTED"
+            run_optional cscli console enable --all
+        else
+            CROWDSEC_CONSOLE_ENROLLMENT="failed"
+            msg_warn "CrowdSec Console enrollment failed; review cscli console status manually"
+        fi
+    fi
+
+    CROWDSEC_CONSOLE_ENROLLMENT_KEY=""
+    unset CROWDSEC_CONSOLE_ENROLLMENT_KEY || true
+    rm -f "$err_file"
+}
+
 function apply_crowdsec_security() {
     apply_group_header "CrowdSec"
 
@@ -1704,6 +1824,8 @@ function apply_crowdsec_security() {
         CROWDSEC_PACKAGE_INSTALLED="skipped"
         CROWDSEC_SERVICE_STATUS="skipped"
         CROWDSEC_COLLECTIONS_STATUS="skipped"
+        CROWDSEC_BOUNCER_STATUS="skipped"
+        CROWDSEC_CONSOLE_ENROLLMENT="skipped"
         msg_skip "CROWDSEC SECURITY SUITE SKIPPED"
         return 0
     fi
@@ -1805,6 +1927,8 @@ function apply_crowdsec_security() {
         msg_warn "CrowdSec firewall bouncer service was not found after install"
     fi
 
+    enroll_crowdsec_console
+
     msg_info "Writing unattended-upgrades config"
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" bash -c "cat > /etc/apt/apt.conf.d/20auto-upgrades" <<'EOF_AUTO_UPGRADES'
@@ -1870,6 +1994,9 @@ System Updated: $SYSTEM_UPDATED
 QEMU Agent: $QEMU_AGENT_INSTALLED
 Root Expanded: $ROOT_EXPANDED
 UFW: $UFW_ENABLED
+CrowdSec Selected: $(yes_no_label "$ENABLE_CROWDSEC")
+CrowdSec Console Attach: $CROWDSEC_CONSOLE_ENROLLMENT
+CrowdSec Console Engine Name: ${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
 CrowdSec Package: $CROWDSEC_PACKAGE_INSTALLED
 CrowdSec Service: $CROWDSEC_SERVICE_STATUS
 CrowdSec Collections: $CROWDSEC_COLLECTIONS_STATUS
@@ -1890,6 +2017,9 @@ SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-dis
 SCRIPT4_USERNAME=$USERNAME
 SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
 SCRIPT4_UFW_ENABLED=$UFW_ENABLED
+SCRIPT4_CROWDSEC_SELECTED=$(yes_no_label "$ENABLE_CROWDSEC")
+SCRIPT4_CROWDSEC_CONSOLE_ATTACH=$CROWDSEC_CONSOLE_ENROLLMENT
+SCRIPT4_CROWDSEC_CONSOLE_ENGINE_NAME=${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
 SCRIPT4_CROWDSEC_PACKAGE=$CROWDSEC_PACKAGE_INSTALLED
 SCRIPT4_CROWDSEC_SERVICE=$CROWDSEC_SERVICE_STATUS
 SCRIPT4_CROWDSEC_COLLECTIONS=$CROWDSEC_COLLECTIONS_STATUS
@@ -1918,6 +2048,9 @@ System Updated: $SYSTEM_UPDATED
 QEMU Agent: $QEMU_AGENT_INSTALLED
 Root Expanded: $ROOT_EXPANDED
 UFW: $UFW_ENABLED
+CrowdSec Selected: $(yes_no_label "$ENABLE_CROWDSEC")
+CrowdSec Console Attach: $CROWDSEC_CONSOLE_ENROLLMENT
+CrowdSec Console Engine Name: ${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
 CrowdSec Package: $CROWDSEC_PACKAGE_INSTALLED
 CrowdSec Service: $CROWDSEC_SERVICE_STATUS
 CrowdSec Collections: $CROWDSEC_COLLECTIONS_STATUS
@@ -1938,6 +2071,9 @@ SCRIPT4_POST_REBOOT_DISPLAY_MARKER=/home/${USERNAME}/.ubuntu-vm-setup-verify-dis
 SCRIPT4_USERNAME=$USERNAME
 SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED
 SCRIPT4_UFW_ENABLED=$UFW_ENABLED
+SCRIPT4_CROWDSEC_SELECTED=$(yes_no_label "$ENABLE_CROWDSEC")
+SCRIPT4_CROWDSEC_CONSOLE_ATTACH=$CROWDSEC_CONSOLE_ENROLLMENT
+SCRIPT4_CROWDSEC_CONSOLE_ENGINE_NAME=${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}
 SCRIPT4_CROWDSEC_PACKAGE=$CROWDSEC_PACKAGE_INSTALLED
 SCRIPT4_CROWDSEC_SERVICE=$CROWDSEC_SERVICE_STATUS
 SCRIPT4_CROWDSEC_COLLECTIONS=$CROWDSEC_COLLECTIONS_STATUS
@@ -2095,41 +2231,60 @@ function create_verification_report() {
     fi
 
 
-    if command -v crowdsec >/dev/null 2>&1 && command -v cscli >/dev/null 2>&1; then
-        CROWDSEC_PACKAGE_INSTALLED="installed"
-        verify_pass "CrowdSec package installed"
+    if [ "$ENABLE_CROWDSEC" != "y" ]; then
+        CROWDSEC_PACKAGE_INSTALLED="skipped"
+        CROWDSEC_SERVICE_STATUS="skipped"
+        CROWDSEC_COLLECTIONS_STATUS="skipped"
+        CROWDSEC_BOUNCER_STATUS="skipped"
+        CROWDSEC_CONSOLE_ENROLLMENT="skipped"
+        verify_info "CrowdSec skipped by user choice"
     else
-        CROWDSEC_PACKAGE_INSTALLED="missing"
-        verify_warn "CrowdSec package" "crowdsec/cscli command not found" "rerun Script 4 CrowdSec setup or install crowdsec"
-    fi
-
-    if systemctl is-enabled --quiet crowdsec 2>/dev/null; then
-        verify_pass "CrowdSec service enabled"
-    else
-        verify_warn "CrowdSec service enabled" "service is not enabled" "run sudo systemctl enable --now crowdsec"
-    fi
-
-    if systemctl is-active --quiet crowdsec 2>/dev/null; then
-        CROWDSEC_SERVICE_STATUS="active"
-        verify_pass "CrowdSec service active"
-    else
-        CROWDSEC_SERVICE_STATUS="not-active"
-        verify_warn "CrowdSec service active" "service is not active" "run sudo systemctl status crowdsec"
-    fi
-
-    if command -v cscli >/dev/null 2>&1; then
-        if crowdsec_collection_installed 'crowdsecurity/linux' && \
-           crowdsec_collection_installed 'crowdsecurity/sshd' && \
-           crowdsec_collection_installed 'crowdsecurity/http-cve'; then
-            CROWDSEC_COLLECTIONS_STATUS="ready"
-            verify_pass "CrowdSec collections ready"
+        if command -v crowdsec >/dev/null 2>&1 && command -v cscli >/dev/null 2>&1; then
+            CROWDSEC_PACKAGE_INSTALLED="installed"
+            verify_pass "CrowdSec package installed"
         else
-            CROWDSEC_COLLECTIONS_STATUS="partial"
-            verify_warn "CrowdSec collections" "baseline linux/sshd/http-cve collections not fully confirmed" "run sudo cscli collections list"
+            CROWDSEC_PACKAGE_INSTALLED="missing"
+            verify_warn "CrowdSec package" "crowdsec/cscli command not found" "rerun Script 4 CrowdSec setup or install crowdsec"
         fi
-    else
-        CROWDSEC_COLLECTIONS_STATUS="unavailable"
-        verify_warn "CrowdSec collections" "cscli is unavailable" "install crowdsec and rerun verification"
+
+        if systemctl is-enabled --quiet crowdsec 2>/dev/null; then
+            verify_pass "CrowdSec service enabled"
+        else
+            verify_warn "CrowdSec service enabled" "service is not enabled" "run sudo systemctl enable --now crowdsec"
+        fi
+
+        if systemctl is-active --quiet crowdsec 2>/dev/null; then
+            CROWDSEC_SERVICE_STATUS="active"
+            verify_pass "CrowdSec service active"
+        else
+            CROWDSEC_SERVICE_STATUS="not-active"
+            verify_warn "CrowdSec service active" "service is not active" "run sudo systemctl status crowdsec"
+        fi
+
+        if command -v cscli >/dev/null 2>&1; then
+            if crowdsec_collection_installed 'crowdsecurity/linux' && \
+               crowdsec_collection_installed 'crowdsecurity/sshd' && \
+               crowdsec_collection_installed 'crowdsecurity/http-cve'; then
+                CROWDSEC_COLLECTIONS_STATUS="ready"
+                verify_pass "CrowdSec collections ready"
+            else
+                CROWDSEC_COLLECTIONS_STATUS="partial"
+                verify_warn "CrowdSec collections" "baseline linux/sshd/http-cve collections not fully confirmed" "run sudo cscli collections list"
+            fi
+        else
+            CROWDSEC_COLLECTIONS_STATUS="unavailable"
+            verify_warn "CrowdSec collections" "cscli is unavailable" "install crowdsec and rerun verification"
+        fi
+
+        if [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" == "yes" ]; then
+            case "${CROWDSEC_CONSOLE_ENROLLMENT:-unknown}" in
+                pending|attached|already-attached) verify_pass "CrowdSec Console enrollment requested" ;;
+                failed) verify_warn "CrowdSec Console enrollment" "enrollment failed" "review sudo cscli console status" ;;
+                *) verify_info "CrowdSec Console enrollment state: ${CROWDSEC_CONSOLE_ENROLLMENT:-unknown}" ;;
+            esac
+        else
+            verify_info "CrowdSec Console enrollment skipped"
+        fi
     fi
 
     if [[ "$RUN_SYSTEM_CLEANUP" =~ ^[Yy] ]]; then
@@ -2226,6 +2381,9 @@ function load_state_from_completion_marker() {
     value="$(marker_value_or_unknown_for_display "Ubuntu Pro Attached" "$marker_file")"; [ "$value" != "unknown" ] && UBUNTU_PRO_ATTACHED="$value"
     value="$(marker_value_or_unknown_for_display "System Updated" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_UPDATED="$value"
     value="$(marker_value_or_unknown_for_display "System Cleaned" "$marker_file")"; [ "$value" != "unknown" ] && SYSTEM_CLEANED="$value"
+    value="$(marker_value_or_unknown_for_display "CrowdSec Selected" "$marker_file")"; [ "$value" != "unknown" ] && { if [ "$value" == "yes" ]; then ENABLE_CROWDSEC="y"; else ENABLE_CROWDSEC="n"; fi; }
+    value="$(marker_value_or_unknown_for_display "CrowdSec Console Attach" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_CONSOLE_ENROLLMENT="$value"
+    value="$(marker_value_or_unknown_for_display "CrowdSec Console Engine Name" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_CONSOLE_ENGINE_NAME="$value"
     value="$(marker_value_or_unknown_for_display "CrowdSec Package" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_PACKAGE_INSTALLED="$value"
     value="$(marker_value_or_unknown_for_display "CrowdSec Service" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_SERVICE_STATUS="$value"
     value="$(marker_value_or_unknown_for_display "CrowdSec Collections" "$marker_file")"; [ "$value" != "unknown" ] && CROWDSEC_COLLECTIONS_STATUS="$value"
@@ -2239,6 +2397,8 @@ function load_state_from_completion_marker() {
     if [ "$UBUNTU_PRO_ATTACHED" == "yes" ] || [ "$UBUNTU_PRO_ATTACHED" == "already-attached" ]; then ATTACH_UBUNTU_PRO="y"; else ATTACH_UBUNTU_PRO="n"; fi
     if [ "$SYSTEM_UPDATED" == "yes" ]; then RUN_SYSTEM_UPDATE="y"; else RUN_SYSTEM_UPDATE="n"; fi
     if [ "$SYSTEM_CLEANED" == "yes" ]; then RUN_SYSTEM_CLEANUP="y"; else RUN_SYSTEM_CLEANUP="n"; fi
+    if [ "$CROWDSEC_PACKAGE_INSTALLED" == "skipped" ] || [ "$CROWDSEC_SERVICE_STATUS" == "skipped" ]; then ENABLE_CROWDSEC="n"; fi
+    if [ "$CROWDSEC_CONSOLE_ENROLLMENT" == "pending" ] || [ "$CROWDSEC_CONSOLE_ENROLLMENT" == "failed" ]; then CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED="yes"; fi
 
     ROOT_FS_BEFORE_GB="$(get_root_filesystem_size_gb)"
     ROOT_FS_AFTER_GB="$ROOT_FS_BEFORE_GB"
@@ -2312,6 +2472,7 @@ function write_verify_display_log() {
         echo -e "  ${BL}Service:${CL} ${GN}${CROWDSEC_SERVICE_STATUS}${CL}"
         echo -e "  ${BL}Collections:${CL} ${GN}${CROWDSEC_COLLECTIONS_STATUS}${CL}"
         echo -e "  ${BL}Bouncer:${CL} ${GN}${CROWDSEC_BOUNCER_STATUS}${CL}"
+        echo -e "  ${BL}Console attach:${CL} ${GN}${CROWDSEC_CONSOLE_ENROLLMENT}${CL}"
         echo ""
         echo -e "${YW}Storage:${CL}"
         echo -e "  ${BL}Root filesystem:${CL} ${GN}${ROOT_FS_AFTER_GB}${CL}"
@@ -2431,6 +2592,9 @@ function update_completion_marker_script4_fields() {
         echo "SCRIPT4_USERNAME=$USERNAME"
         echo "SCRIPT4_ROOT_EXPANDED=$ROOT_EXPANDED"
         echo "SCRIPT4_UFW_ENABLED=$UFW_ENABLED"
+        echo "SCRIPT4_CROWDSEC_SELECTED=$(yes_no_label "$ENABLE_CROWDSEC")"
+        echo "SCRIPT4_CROWDSEC_CONSOLE_ATTACH=$CROWDSEC_CONSOLE_ENROLLMENT"
+        echo "SCRIPT4_CROWDSEC_CONSOLE_ENGINE_NAME=${CROWDSEC_CONSOLE_ENGINE_NAME:-not-set}"
         echo "SCRIPT4_CROWDSEC_PACKAGE=$CROWDSEC_PACKAGE_INSTALLED"
         echo "SCRIPT4_CROWDSEC_SERVICE=$CROWDSEC_SERVICE_STATUS"
         echo "SCRIPT4_CROWDSEC_COLLECTIONS=$CROWDSEC_COLLECTIONS_STATUS"
