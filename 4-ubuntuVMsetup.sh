@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.21"
+SCRIPT_VERSION="v2.1.22"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="apt-lock-wait-polish"
+SCRIPT_BUILD="apt-lock-false-positive-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -330,41 +330,71 @@ function command_needs_apt_lock_wait() {
     return 1
 }
 
-function apt_lock_is_busy() {
-    local lock_file=""
-    local lock_files=(
-        /var/lib/dpkg/lock-frontend
-        /var/lib/dpkg/lock
-        /var/cache/apt/archives/lock
+function apt_lock_files() {
+    printf '%s\n' \
+        /var/lib/dpkg/lock-frontend \
+        /var/lib/dpkg/lock \
+        /var/cache/apt/archives/lock \
         /var/lib/apt/lists/lock
-    )
-    local proc=""
-    local processes=(
-        unattended-upgr
-        unattended-upgrade
-        apt
-        apt-get
-        dpkg
-    )
+}
+
+function apt_lock_holder_pids() {
+    local lock_file=""
+    local pids=""
+
+    command -v fuser >/dev/null 2>&1 || return 0
+
+    while IFS= read -r lock_file; do
+        [ -e "$lock_file" ] || continue
+
+        if [ -n "$SUDO_CMD" ]; then
+            pids="$($SUDO_CMD fuser "$lock_file" 2>/dev/null || true)"
+        else
+            pids="$(fuser "$lock_file" 2>/dev/null || true)"
+        fi
+
+        printf '%s\n' "$pids"
+    done < <(apt_lock_files) | tr ' ' '\n' | awk 'NF && $0 ~ /^[0-9]+$/ {print}' | sort -u
+}
+
+function apt_lock_is_busy() {
+    local holder_pids=""
+
+    # Only real lock-file holders block Script 4. Idle helpers such as
+    # unattended-upgrade-shutdown --wait-for-signal must not count unless they
+    # actually hold one of the apt/dpkg lock files.
+    holder_pids="$(apt_lock_holder_pids || true)"
+    [ -n "$holder_pids" ]
+}
+
+function show_apt_lock_diagnostics() {
+    local lock_file=""
+    local holder_pids=""
+    local pid_list=""
+
+    echo ""
+    echo -e "${YW}APT/DPKG lock holder diagnostics:${CL}"
 
     if command -v fuser >/dev/null 2>&1; then
-        for lock_file in "${lock_files[@]}"; do
+        while IFS= read -r lock_file; do
             [ -e "$lock_file" ] || continue
+            echo -e "${BL}${lock_file}:${CL}"
             if [ -n "$SUDO_CMD" ]; then
-                "$SUDO_CMD" fuser "$lock_file" >/dev/null 2>&1 && return 0
+                "$SUDO_CMD" fuser -v "$lock_file" 2>&1 || true
             else
-                fuser "$lock_file" >/dev/null 2>&1 && return 0
+                fuser -v "$lock_file" 2>&1 || true
             fi
-        done
+        done < <(apt_lock_files)
+    else
+        echo -e "${YW}fuser is unavailable; lock holder details cannot be listed.${CL}"
     fi
 
-    if command -v pgrep >/dev/null 2>&1; then
-        for proc in "${processes[@]}"; do
-            pgrep -x "$proc" >/dev/null 2>&1 && return 0
-        done
+    holder_pids="$(apt_lock_holder_pids || true)"
+    if [ -n "$holder_pids" ]; then
+        pid_list="$(printf '%s\n' "$holder_pids" | paste -sd, -)"
+        echo -e "${BL}Processes:${CL}"
+        ps -fp "$pid_list" 2>/dev/null || true
     fi
-
-    return 1
 }
 
 function wait_for_apt_locks() {
@@ -375,14 +405,19 @@ function wait_for_apt_locks() {
 
     while apt_lock_is_busy; do
         if [ "$printed" != "yes" ]; then
+            echo ""
             msg_info "Waiting for apt/dpkg lock"
             printed="yes"
+        elif [ "$(( elapsed % 30 ))" -eq 0 ] && [ "$elapsed" -gt 0 ]; then
+            echo ""
+            msg_info "Waiting for apt/dpkg lock... ${elapsed}s elapsed"
         fi
 
         if [ "$elapsed" -ge "$max_seconds" ]; then
             if [ "$printed" == "yes" ]; then
                 msg_warn "APT/DPKG LOCK TIMEOUT"
             fi
+            show_apt_lock_diagnostics
             return 1
         fi
 
