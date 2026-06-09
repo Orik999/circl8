@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.19"
+SCRIPT_VERSION="v2.1.20"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="crowdsec-bouncer-api-key-repair"
+SCRIPT_BUILD="crowdsec-managed-bouncer-cleanup"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -113,6 +113,7 @@ CROWDSEC_SERVICE_STATUS="no"
 CROWDSEC_COLLECTIONS_STATUS="no"
 CROWDSEC_BOUNCER_PACKAGE="none"
 CROWDSEC_BOUNCER_STATUS="none"
+CROWDSEC_MANAGED_BOUNCER_NAME="ubuntu-firewall-bouncer"
 UNATTENDED_UPGRADES_CONFIGURED="no"
 ROOT_EXPANDED="no"
 UBUNTU_PRO_ATTACHED="no"
@@ -2303,7 +2304,7 @@ function write_crowdsec_firewall_bouncer_api_key() {
 }
 
 function create_crowdsec_firewall_bouncer_api_key() {
-    local managed_name="ubuntu-firewall-bouncer"
+    local managed_name="${CROWDSEC_MANAGED_BOUNCER_NAME:-ubuntu-firewall-bouncer}"
     local new_key=""
 
     command -v cscli >/dev/null 2>&1 || return 1
@@ -2320,6 +2321,90 @@ function create_crowdsec_firewall_bouncer_api_key() {
     [ -n "$new_key" ] || return 1
 
     printf '%s' "$new_key"
+}
+
+
+function list_stale_crowdsec_firewall_bouncers() {
+    local list_output=""
+    local names=""
+
+    command -v cscli >/dev/null 2>&1 || return 0
+
+    if [ -n "$SUDO_CMD" ]; then
+        list_output="$($SUDO_CMD cscli bouncers list -o json 2>/dev/null || true)"
+    else
+        list_output="$(cscli bouncers list -o json 2>/dev/null || true)"
+    fi
+
+    if [ -n "$list_output" ]; then
+        names="$(printf '%s\n' "$list_output" | grep -Eo '"name"[[:space:]]*:[[:space:]]*"cs-firewall-bouncer-[^"]+"' | sed -E 's/^"name"[[:space:]]*:[[:space:]]*"([^"]+)"$/\1/' | grep -E '^cs-firewall-bouncer-[A-Za-z0-9._-]+$' | sort -u || true)"
+    fi
+
+    if [ -z "$names" ]; then
+        if [ -n "$SUDO_CMD" ]; then
+            list_output="$($SUDO_CMD cscli bouncers list 2>/dev/null || true)"
+        else
+            list_output="$(cscli bouncers list 2>/dev/null || true)"
+        fi
+        names="$(printf '%s\n' "$list_output" | grep -Eo 'cs-firewall-bouncer-[A-Za-z0-9._-]+' | sort -u || true)"
+    fi
+
+    printf '%s\n' "$names" | awk 'NF && $0 ~ /^cs-firewall-bouncer-[A-Za-z0-9._-]+$/ {print}' | sort -u
+}
+
+function crowdsec_bouncer_registration_exists() {
+    local wanted_name="${1:-}"
+    local list_output=""
+
+    [ -n "$wanted_name" ] || return 1
+    command -v cscli >/dev/null 2>&1 || return 1
+
+    if [ -n "$SUDO_CMD" ]; then
+        list_output="$($SUDO_CMD cscli bouncers list -o json 2>/dev/null || $SUDO_CMD cscli bouncers list 2>/dev/null || true)"
+    else
+        list_output="$(cscli bouncers list -o json 2>/dev/null || cscli bouncers list 2>/dev/null || true)"
+    fi
+
+    printf '%s\n' "$list_output" | grep -Eq '(^|[^A-Za-z0-9._-])'"$(printf '%s' "$wanted_name" | sed 's/[][\\.^$*+?{}|()]/\\&/g')"'([^A-Za-z0-9._-]|$)'
+}
+
+function cleanup_stale_crowdsec_firewall_bouncers() {
+    local stale_names=""
+    local stale_name=""
+    local cleaned_count="0"
+    local managed_name="${CROWDSEC_MANAGED_BOUNCER_NAME:-ubuntu-firewall-bouncer}"
+
+    command -v cscli >/dev/null 2>&1 || return 0
+
+    stale_names="$(list_stale_crowdsec_firewall_bouncers || true)"
+    [ -n "$stale_names" ] || return 0
+
+    while IFS= read -r stale_name; do
+        [ -n "$stale_name" ] || continue
+        [[ "$stale_name" =~ ^cs-firewall-bouncer-[A-Za-z0-9._-]+$ ]] || continue
+        [ "$stale_name" != "$managed_name" ] || continue
+
+        if [ -n "$SUDO_CMD" ]; then
+            "$SUDO_CMD" cscli bouncers delete "$stale_name" >/dev/null 2>&1 || true
+        else
+            cscli bouncers delete "$stale_name" >/dev/null 2>&1 || true
+        fi
+        cleaned_count="$(( cleaned_count + 1 ))"
+    done <<< "$stale_names"
+
+    if [ "$cleaned_count" -gt 0 ]; then
+        msg_ok "STALE CROWDSEC BOUNCERS CLEANED"
+    fi
+
+    return 0
+}
+
+function stale_crowdsec_firewall_bouncers_present() {
+    local stale_names=""
+
+    command -v cscli >/dev/null 2>&1 || return 1
+    stale_names="$(list_stale_crowdsec_firewall_bouncers || true)"
+    [ -n "$stale_names" ]
 }
 
 function validate_or_repair_crowdsec_bouncer_api_key() {
@@ -2504,6 +2589,8 @@ function ensure_crowdsec_firewall_bouncer() {
 
     if dpkg_package_configured "$chosen_package" && systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
         if validate_or_repair_crowdsec_bouncer_api_key && wait_for_crowdsec_firewall_bouncer_stable; then
+            msg_ok "CROWDSEC MANAGED BOUNCER READY"
+            cleanup_stale_crowdsec_firewall_bouncers || true
             return 0
         fi
     fi
@@ -2544,7 +2631,10 @@ function ensure_crowdsec_firewall_bouncer() {
     run_optional systemctl restart crowdsec-firewall-bouncer
     msg_ok "CROWDSEC FIREWALL BOUNCER START REQUESTED"
 
-    wait_for_crowdsec_firewall_bouncer_stable || true
+    if wait_for_crowdsec_firewall_bouncer_stable; then
+        msg_ok "CROWDSEC MANAGED BOUNCER READY"
+        cleanup_stale_crowdsec_firewall_bouncers || true
+    fi
 }
 
 function enroll_crowdsec_console() {
@@ -3079,6 +3169,18 @@ function create_verification_report() {
             verify_pass "CrowdSec bouncer active"
             verify_pass "CrowdSec bouncer API key authorized"
             verify_pass "CrowdSec bouncer stable"
+
+            if crowdsec_bouncer_registration_exists "${CROWDSEC_MANAGED_BOUNCER_NAME:-ubuntu-firewall-bouncer}"; then
+                verify_pass "CrowdSec managed bouncer registered"
+            else
+                verify_warn "CrowdSec managed bouncer" "${CROWDSEC_MANAGED_BOUNCER_NAME:-ubuntu-firewall-bouncer} registration not confirmed" "run sudo cscli bouncers list"
+            fi
+
+            if stale_crowdsec_firewall_bouncers_present; then
+                verify_warn "CrowdSec stale package bouncers" "cs-firewall-bouncer-* registrations remain" "run sudo cscli bouncers list and rerun Script 4 if needed"
+            else
+                verify_pass "CrowdSec stale package bouncers cleaned"
+            fi
         else
             [ "$CROWDSEC_BOUNCER_STATUS" == "active" ] && CROWDSEC_BOUNCER_STATUS="installed-not-active"
             [ "$CROWDSEC_BOUNCER_STATUS" == "none" ] && CROWDSEC_BOUNCER_STATUS="installed-not-active"
@@ -3238,8 +3340,8 @@ function write_verify_display_log() {
     fi
 
     user_lines="$(printf '%s\n' "$result_lines" | grep -E 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled' || true)"
-    system_lines="$(printf '%s\n' "$result_lines" | grep -E 'IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active|CrowdSec bouncer API key authorized|CrowdSec bouncer stable' || true)"
-    other_lines="$(printf '%s\n' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active|CrowdSec bouncer API key authorized|CrowdSec bouncer stable' || true)"
+    system_lines="$(printf '%s\n' "$result_lines" | grep -E 'IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active|CrowdSec bouncer API key authorized|CrowdSec bouncer stable|CrowdSec managed bouncer registered|CrowdSec stale package bouncers cleaned' || true)"
+    other_lines="$(printf '%s\n' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active|CrowdSec bouncer API key authorized|CrowdSec bouncer stable|CrowdSec managed bouncer registered|CrowdSec stale package bouncers cleaned' || true)"
 
     case "$VERIFY_STATUS" in
         PASS) status_color="$GN" ;;
