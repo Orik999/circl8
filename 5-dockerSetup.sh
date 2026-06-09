@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="5-dockerSetup.sh"
-SCRIPT_VERSION="v1.2.7"
+SCRIPT_VERSION="v1.2.8"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="handoff-summary-color-polish"
+SCRIPT_BUILD="crowdsec-runtime-verify-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log paths, user choices, environment state and final status values.
@@ -859,6 +859,88 @@ function docker_package_policy_mentions_official_repo() {
 
 function crowdsec_bouncer_substate() {
     systemctl show crowdsec-firewall-bouncer -p SubState --value 2>/dev/null || echo unknown
+}
+
+function crowdsec_firewall_bouncer_runtime_state() {
+    local active_state="unknown"
+    local sub_state="unknown"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        active_state="$(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || echo unknown)"
+        sub_state="$(crowdsec_bouncer_substate)"
+    fi
+
+    printf '%s/%s' "$active_state" "$sub_state"
+}
+
+function crowdsec_firewall_bouncer_runtime_stable_now() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null || return 1
+    [ "$(crowdsec_bouncer_substate)" == "running" ] || return 1
+
+    return 0
+}
+
+function wait_for_crowdsec_firewall_bouncer_runtime_stable() {
+    local report_file="${1:-}"
+    local timeout="180"
+    local interval="5"
+    local required_stable="30"
+    local waited="0"
+    local stable_for="0"
+    local runtime_state=""
+
+    [ -n "$report_file" ] && echo "- INFO - Waiting for CrowdSec firewall bouncer runtime stability" >> "$report_file"
+
+    while [ "$waited" -lt "$timeout" ]; do
+        runtime_state="$(crowdsec_firewall_bouncer_runtime_state)"
+
+        if crowdsec_firewall_bouncer_runtime_stable_now; then
+            stable_for="$(( stable_for + interval ))"
+            if [ "$stable_for" -ge "$required_stable" ]; then
+                [ -n "$report_file" ] && echo "- INFO - CrowdSec firewall bouncer stable (${runtime_state})" >> "$report_file"
+                return 0
+            fi
+        else
+            stable_for="0"
+        fi
+
+        sleep "$interval"
+        waited="$(( waited + interval ))"
+    done
+
+    runtime_state="$(crowdsec_firewall_bouncer_runtime_state)"
+    [ -n "$report_file" ] && echo "- INFO - CrowdSec firewall bouncer not stable after ${timeout}s (${runtime_state})" >> "$report_file"
+    return 1
+}
+
+function crowdsec_firewall_bouncer_api_key() {
+    local config_file="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+
+    root_path_exists "$config_file" || return 1
+
+    root_cat_file "$config_file" 2>/dev/null \
+        | awk -F: '/^[[:space:]]*api_key[[:space:]]*:/ { $1=""; sub(/^:[[:space:]]*/, ""); gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/, ""); print; exit }'
+}
+
+function test_crowdsec_firewall_bouncer_stream_auth() {
+    local api_key=""
+    local http_code=""
+
+    command -v curl >/dev/null 2>&1 || return 2
+
+    api_key="$(crowdsec_firewall_bouncer_api_key 2>/dev/null || true)"
+    [ -n "$api_key" ] || return 2
+
+    http_code="$(curl -fsS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 3 \
+        --max-time 10 \
+        -H "X-Api-Key: ${api_key}" \
+        'http://127.0.0.1:8080/v1/decisions/stream?startup=true' 2>/dev/null || true)"
+
+    unset api_key
+
+    [ "$http_code" == "200" ]
 }
 
 function existing_docker_status_label() {
@@ -2141,11 +2223,19 @@ function create_verification_report() {
 
     if [ "$SCRIPT4_CROWDSEC_SELECTED" == "yes" ]; then
         if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet crowdsec 2>/dev/null; then verify_pass "CrowdSec service active after Docker setup"; else verify_warn "CrowdSec service" "service is not active after Docker setup" "run sudo systemctl status crowdsec"; fi
-        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null && [ "$(crowdsec_bouncer_substate)" == "running" ]; then
-            verify_pass "CrowdSec firewall bouncer running after Docker setup"
+
+        if wait_for_crowdsec_firewall_bouncer_runtime_stable "$report_body"; then
+            verify_pass "CrowdSec firewall bouncer runtime stable"
         else
-            verify_warn "CrowdSec firewall bouncer" "service is not active/running after Docker setup" "run sudo systemctl status crowdsec-firewall-bouncer"
+            verify_warn "CrowdSec firewall bouncer runtime" "state is $(crowdsec_firewall_bouncer_runtime_state) after stability timeout" "run sudo systemctl status crowdsec-firewall-bouncer"
         fi
+
+        if test_crowdsec_firewall_bouncer_stream_auth; then
+            verify_pass "CrowdSec firewall bouncer stream auth HTTP 200"
+        else
+            verify_warn "CrowdSec firewall bouncer stream auth" "HTTP 200 was not confirmed" "run sudo systemctl status crowdsec-firewall-bouncer and inspect local API auth"
+        fi
+
         if [ "$SCRIPT4_CROWDSEC_BOUNCER" == "active" ]; then verify_pass "Script 4 CrowdSec bouncer marker active"; else verify_warn "Script 4 CrowdSec bouncer marker" "marker state is ${SCRIPT4_CROWDSEC_BOUNCER}" "inspect ${SCRIPT4_MARKER}"; fi
     elif [ "$SCRIPT4_CROWDSEC_SELECTED" == "no" ]; then
         verify_info "Script 4 CrowdSec setup was skipped"
