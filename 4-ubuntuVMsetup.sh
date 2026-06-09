@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.18"
+SCRIPT_VERSION="v2.1.19"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="crowdsec-bouncer-startup-order"
+SCRIPT_BUILD="crowdsec-bouncer-api-key-repair"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -2230,40 +2230,237 @@ function wait_for_crowdsec_local_api_ready() {
     return 1
 }
 
-function wait_for_crowdsec_firewall_bouncer_active() {
-    local max_seconds="120"
-    local interval_seconds="5"
-    local elapsed="0"
-    local state="unknown"
+function read_crowdsec_firewall_bouncer_api_key() {
+    local config_path="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    local key=""
 
-    msg_info "Waiting for CrowdSec firewall bouncer to become active"
+    root_file_exists "$config_path" || return 0
 
-    while [ "$elapsed" -le "$max_seconds" ]; do
-        if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
-            CROWDSEC_BOUNCER_STATUS="active"
-            msg_ok "CROWDSEC FIREWALL BOUNCER ACTIVE"
+    key="$(root_cat_file "$config_path" 2>/dev/null | awk -F: '$1 ~ /^[[:space:]]*api_key[[:space:]]*$/ { $1=""; sub(/^:[[:space:]]*/, ""); gsub(/^[[:space:]"'"'']+|[[:space:]"'"'']+$/, ""); print; exit }' || true)"
+    key="$(printf '%s' "$key" | tr -d '\r\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+
+    printf '%s' "$key"
+}
+
+function test_crowdsec_firewall_bouncer_stream_auth() {
+    local api_key="${1:-}"
+    local http_status="000"
+
+    [ -n "$api_key" ] || { echo "missing-key"; return 1; }
+    command -v curl >/dev/null 2>&1 || { echo "curl-missing"; return 1; }
+
+    http_status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 \
+        -H "X-Api-Key: ${api_key}" \
+        'http://127.0.0.1:8080/v1/decisions/stream?startup=true' 2>/dev/null || true)"
+    http_status="$(printf '%s' "$http_status" | tr -d '\r\n')"
+
+    case "$http_status" in
+        200) echo "ok"; return 0 ;;
+        401|403) echo "unauthorized"; return 1 ;;
+        000) echo "not-ready"; return 1 ;;
+        *) echo "http-${http_status}"; return 1 ;;
+    esac
+}
+
+function write_crowdsec_firewall_bouncer_api_key() {
+    local new_key="${1:-}"
+    local config_path="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    local config_tmp=""
+
+    [ -n "$new_key" ] || return 1
+    root_file_exists "$config_path" || return 1
+
+    config_tmp="$(mktemp)"
+    TEMP_FILES+=("$config_tmp")
+    chmod 0600 "$config_tmp" 2>/dev/null || true
+
+    local replaced="no"
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*api_key[[:space:]]*: ]]; then
+            printf 'api_key: %s\n' "$new_key" >> "$config_tmp"
+            replaced="yes"
+        else
+            printf '%s\n' "$line" >> "$config_tmp"
+        fi
+    done < <(root_cat_file "$config_path" 2>/dev/null || true)
+
+    if [ "$replaced" != "yes" ]; then
+        printf 'api_key: %s\n' "$new_key" >> "$config_tmp"
+    fi
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp "$config_tmp" "$config_path" 2>/dev/null || return 1
+        "$SUDO_CMD" chmod 0600 "$config_path" 2>/dev/null || true
+        "$SUDO_CMD" chown root:root "$config_path" 2>/dev/null || true
+    else
+        cp "$config_tmp" "$config_path" 2>/dev/null || return 1
+        chmod 0600 "$config_path" 2>/dev/null || true
+        chown root:root "$config_path" 2>/dev/null || true
+    fi
+
+    rm -f "$config_tmp"
+    return 0
+}
+
+function create_crowdsec_firewall_bouncer_api_key() {
+    local managed_name="ubuntu-firewall-bouncer"
+    local new_key=""
+
+    command -v cscli >/dev/null 2>&1 || return 1
+
+    if [ -n "$SUDO_CMD" ]; then
+        yes | "$SUDO_CMD" cscli bouncers delete "$managed_name" >/dev/null 2>&1 || true
+        new_key="$($SUDO_CMD cscli bouncers add "$managed_name" -o raw 2>/dev/null || true)"
+    else
+        yes | cscli bouncers delete "$managed_name" >/dev/null 2>&1 || true
+        new_key="$(cscli bouncers add "$managed_name" -o raw 2>/dev/null || true)"
+    fi
+
+    new_key="$(printf '%s' "$new_key" | tr -d '\r\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    [ -n "$new_key" ] || return 1
+
+    printf '%s' "$new_key"
+}
+
+function validate_or_repair_crowdsec_bouncer_api_key() {
+    local api_key=""
+    local auth_status=""
+    local new_key=""
+
+    api_key="$(read_crowdsec_firewall_bouncer_api_key)"
+    auth_status="$(test_crowdsec_firewall_bouncer_stream_auth "$api_key")"
+
+    if [ "$auth_status" == "ok" ]; then
+        msg_ok "CROWDSEC BOUNCER API KEY VALID"
+        api_key=""
+        unset api_key || true
+        return 0
+    fi
+
+    if [ "$auth_status" == "unauthorized" ] || [ "$auth_status" == "missing-key" ]; then
+        msg_warn "CROWDSEC BOUNCER API KEY REPAIR NEEDED"
+
+        run_optional systemctl stop crowdsec-firewall-bouncer
+        run_optional systemctl reset-failed crowdsec-firewall-bouncer
+
+        new_key="$(create_crowdsec_firewall_bouncer_api_key || true)"
+        if [ -z "$new_key" ]; then
+            CROWDSEC_BOUNCER_STATUS="failed"
+            msg_warn "CROWDSEC BOUNCER API KEY REPAIR FAILED"
+            api_key=""
+            unset api_key new_key || true
+            return 1
+        fi
+
+        if ! write_crowdsec_firewall_bouncer_api_key "$new_key"; then
+            CROWDSEC_BOUNCER_STATUS="failed"
+            msg_warn "CROWDSEC BOUNCER API KEY WRITE FAILED"
+            api_key=""
+            new_key=""
+            unset api_key new_key || true
+            return 1
+        fi
+
+        new_key=""
+        unset new_key || true
+
+        if command -v crowdsec-firewall-bouncer >/dev/null 2>&1; then
+            if [ -n "$SUDO_CMD" ]; then
+                "$SUDO_CMD" crowdsec-firewall-bouncer -c /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml -t >/dev/null 2>&1 || true
+            else
+                crowdsec-firewall-bouncer -c /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml -t >/dev/null 2>&1 || true
+            fi
+        fi
+
+        run_optional systemctl restart crowdsec
+        wait_for_crowdsec_service_active || true
+        wait_for_crowdsec_local_api_ready || true
+
+        api_key="$(read_crowdsec_firewall_bouncer_api_key)"
+        auth_status="$(test_crowdsec_firewall_bouncer_stream_auth "$api_key")"
+        api_key=""
+        unset api_key || true
+
+        if [ "$auth_status" == "ok" ]; then
+            msg_ok "CROWDSEC BOUNCER API KEY REPAIRED"
             return 0
         fi
 
-        state="$(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || true)"
-        case "$state" in
-            activating|deactivating|reloading|inactive|failed|unknown|*) ;;
-        esac
+        CROWDSEC_BOUNCER_STATUS="failed"
+        msg_warn "CROWDSEC BOUNCER API KEY REPAIR FAILED"
+        return 1
+    fi
+
+    msg_warn "CROWDSEC BOUNCER API KEY VALIDATION DEFERRED"
+    api_key=""
+    unset api_key || true
+    return 1
+}
+
+function wait_for_crowdsec_firewall_bouncer_stable() {
+    local max_seconds="180"
+    local interval_seconds="5"
+    local required_stable_seconds="30"
+    local elapsed="0"
+    local stable_elapsed="0"
+    local active_state="unknown"
+    local sub_state="unknown"
+
+    msg_info "Waiting for CrowdSec firewall bouncer to remain stable"
+
+    while [ "$elapsed" -le "$max_seconds" ]; do
+        active_state="$(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || true)"
+        sub_state="$(systemctl show crowdsec-firewall-bouncer -p SubState --value 2>/dev/null || true)"
+
+        if [ "$active_state" == "active" ] && [ "$sub_state" == "running" ]; then
+            stable_elapsed="$(( stable_elapsed + interval_seconds ))"
+            if [ "$stable_elapsed" -ge "$required_stable_seconds" ]; then
+                CROWDSEC_BOUNCER_STATUS="active"
+                msg_ok "CROWDSEC FIREWALL BOUNCER STABLE"
+                return 0
+            fi
+        else
+            stable_elapsed="0"
+        fi
 
         [ "$elapsed" -ge "$max_seconds" ] && break
         sleep "$interval_seconds"
         elapsed="$(( elapsed + interval_seconds ))"
     done
 
-    state="$(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || true)"
-    if [ "$state" == "failed" ]; then
+    active_state="$(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || true)"
+    sub_state="$(systemctl show crowdsec-firewall-bouncer -p SubState --value 2>/dev/null || true)"
+
+    if [ "$active_state" == "failed" ] || [ "$sub_state" == "auto-restart" ]; then
         CROWDSEC_BOUNCER_STATUS="failed"
     else
         CROWDSEC_BOUNCER_STATUS="installed-not-active"
     fi
 
-    msg_warn "CROWDSEC FIREWALL BOUNCER NOT ACTIVE"
+    msg_warn "CROWDSEC FIREWALL BOUNCER NOT STABLE"
     return 1
+}
+
+function crowdsec_firewall_bouncer_stable_now() {
+    local required_stable_seconds="30"
+    local interval_seconds="5"
+    local stable_elapsed="0"
+    local active_state="unknown"
+    local sub_state="unknown"
+
+    while [ "$stable_elapsed" -lt "$required_stable_seconds" ]; do
+        active_state="$(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || true)"
+        sub_state="$(systemctl show crowdsec-firewall-bouncer -p SubState --value 2>/dev/null || true)"
+
+        if [ "$active_state" != "active" ] || [ "$sub_state" != "running" ]; then
+            return 1
+        fi
+
+        sleep "$interval_seconds"
+        stable_elapsed="$(( stable_elapsed + interval_seconds ))"
+    done
+
+    return 0
 }
 
 function refresh_crowdsec_bouncer_runtime_status() {
@@ -2280,7 +2477,8 @@ function refresh_crowdsec_bouncer_runtime_status() {
         fi
     fi
 
-    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null && \
+       [ "$(systemctl show crowdsec-firewall-bouncer -p SubState --value 2>/dev/null || true)" == "running" ]; then
         CROWDSEC_BOUNCER_STATUS="active"
     elif [ "${CROWDSEC_BOUNCER_STATUS:-none}" == "active" ]; then
         CROWDSEC_BOUNCER_STATUS="installed-not-active"
@@ -2305,9 +2503,9 @@ function ensure_crowdsec_firewall_bouncer() {
     repair_broken_crowdsec_nftables_bouncer_if_needed "$chosen_package"
 
     if dpkg_package_configured "$chosen_package" && systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
-        CROWDSEC_BOUNCER_STATUS="active"
-        msg_ok "CROWDSEC FIREWALL BOUNCER ACTIVE"
-        return 0
+        if validate_or_repair_crowdsec_bouncer_api_key && wait_for_crowdsec_firewall_bouncer_stable; then
+            return 0
+        fi
     fi
 
     msg_info "Installing CrowdSec firewall bouncer (${chosen_package})"
@@ -2335,6 +2533,7 @@ function ensure_crowdsec_firewall_bouncer() {
 
     wait_for_crowdsec_service_active || true
     wait_for_crowdsec_local_api_ready || true
+    validate_or_repair_crowdsec_bouncer_api_key || true
 
     msg_info "Allowing CrowdSec decision stream to settle"
     sleep 10
@@ -2345,7 +2544,7 @@ function ensure_crowdsec_firewall_bouncer() {
     run_optional systemctl restart crowdsec-firewall-bouncer
     msg_ok "CROWDSEC FIREWALL BOUNCER START REQUESTED"
 
-    wait_for_crowdsec_firewall_bouncer_active || true
+    wait_for_crowdsec_firewall_bouncer_stable || true
 }
 
 function enroll_crowdsec_console() {
@@ -2866,13 +3065,24 @@ function create_verification_report() {
         fi
 
         refresh_crowdsec_bouncer_runtime_status
-        if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+        local bouncer_api_key=""
+        local bouncer_auth_status=""
+        bouncer_api_key="$(read_crowdsec_firewall_bouncer_api_key)"
+        bouncer_auth_status="$(test_crowdsec_firewall_bouncer_stream_auth "$bouncer_api_key")"
+        bouncer_api_key=""
+        unset bouncer_api_key || true
+
+        if [ "$CROWDSEC_BOUNCER_STATUS" == "active" ] && \
+           [ "$bouncer_auth_status" == "ok" ] && \
+           crowdsec_firewall_bouncer_stable_now; then
             CROWDSEC_BOUNCER_STATUS="active"
             verify_pass "CrowdSec bouncer active"
+            verify_pass "CrowdSec bouncer API key authorized"
+            verify_pass "CrowdSec bouncer stable"
         else
             [ "$CROWDSEC_BOUNCER_STATUS" == "active" ] && CROWDSEC_BOUNCER_STATUS="installed-not-active"
             [ "$CROWDSEC_BOUNCER_STATUS" == "none" ] && CROWDSEC_BOUNCER_STATUS="installed-not-active"
-            verify_warn "CrowdSec bouncer active" "state is ${CROWDSEC_BOUNCER_STATUS}" "run sudo systemctl status crowdsec-firewall-bouncer"
+            verify_warn "CrowdSec bouncer" "state is ${CROWDSEC_BOUNCER_STATUS}" "run sudo systemctl status crowdsec-firewall-bouncer"
         fi
 
         if [ "${CROWDSEC_CONSOLE_ENROLLMENT_REQUESTED:-no}" == "yes" ]; then
@@ -3027,12 +3237,9 @@ function write_verify_display_log() {
         result_lines="$(root_cat_file "$VERIFY_LOG" 2>/dev/null | awk '/^Results:/{flag=1; next} flag {print}' || true)"
     fi
 
-    user_lines="$(printf '%s
-' "$result_lines" | grep -E 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled' || true)"
-    system_lines="$(printf '%s
-' "$result_lines" | grep -E 'IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active' || true)"
-    other_lines="$(printf '%s
-' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active' || true)"
+    user_lines="$(printf '%s\n' "$result_lines" | grep -E 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled' || true)"
+    system_lines="$(printf '%s\n' "$result_lines" | grep -E 'IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active|CrowdSec bouncer API key authorized|CrowdSec bouncer stable' || true)"
+    other_lines="$(printf '%s\n' "$result_lines" | grep -Ev 'User exists|User is in sudo group|SSH authorized_keys present|SSHD configuration valid|SSH password authentication disabled|SSH public key authentication enabled|Root SSH login disabled|SSH keyboard-interactive auth disabled|IPv4 address detected|QEMU guest agent enabled|QEMU guest agent active|UFW firewall active|UFW SSH rule present|System cleanup completed|Completion marker exists|CrowdSec package installed|CrowdSec service enabled|CrowdSec service active|CrowdSec collections ready|CrowdSec bouncer package configured|CrowdSec bouncer active|CrowdSec bouncer API key authorized|CrowdSec bouncer stable' || true)"
 
     case "$VERIFY_STATUS" in
         PASS) status_color="$GN" ;;
@@ -3195,8 +3402,7 @@ function update_completion_marker_script4_fields() {
     fi
 
     {
-        [ -n "$existing_marker" ] && printf '%s
-' "$existing_marker"
+        [ -n "$existing_marker" ] && printf '%s\n' "$existing_marker"
         echo "CrowdSec Package: $CROWDSEC_PACKAGE_INSTALLED"
         echo "CrowdSec Service: $CROWDSEC_SERVICE_STATUS"
         echo "CrowdSec Collections: $CROWDSEC_COLLECTIONS_STATUS"
