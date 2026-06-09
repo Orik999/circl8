@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="5-dockerSetup.sh"
-SCRIPT_VERSION="v1.2.2"
-SCRIPT_UPDATED="2026-06-06"
-SCRIPT_BUILD="minor-ui-polish"
+SCRIPT_VERSION="v1.2.7"
+SCRIPT_UPDATED="2026-06-09"
+SCRIPT_BUILD="handoff-summary-color-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log paths, user choices, environment state and final status values.
@@ -53,9 +53,23 @@ VERIFY_FIRST_ISSUE_CHECK=""
 VERIFY_FIRST_ISSUE_REASON=""
 VERIFY_FIRST_ISSUE_FIX=""
 COMPLETED_MARKER="/root/.docker-setup-completed"
+SCRIPT4_MARKER="/root/.ubuntu-vm-setup-completed"
 
-DEFAULT_TARGET_USER="${SUDO_USER:-orik}"
-TARGET_USER="$DEFAULT_TARGET_USER"
+DEFAULT_TARGET_USER=""
+TARGET_USER=""
+SCRIPT4_STATUS="unknown"
+SCRIPT4_VERSION="unknown"
+SCRIPT4_VERIFY_STATUS="unknown"
+SCRIPT4_USERNAME=""
+SCRIPT4_UBUNTU_PRO_SELECTED="unknown"
+SCRIPT4_UBUNTU_PRO_ATTACH_REASON="unknown"
+SCRIPT4_UBUNTU_PRO_ATTACHED="unknown"
+SCRIPT4_UBUNTU_PRO_STATUS="unknown"
+SCRIPT4_UBUNTU_PRO_VALUE="unknown"
+SCRIPT4_UBUNTU_PRO_DISPLAY="unknown"
+SCRIPT4_CROWDSEC_SELECTED="unknown"
+SCRIPT4_CROWDSEC_BOUNCER_PACKAGE="unknown"
+SCRIPT4_CROWDSEC_BOUNCER="unknown"
 
 SUDO_CMD=""
 
@@ -168,12 +182,34 @@ function apply_group_header() {
     echo -e "${YW}${title}:${CL}"
 }
 
-# --- 5B. DETAIL LINE HELPER ---
-# Prints clean script 1-style detail lines for summaries and audit output.
+# --- 5B. ALIGNED SUMMARY ROW HELPERS ---
+# Prints compact grouped detail lines using the standard Script 4/5 UI style.
 function detail_line() {
     local label="$1"
     local value="$2"
-    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+    local color="${3:-$GN}"
+    printf '  %b%-18s%b %b%s%b\n' "${BL}" "${label}:" "${CL}" "${color}" "${value}" "${CL}"
+}
+
+function summary_line() {
+    local label="$1"
+    local value="$2"
+    local color="${3:-$GN}"
+    printf '  %b%-18s%b %b%s%b\n' "${BL}" "${label}:" "${CL}" "${color}" "${value}" "${CL}"
+}
+
+function plan_line() {
+    local label="$1"
+    local value="$2"
+    local color="${3:-$GN}"
+    printf '  %b%-22s%b %b%s%b\n' "${BL}" "${label}:" "${CL}" "${color}" "${value}" "${CL}"
+}
+
+function final_line() {
+    local label="$1"
+    local value="$2"
+    local color="${3:-$GN}"
+    printf '  %b%-18s%b %b%s%b\n' "${BL}" "${label}:" "${CL}" "${color}" "${value}" "${CL}"
 }
 
 # --- 6. TTY OUTPUT HELPER ---
@@ -233,6 +269,10 @@ function run_cmd() {
     local description="$1"
     shift
 
+    if command_needs_apt_lock_wait "$@"; then
+        wait_for_apt_locks
+    fi
+
     local err_file=""
     err_file="$(mktemp)"
     TEMP_FILES+=("$err_file")
@@ -267,6 +307,10 @@ function run_cmd() {
 # --- 11. OPTIONAL COMMAND RUNNER ---
 # Runs non-critical privileged commands quietly and does not stop the script.
 function run_optional() {
+    if command_needs_apt_lock_wait "$@"; then
+        wait_for_apt_locks
+    fi
+
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" "$@" >/dev/null 2>&1 || true
     else
@@ -668,55 +712,111 @@ function validate_docker_daemon_json() {
     return 1
 }
 
-function apt_lock_holders() {
-    local lock=""
-    local output=""
+function command_needs_apt_lock_wait() {
+    local arg=""
 
-    if ! command -v fuser >/dev/null 2>&1; then
-        return 0
+    for arg in "$@"; do
+        case "$arg" in
+            apt|apt-get|dpkg|*/apt|*/apt-get|*/dpkg)
+                return 0
+                ;;
+            apt=*|apt-get=*|dpkg=*)
+                return 0
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+function apt_lock_files() {
+    printf '%s\n' \
+        /var/lib/dpkg/lock-frontend \
+        /var/lib/dpkg/lock \
+        /var/cache/apt/archives/lock \
+        /var/lib/apt/lists/lock
+}
+
+function apt_lock_holder_pids() {
+    local lock=""
+    local pids=""
+
+    command -v fuser >/dev/null 2>&1 || return 0
+
+    while IFS= read -r lock; do
+        [ -e "$lock" ] || continue
+        pids="$(fuser "$lock" 2>/dev/null || true)"
+        [ -n "$pids" ] && printf '%s\n' $pids
+    done < <(apt_lock_files)
+}
+
+function apt_lock_is_busy() {
+    local pids=""
+
+    pids="$(apt_lock_holder_pids | sort -u | xargs || true)"
+    [ -n "$pids" ]
+}
+
+function show_apt_lock_diagnostics() {
+    local lock=""
+    local pids=""
+
+    echo ""
+    echo -e "${RD}APT/dpkg lock still held.${CL}"
+    echo ""
+    echo -e "${YW}Lock holders:${CL}"
+
+    while IFS= read -r lock; do
+        [ -e "$lock" ] || continue
+        fuser -v "$lock" 2>&1 | sed 's/^/  /' || true
+    done < <(apt_lock_files)
+
+    pids="$(apt_lock_holder_pids | sort -u | xargs || true)"
+    if [ -n "$pids" ]; then
+        echo ""
+        echo -e "${YW}Processes:${CL}"
+        ps -fp $pids 2>/dev/null | sed 's/^/  /' || true
     fi
 
-    for lock in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
-        if [ -e "$lock" ]; then
-            output="$(fuser -v "$lock" 2>&1 || true)"
-            [ -n "$output" ] && printf '%s\n' "$output"
-        fi
-    done
+    echo ""
+    echo -e "${YW}Fix:${CL}"
+    echo -e "  Wait for apt/dpkg/unattended-upgrades to finish, then rerun Script 5."
 }
 
 function wait_for_apt_locks() {
     local waited="0"
-    local timeout="180"
-    local holders=""
+    local timeout="600"
+    local printed_wait="no"
 
-    if ! command -v fuser >/dev/null 2>&1; then
+    command -v fuser >/dev/null 2>&1 || return 0
+
+    if ! apt_lock_is_busy; then
         return 0
     fi
 
-    while true; do
-        holders="$(apt_lock_holders || true)"
-        if [ -z "$holders" ]; then
-            return 0
-        fi
-
+    while apt_lock_is_busy; do
         if [ "$waited" -ge "$timeout" ]; then
-            echo ""
-            echo -e "${RD}APT/dpkg lock still held.${CL}"
-            echo -e "${YW}Holder:${CL}"
-            printf '%s\n' "$holders" | sed 's/^/  /'
-            echo ""
-            echo -e "${YW}Fix:${CL}"
-            echo -e "  Wait for apt/unattended-upgrades to finish, then rerun Script 5."
+            show_apt_lock_diagnostics
             exit 1
         fi
 
-        if [ "$waited" -eq 0 ]; then
-            msg_info "Waiting for apt/dpkg locks"
+        if [ "$printed_wait" == "no" ]; then
+            echo ""
+            echo -e " ${HOLD} ${YW}Waiting for apt/dpkg lock...${CL}"
+            printed_wait="yes"
+        elif [ "$waited" -gt 0 ] && [ $(( waited % 30 )) -eq 0 ]; then
+            echo -e " ${HOLD} ${YW}Waiting for apt/dpkg lock... ${waited}s elapsed${CL}"
         fi
 
         sleep 5
         waited="$(( waited + 5 ))"
     done
+
+    if [ "$printed_wait" == "yes" ]; then
+        msg_ok "APT/DPKG LOCK AVAILABLE"
+    fi
+
+    return 0
 }
 
 function validate_docker_package_availability() {
@@ -745,6 +845,41 @@ function validate_docker_package_availability() {
     fi
 
     msg_ok "DOCKER PACKAGES AVAILABLE"
+}
+
+function docker_package_policy_mentions_official_repo() {
+    local pkg="$1"
+    local policy_output=""
+
+    policy_output="$(apt-cache policy "$pkg" 2>/dev/null || true)"
+    [ -n "$policy_output" ] || return 1
+
+    grep -Fq "download.docker.com" <<< "$policy_output"
+}
+
+function crowdsec_bouncer_substate() {
+    systemctl show crowdsec-firewall-bouncer -p SubState --value 2>/dev/null || echo unknown
+}
+
+function existing_docker_status_label() {
+    if [ "$EXISTING_SETUP" != "yes" ]; then
+        echo "not installed"
+    elif [ "$DOCKER_CLI_FOUND" == "yes" ] && [ "$DOCKER_DAEMON_CONFIG_FOUND" == "yes" ] && [ "$DOCKER_SERVICE_ACTIVE" == "yes" ] && [ "$CONTAINERD_SERVICE_ACTIVE" == "yes" ]; then
+        echo "detected"
+    else
+        echo "partial setup detected"
+    fi
+}
+
+function existing_docker_status_color() {
+    local status="${1:-unknown}"
+
+    case "$status" in
+        "not installed") echo "$GN" ;;
+        "detected") echo "$YW" ;;
+        "partial setup detected") echo "$YW" ;;
+        *) echo "$YW" ;;
+    esac
 }
 
 # =========================================================
@@ -871,6 +1006,8 @@ function detect_environment() {
         msg_warn "Environment is not clearly VM/LXC (${VIRT_TYPE}); continuing with VM-style defaults"
         IS_VM="yes"
     fi
+
+    detect_existing_setup "status-only"
 }
 
 # --- 30. PREVIOUS MARKER CHECK ---
@@ -898,6 +1035,202 @@ function marker_key_value() {
     fi
 
     echo "$value"
+}
+
+function status_value_color() {
+    local value="${1:-unknown}"
+
+    case "$value" in
+        PASS|completed|active|running|yes|ready|installed|enabled|attached) echo "$GN" ;;
+        PASS_WITH_WARNINGS|unknown|skipped|not-selected|not-found|not-run) echo "$YW" ;;
+        FAIL|failed|no|inactive|installed-not-active|missing) echo "$RD" ;;
+        *) echo "$GN" ;;
+    esac
+}
+
+
+function choice_result_color() {
+    local value="${1:-unknown}"
+
+    case "$value" in
+        yes|no) echo "$ANS" ;;
+        *) status_value_color "$value" ;;
+    esac
+}
+
+function handoff_line() {
+    local label="$1"
+    local value="$2"
+    local color=""
+
+    color="$(status_value_color "$value")"
+    echo -e "  ${BL}${label}:${CL} ${color}${value}${CL}"
+}
+
+function script4_marker_value() {
+    local key="$1"
+    local value=""
+
+    value="$(marker_key_value "$key" "$SCRIPT4_MARKER" 2>/dev/null || true)"
+    printf '%s' "$value"
+}
+
+function valid_existing_non_root_user() {
+    local username="${1:-}"
+
+    [ -n "$username" ] || return 1
+    [ "$username" != "root" ] || return 1
+    validate_linux_username "$username" || return 1
+    id "$username" >/dev/null 2>&1 || return 1
+
+    return 0
+}
+
+function detect_target_user_fallback() {
+    local candidate=""
+
+    candidate="${SUDO_USER:-}"
+    if valid_existing_non_root_user "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+    fi
+
+    candidate="$(logname 2>/dev/null || true)"
+    if valid_existing_non_root_user "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+    fi
+
+    candidate="$(awk -F: '$3 >= 1000 && $3 < 60000 && $1 != "nobody" { print $1; exit }' /etc/passwd 2>/dev/null || true)"
+    if valid_existing_non_root_user "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+    fi
+
+    return 1
+}
+
+function load_script4_handoff() {
+    local candidate=""
+
+    SCRIPT4_STATUS="$(script4_marker_value SCRIPT4_STATUS)"
+    SCRIPT4_VERSION="$(script4_marker_value SCRIPT4_VERSION)"
+    SCRIPT4_VERIFY_STATUS="$(script4_marker_value SCRIPT4_VERIFY_STATUS)"
+    SCRIPT4_USERNAME="$(script4_marker_value SCRIPT4_USERNAME)"
+    SCRIPT4_UBUNTU_PRO_SELECTED="$(script4_marker_value SCRIPT4_UBUNTU_PRO_SELECTED)"
+    SCRIPT4_UBUNTU_PRO_ATTACH_REASON="$(script4_marker_value SCRIPT4_UBUNTU_PRO_ATTACH_REASON)"
+    SCRIPT4_UBUNTU_PRO_ATTACHED="$(script4_marker_value SCRIPT4_UBUNTU_PRO_ATTACHED)"
+    SCRIPT4_UBUNTU_PRO_STATUS="$(script4_marker_value SCRIPT4_UBUNTU_PRO_STATUS)"
+    SCRIPT4_UBUNTU_PRO_VALUE="$(script4_marker_value SCRIPT4_UBUNTU_PRO)"
+    SCRIPT4_CROWDSEC_SELECTED="$(script4_marker_value SCRIPT4_CROWDSEC_SELECTED)"
+    SCRIPT4_CROWDSEC_BOUNCER_PACKAGE="$(script4_marker_value SCRIPT4_CROWDSEC_BOUNCER_PACKAGE)"
+    SCRIPT4_CROWDSEC_BOUNCER="$(script4_marker_value SCRIPT4_CROWDSEC_BOUNCER)"
+
+    [ -n "$SCRIPT4_STATUS" ] || SCRIPT4_STATUS="unknown"
+    [ -n "$SCRIPT4_VERSION" ] || SCRIPT4_VERSION="unknown"
+    [ -n "$SCRIPT4_VERIFY_STATUS" ] || SCRIPT4_VERIFY_STATUS="unknown"
+    [ -n "$SCRIPT4_UBUNTU_PRO_SELECTED" ] || SCRIPT4_UBUNTU_PRO_SELECTED="unknown"
+    [ -n "$SCRIPT4_UBUNTU_PRO_ATTACH_REASON" ] || SCRIPT4_UBUNTU_PRO_ATTACH_REASON="unknown"
+    [ -n "$SCRIPT4_UBUNTU_PRO_ATTACHED" ] || SCRIPT4_UBUNTU_PRO_ATTACHED="unknown"
+    [ -n "$SCRIPT4_UBUNTU_PRO_STATUS" ] || SCRIPT4_UBUNTU_PRO_STATUS="unknown"
+    [ -n "$SCRIPT4_UBUNTU_PRO_VALUE" ] || SCRIPT4_UBUNTU_PRO_VALUE="unknown"
+    SCRIPT4_UBUNTU_PRO_DISPLAY="$(derive_script4_ubuntu_pro_status)"
+    [ -n "$SCRIPT4_CROWDSEC_SELECTED" ] || SCRIPT4_CROWDSEC_SELECTED="unknown"
+    [ -n "$SCRIPT4_CROWDSEC_BOUNCER_PACKAGE" ] || SCRIPT4_CROWDSEC_BOUNCER_PACKAGE="unknown"
+    [ -n "$SCRIPT4_CROWDSEC_BOUNCER" ] || SCRIPT4_CROWDSEC_BOUNCER="unknown"
+
+    if valid_existing_non_root_user "$SCRIPT4_USERNAME"; then
+        DEFAULT_TARGET_USER="$SCRIPT4_USERNAME"
+        TARGET_USER="$SCRIPT4_USERNAME"
+    elif candidate="$(detect_target_user_fallback 2>/dev/null || true)" && [ -n "$candidate" ]; then
+        DEFAULT_TARGET_USER="$candidate"
+        TARGET_USER="$candidate"
+    fi
+}
+
+
+function derive_script4_ubuntu_pro_status() {
+    local selected="${SCRIPT4_UBUNTU_PRO_SELECTED:-unknown}"
+    local reason="${SCRIPT4_UBUNTU_PRO_ATTACH_REASON:-unknown}"
+    local attached="${SCRIPT4_UBUNTU_PRO_ATTACHED:-unknown}"
+    local status="${SCRIPT4_UBUNTU_PRO_STATUS:-unknown}"
+    local legacy="${SCRIPT4_UBUNTU_PRO_VALUE:-unknown}"
+    local value=""
+
+    for value in "$attached" "$status" "$legacy" "$reason" "$selected"; do
+        value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | xargs || true)"
+        case "$value" in
+            attached|yes|enabled|active|complete|completed|none)
+                echo "attached"
+                return 0
+                ;;
+            not-selected|not_selected|skipped|skip|no|disabled)
+                echo "skipped"
+                return 0
+                ;;
+            fail|failed|error)
+                echo "failed"
+                return 0
+                ;;
+        esac
+    done
+
+    echo "unknown"
+}
+
+function show_script4_handoff_summary() {
+    local crowdsec_status="unknown"
+    local bouncer_status="unknown"
+
+    if [ "$SCRIPT4_CROWDSEC_SELECTED" == "yes" ]; then
+        crowdsec_status="selected"
+        bouncer_status="$SCRIPT4_CROWDSEC_BOUNCER"
+    elif [ "$SCRIPT4_CROWDSEC_SELECTED" == "no" ]; then
+        crowdsec_status="skipped"
+        bouncer_status="skipped"
+    else
+        crowdsec_status="unknown"
+        bouncer_status="$SCRIPT4_CROWDSEC_BOUNCER"
+    fi
+
+    echo -e "${YW}Script 4 handoff:${CL}"
+    handoff_line "Status      " "$SCRIPT4_STATUS"
+    handoff_line "Verification" "$SCRIPT4_VERIFY_STATUS"
+    handoff_line "User        " "${SCRIPT4_USERNAME:-unknown}"
+    handoff_line "Ubuntu Pro  " "$SCRIPT4_UBUNTU_PRO_DISPLAY"
+    handoff_line "CrowdSec    " "$crowdsec_status"
+    handoff_line "Bouncer     " "$bouncer_status"
+}
+
+function validate_script4_handoff() {
+    section "SCRIPT 4 HANDOFF"
+
+    if ! root_path_exists "$SCRIPT4_MARKER"; then
+        echo -e "${RD}ERROR:${CL} Script 4 marker not found: ${SCRIPT4_MARKER}"
+        echo -e "${YW}Run and complete Script 4 before running Script 5.${CL}"
+        exit 1
+    fi
+
+    load_script4_handoff
+    show_script4_handoff_summary
+
+    if [ "$SCRIPT4_STATUS" != "completed" ]; then
+        msg_error "Script 4 marker status is ${SCRIPT4_STATUS}; complete Script 4 first"
+    fi
+
+    if [ "$SCRIPT4_VERIFY_STATUS" != "PASS" ]; then
+        msg_error "Script 4 verification status is ${SCRIPT4_VERIFY_STATUS}; resolve Script 4 before Docker setup"
+    fi
+
+    if ! valid_existing_non_root_user "$SCRIPT4_USERNAME"; then
+        msg_error "Script 4 username is missing or invalid; resolve Script 4 marker before Docker setup"
+    fi
+
+    if ! valid_existing_non_root_user "$TARGET_USER"; then
+        msg_error "No valid target Linux user was detected for Docker group setup"
+    fi
+
+    msg_ok "SCRIPT 4 HANDOFF VERIFIED"
 }
 
 function show_previous_marker_compact_summary() {
@@ -997,13 +1330,16 @@ function check_previous_marker() {
 }
 
 # --- 31. EXISTING SETUP DETECTION ---
-# Detects current Docker state and shows exactly what was found.
+# Detects current Docker state and prints one compact ENVIRONMENT CHECK status line.
 function detect_existing_setup() {
+    local mode="${1:-status}"
     local continue_existing_yn=""
+    local existing_status=""
+    local existing_color=""
 
-    section "EXISTING SETUP CHECK"
-
-    msg_info "Checking for existing Docker setup"
+    if [ "$mode" != "prompt-only" ]; then
+        msg_info "Checking existing Docker status"
+    fi
 
     command -v docker >/dev/null 2>&1 && DOCKER_CLI_FOUND="yes" || DOCKER_CLI_FOUND="no"
     root_path_exists "/etc/docker/daemon.json" && DOCKER_DAEMON_CONFIG_FOUND="yes" || DOCKER_DAEMON_CONFIG_FOUND="no"
@@ -1027,15 +1363,16 @@ function detect_existing_setup() {
         EXISTING_SETUP="no"
     fi
 
-    msg_ok "EXISTING SETUP CHECK COMPLETE"
+    existing_status="$(existing_docker_status_label)"
+    existing_color="$(existing_docker_status_color "$existing_status")"
 
-    echo ""
-    echo -e "${YW}Existing Docker:${CL}"
-    echo -e "  ${BL}Docker CLI:${CL} ${GN}${DOCKER_CLI_FOUND}${CL}"
-    echo -e "  ${BL}Daemon config:${CL} ${GN}${DOCKER_DAEMON_CONFIG_FOUND}${CL}"
-    echo -e "  ${BL}Completion marker:${CL} ${GN}${DOCKER_MARKER_FOUND}${CL}"
-    echo -e "  ${BL}Docker service:${CL} ${GN}${DOCKER_SERVICE_ACTIVE}${CL}"
-    echo -e "  ${BL}containerd service:${CL} ${GN}${CONTAINERD_SERVICE_ACTIVE}${CL}"
+    if [ "$mode" != "prompt-only" ]; then
+        echo -e "${BFR} ${CM} ${GN}Existing Docker:${CL} ${existing_color}${existing_status}${CL}"
+    fi
+
+    if [ "$mode" == "status-only" ]; then
+        return 0
+    fi
 
     if [ "$EXISTING_SETUP" == "yes" ]; then
         echo -e "${RD}WARNING: Existing Docker setup detected.${CL}"
@@ -1098,18 +1435,8 @@ function collect_user_options() {
 
     section "SETUP OPTIONS"
 
-    while true; do
-        TARGET_USER="$(timed_text_input "Enter Linux user to add to docker group" "$TARGET_USER")"
-
-        if validate_linux_username "$TARGET_USER"; then
-            break
-        fi
-
-        msg_warn "Invalid username. Use lowercase Linux username format, for example: orik"
-    done
-
-    if ! id "$TARGET_USER" >/dev/null 2>&1; then
-        msg_error "Target user ${TARGET_USER} does not exist. Run script 4 first or create the user."
+    if ! valid_existing_non_root_user "$TARGET_USER"; then
+        msg_error "Target user ${TARGET_USER:-unknown} from Script 4 handoff is not a valid existing local user."
     fi
 
     if [ "$IS_CONTAINER" == "yes" ]; then
@@ -1151,6 +1478,7 @@ function collect_user_options() {
             REBOOT_AFTER_FINISH="y"
         fi
     fi
+
 }
 
 
@@ -1158,20 +1486,34 @@ function collect_user_options() {
 # Shows all collected answers before any Docker/system-changing actions are applied.
 function show_ready_to_apply() {
     local apply_yn=""
+    local bouncer_color="$YW"
+    local bouncer_value="$SCRIPT4_CROWDSEC_BOUNCER"
 
     section "SETUP PLAN"
 
+    if [ "$SCRIPT4_CROWDSEC_SELECTED" == "yes" ]; then
+        bouncer_color="$(status_value_color "$SCRIPT4_CROWDSEC_BOUNCER")"
+    elif [ "$SCRIPT4_CROWDSEC_SELECTED" == "no" ]; then
+        bouncer_value="skipped"
+        bouncer_color="$YW"
+    fi
+
+    echo -e "${YW}Script 4:${CL}"
+    plan_line "Verification" "$SCRIPT4_VERIFY_STATUS" "$(status_value_color "$SCRIPT4_VERIFY_STATUS")"
+    plan_line "User" "$TARGET_USER" "$GN"
+    plan_line "CrowdSec bouncer" "$bouncer_value" "$bouncer_color"
+    echo ""
     echo -e "${YW}Docker:${CL}"
-    echo -e "  ${BL}Target user:${CL} ${ANS}${TARGET_USER}${CL}"
-    echo -e "  ${BL}Existing Docker setup:${CL} ${ANS}${EXISTING_SETUP}${CL}"
-    echo -e "  ${BL}Docker firewall mode:${CL} ${ANS}${DOCKER_FIREWALL_MODE}${CL}"
+    plan_line "Target user" "$TARGET_USER" "$GN"
+    plan_line "Existing Docker setup" "$EXISTING_SETUP" "$GN"
+    plan_line "Docker firewall mode" "$DOCKER_FIREWALL_MODE" "$GN"
     echo ""
     echo -e "${YW}System:${CL}"
-    echo -e "  ${BL}Disable swap:${CL} ${ANS}$(yes_no_label "$DISABLE_SWAP")${CL}"
-    echo -e "  ${BL}Configure UFW:${CL} ${ANS}$(yes_no_label "$CONFIGURE_UFW")${CL}"
-    echo -e "  ${BL}Redis overcommit:${CL} ${ANS}yes${CL}"
-    echo -e "  ${BL}Docker cleanup timer:${CL} ${ANS}$(yes_no_label "$INSTALL_DOCKER_GC")${CL}"
-    echo -e "  ${BL}Reboot:${CL} ${ANS}$(yes_no_label "$REBOOT_AFTER_FINISH")${CL}"
+    plan_line "Disable swap" "$(yes_no_label "$DISABLE_SWAP")" "$ANS"
+    plan_line "Configure UFW" "$(yes_no_label "$CONFIGURE_UFW")" "$ANS"
+    plan_line "Redis overcommit" "yes" "$GN"
+    plan_line "Docker cleanup" "$(yes_no_label "$INSTALL_DOCKER_GC")" "$ANS"
+    plan_line "Reboot" "$(yes_no_label "$REBOOT_AFTER_FINISH")" "$ANS"
     echo ""
     echo -e "${YW}After confirmation, Docker setup changes will be applied.${CL}"
     echo ""
@@ -1185,6 +1527,7 @@ function show_ready_to_apply() {
 
     return 0
 }
+
 
 # =========================================================
 #  APPLY FUNCTIONS
@@ -1418,9 +1761,9 @@ EOF
 function configure_ufw_firewall() {
     apply_group_header "Firewall"
 
-    echo -e "${YW}Docker manages its own firewall/NAT rules.${CL}"
-    echo -e "${YW}UFW protects the host, but Docker-published container ports may still be reachable unless controlled later with DOCKER-USER rules.${CL}"
-    echo -e "${YW}For this project, avoid publishing random ports directly; expose public services through Traefik on 80/443.${CL}"
+    echo -e "  ${YW}Docker manages its own firewall/NAT rules.${CL}"
+    echo -e "  ${YW}UFW protects the host, but Docker-published ports may still be reachable.${CL}"
+    echo -e "  ${YW}Keep public exposure limited to Traefik 80/443 unless intentionally needed.${CL}"
     echo ""
 
     if [ "$CONFIGURE_UFW" != "y" ]; then
@@ -1740,6 +2083,19 @@ function create_verification_report() {
     if compose_version="$(docker compose version 2>/dev/null || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version 2>/dev/null; } || true)" && [ -n "$compose_version" ]; then verify_pass "Docker Compose plugin works"; else verify_fail "Docker Compose plugin" "docker compose version failed" "install docker-compose-plugin"; fi
     if docker info >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker info >/dev/null 2>&1; }; then verify_pass "Docker daemon reachable"; else verify_fail "Docker daemon reachable" "docker info failed" "check docker service status and logs"; fi
 
+    local docker_pkg=""
+    for docker_pkg in docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; do
+        if dpkg -s "$docker_pkg" >/dev/null 2>&1; then
+            if docker_package_policy_mentions_official_repo "$docker_pkg"; then
+                verify_pass "${docker_pkg} policy includes Docker official repo"
+            else
+                verify_warn "${docker_pkg} policy source" "download.docker.com not found in apt policy" "run apt-cache policy ${docker_pkg}"
+            fi
+        else
+            verify_fail "${docker_pkg} installed" "package not installed" "rerun Docker package install step"
+        fi
+    done
+
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-active --quiet docker 2>/dev/null; then verify_pass "Docker service active"; else verify_warn "Docker service active" "service is not active or unavailable" "run sudo systemctl status docker"; fi
         if systemctl is-active --quiet containerd 2>/dev/null; then verify_pass "containerd service active"; else verify_warn "containerd service active" "service is not active or unavailable" "run sudo systemctl status containerd"; fi
@@ -1778,6 +2134,23 @@ function create_verification_report() {
         if grep -Eq '443/tcp' <<< "$ufw_status"; then verify_pass "UFW HTTPS rule present"; else verify_warn "UFW HTTPS rule" "443/tcp rule not confirmed" "run sudo ufw allow 443/tcp"; fi
     else
         verify_info "UFW setup not selected"
+    fi
+
+    if [ "$SCRIPT4_STATUS" == "completed" ]; then verify_pass "Script 4 handoff status completed"; else verify_fail "Script 4 handoff status" "status is ${SCRIPT4_STATUS}" "rerun Script 4"; fi
+    if [ "$SCRIPT4_VERIFY_STATUS" == "PASS" ]; then verify_pass "Script 4 verification PASS"; else verify_fail "Script 4 verification" "status is ${SCRIPT4_VERIFY_STATUS}" "resolve Script 4 verification first"; fi
+
+    if [ "$SCRIPT4_CROWDSEC_SELECTED" == "yes" ]; then
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet crowdsec 2>/dev/null; then verify_pass "CrowdSec service active after Docker setup"; else verify_warn "CrowdSec service" "service is not active after Docker setup" "run sudo systemctl status crowdsec"; fi
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null && [ "$(crowdsec_bouncer_substate)" == "running" ]; then
+            verify_pass "CrowdSec firewall bouncer running after Docker setup"
+        else
+            verify_warn "CrowdSec firewall bouncer" "service is not active/running after Docker setup" "run sudo systemctl status crowdsec-firewall-bouncer"
+        fi
+        if [ "$SCRIPT4_CROWDSEC_BOUNCER" == "active" ]; then verify_pass "Script 4 CrowdSec bouncer marker active"; else verify_warn "Script 4 CrowdSec bouncer marker" "marker state is ${SCRIPT4_CROWDSEC_BOUNCER}" "inspect ${SCRIPT4_MARKER}"; fi
+    elif [ "$SCRIPT4_CROWDSEC_SELECTED" == "no" ]; then
+        verify_info "Script 4 CrowdSec setup was skipped"
+    else
+        verify_info "Script 4 CrowdSec selection is ${SCRIPT4_CROWDSEC_SELECTED}"
     fi
 
     if root_path_exists "$COMPLETED_MARKER"; then verify_pass "Completion marker exists"; else verify_warn "Completion marker exists" "marker missing" "rerun marker write step"; fi
@@ -1871,6 +2244,11 @@ UFW configured selected: $CONFIGURE_UFW
 UFW result: $UFW_ENABLED
 Daemon config valid: $DAEMON_CONFIG_VALID
 Existing setup detected: $EXISTING_SETUP
+Script 4 status: $SCRIPT4_STATUS
+Script 4 verify status: $SCRIPT4_VERIFY_STATUS
+Script 4 username: $SCRIPT4_USERNAME
+Script 4 CrowdSec selected: $SCRIPT4_CROWDSEC_SELECTED
+Script 4 CrowdSec bouncer: $SCRIPT4_CROWDSEC_BOUNCER
 Verify log: $VERIFY_LOG
 SCRIPT5_STATUS=completed
 SCRIPT5_VERSION=$SCRIPT_VERSION
@@ -1881,6 +2259,11 @@ SCRIPT5_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
 SCRIPT5_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
 SCRIPT5_POST_REBOOT_DISPLAY_MARKER=$POST_REBOOT_VERIFY_MARKER
 SCRIPT5_TARGET_USER=$TARGET_USER
+SCRIPT5_SCRIPT4_STATUS=$SCRIPT4_STATUS
+SCRIPT5_SCRIPT4_VERIFY_STATUS=$SCRIPT4_VERIFY_STATUS
+SCRIPT5_SCRIPT4_USERNAME=$SCRIPT4_USERNAME
+SCRIPT5_SCRIPT4_CROWDSEC_SELECTED=$SCRIPT4_CROWDSEC_SELECTED
+SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER=$SCRIPT4_CROWDSEC_BOUNCER
 SCRIPT5_DOCKER_INSTALLED=$DOCKER_INSTALLED
 SCRIPT5_DOCKER_SERVICE_ENABLED=$DOCKER_SERVICE_ENABLED
 SCRIPT5_CONTAINERD_SERVICE_ENABLED=$CONTAINERD_SERVICE_ENABLED
@@ -1914,6 +2297,11 @@ UFW configured selected: $CONFIGURE_UFW
 UFW result: $UFW_ENABLED
 Daemon config valid: $DAEMON_CONFIG_VALID
 Existing setup detected: $EXISTING_SETUP
+Script 4 status: $SCRIPT4_STATUS
+Script 4 verify status: $SCRIPT4_VERIFY_STATUS
+Script 4 username: $SCRIPT4_USERNAME
+Script 4 CrowdSec selected: $SCRIPT4_CROWDSEC_SELECTED
+Script 4 CrowdSec bouncer: $SCRIPT4_CROWDSEC_BOUNCER
 Verify log: $VERIFY_LOG
 SCRIPT5_STATUS=completed
 SCRIPT5_VERSION=$SCRIPT_VERSION
@@ -1924,6 +2312,11 @@ SCRIPT5_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
 SCRIPT5_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK
 SCRIPT5_POST_REBOOT_DISPLAY_MARKER=$POST_REBOOT_VERIFY_MARKER
 SCRIPT5_TARGET_USER=$TARGET_USER
+SCRIPT5_SCRIPT4_STATUS=$SCRIPT4_STATUS
+SCRIPT5_SCRIPT4_VERIFY_STATUS=$SCRIPT4_VERIFY_STATUS
+SCRIPT5_SCRIPT4_USERNAME=$SCRIPT4_USERNAME
+SCRIPT5_SCRIPT4_CROWDSEC_SELECTED=$SCRIPT4_CROWDSEC_SELECTED
+SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER=$SCRIPT4_CROWDSEC_BOUNCER
 SCRIPT5_DOCKER_INSTALLED=$DOCKER_INSTALLED
 SCRIPT5_DOCKER_SERVICE_ENABLED=$DOCKER_SERVICE_ENABLED
 SCRIPT5_CONTAINERD_SERVICE_ENABLED=$CONTAINERD_SERVICE_ENABLED
@@ -1996,6 +2389,7 @@ function write_verify_display_log() {
         echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
         echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
         echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+        echo -e "  ${BL}Display log:${CL} ${GN}${VERIFY_DISPLAY_LOG}${CL}"
         echo ""
         echo -e "${YW}Next Step:${CL}"
         echo -e "  ${YW}Run ${YL}Script 6${YW}:${CL}"
@@ -2101,6 +2495,11 @@ function update_completion_marker_script5_fields() {
         echo "SCRIPT5_POST_REBOOT_DISPLAY_HOOK=$POST_REBOOT_VERIFY_HOOK"
         echo "SCRIPT5_POST_REBOOT_DISPLAY_MARKER=$display_marker"
         echo "SCRIPT5_TARGET_USER=$TARGET_USER"
+        echo "SCRIPT5_SCRIPT4_STATUS=$SCRIPT4_STATUS"
+        echo "SCRIPT5_SCRIPT4_VERIFY_STATUS=$SCRIPT4_VERIFY_STATUS"
+        echo "SCRIPT5_SCRIPT4_USERNAME=$SCRIPT4_USERNAME"
+        echo "SCRIPT5_SCRIPT4_CROWDSEC_SELECTED=$SCRIPT4_CROWDSEC_SELECTED"
+        echo "SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER=$SCRIPT4_CROWDSEC_BOUNCER"
         echo "SCRIPT5_DOCKER_INSTALLED=$DOCKER_INSTALLED"
         echo "SCRIPT5_DOCKER_SERVICE_ENABLED=$DOCKER_SERVICE_ENABLED"
         echo "SCRIPT5_CONTAINERD_SERVICE_ENABLED=$CONTAINERD_SERVICE_ENABLED"
@@ -2172,8 +2571,9 @@ function show_verify_only_summary() {
     fi
 
     echo ""
-    echo -e "${BL}Next Step:${CL}"
-    echo -e "  ${YW}Run ${ANS}Script 6${YW}.${CL}"
+    echo -e "${YW}Next Step:${CL}"
+    echo -e "  ${YW}Run ${ANS}Script 6${YW}:${CL}"
+    echo -e "  ${BL}6-dockerENVsetup-circl8.sh${CL}"
 }
 
 function run_verify_only_mode() {
@@ -2191,8 +2591,10 @@ function run_verify_only_mode() {
 function show_final_summary() {
     local docker_version=""
     local compose_version=""
+    local environment_value=""
+    local daemon_status="invalid"
 
-    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+    section_flash_success "FINISHED"
 
     if [ -n "$SUDO_CMD" ]; then
         docker_version="$($SUDO_CMD docker --version 2>/dev/null || true)"
@@ -2202,64 +2604,69 @@ function show_final_summary() {
         compose_version="$(docker compose version 2>/dev/null || true)"
     fi
 
+    environment_value="$([ "$IS_CONTAINER" == "yes" ] && echo "LXC/Container (${VIRT_TYPE})" || echo "VM (${VIRT_TYPE})")"
+    [ "$DAEMON_CONFIG_VALID" == "yes" ] && daemon_status="valid"
+
     echo -e "${YW}Docker:${CL}"
-    echo -e "  ${BL}Docker version:${CL} ${GN}${docker_version:-unknown}${CL}"
-    echo -e "  ${BL}Compose version:${CL} ${GN}${compose_version:-unknown}${CL}"
-    echo -e "  ${BL}Docker service:${CL} ${GN}${DOCKER_SERVICE_ENABLED}${CL}"
-    echo -e "  ${BL}containerd service:${CL} ${GN}${CONTAINERD_SERVICE_ENABLED}${CL}"
-    echo -e "  ${BL}Target user:${CL} ${GN}${TARGET_USER}${CL}"
-    echo -e "  ${BL}User in docker group:${CL} ${GN}${USER_ADDED_TO_DOCKER}${CL}"
+    final_line "Version" "${docker_version:-unknown}" "$GN"
+    final_line "Compose" "${compose_version:-unknown}" "$GN"
+    final_line "Service" "$DOCKER_SERVICE_ENABLED" "$(status_value_color "$DOCKER_SERVICE_ENABLED")"
+    final_line "Containerd" "$CONTAINERD_SERVICE_ENABLED" "$(status_value_color "$CONTAINERD_SERVICE_ENABLED")"
+    final_line "Target user" "$TARGET_USER" "$GN"
+    final_line "Docker group" "$USER_ADDED_TO_DOCKER" "$(status_value_color "$USER_ADDED_TO_DOCKER")"
 
     echo ""
     echo -e "${YW}System:${CL}"
-    detail_line "ENVIRONMENT" "$([ "$IS_CONTAINER" == "yes" ] && echo "LXC/Container (${VIRT_TYPE})" || echo "VM (${VIRT_TYPE})")"
-    detail_line "SWAP DISABLED" "$SWAP_DISABLED"
-    detail_line "DOCKER-GC HELPER" "$DOCKER_GC_INSTALLED"
-    detail_line "DOCKER-GC TIMER" "$DOCKER_GC_TIMER_INSTALLED"
-    detail_line "REDIS OVERCOMMIT" "${REDIS_OVERCOMMIT_CONFIGURED} (${REDIS_OVERCOMMIT_VALUE})"
-    detail_line "UFW FIREWALL" "$UFW_ENABLED"
-    detail_line "DAEMON CONFIG VALID" "$DAEMON_CONFIG_VALID"
+    final_line "Environment" "$environment_value" "$GN"
+    final_line "Swap disabled" "$SWAP_DISABLED" "$(choice_result_color "$SWAP_DISABLED")"
+    final_line "Redis overcommit" "${REDIS_OVERCOMMIT_CONFIGURED} (${REDIS_OVERCOMMIT_VALUE})" "$(status_value_color "$REDIS_OVERCOMMIT_CONFIGURED")"
+    final_line "UFW firewall" "$UFW_ENABLED" "$(choice_result_color "$UFW_ENABLED")"
+    final_line "Docker GC helper" "$DOCKER_GC_INSTALLED" "$(choice_result_color "$DOCKER_GC_INSTALLED")"
+    final_line "Docker GC timer" "$DOCKER_GC_TIMER_INSTALLED" "$(choice_result_color "$DOCKER_GC_TIMER_INSTALLED")"
+    final_line "Daemon config" "$daemon_status" "$(status_value_color "$DAEMON_CONFIG_VALID")"
 
     echo ""
     echo -e "${YW}Verification:${CL}"
     case "$VERIFY_STATUS" in
-        PASS) echo -e "  ${BL}Status:${CL} ${GN}${VERIFY_STATUS}${CL}" ;;
-        PASS_WITH_WARNINGS) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS}${CL}" ;;
-        FAIL) echo -e "  ${BL}Status:${CL} ${RD}${VERIFY_STATUS}${CL}" ;;
-        *) echo -e "  ${BL}Status:${CL} ${YW}${VERIFY_STATUS:-unknown}${CL}" ;;
+        PASS) final_line "Status" "$VERIFY_STATUS" "$GN" ;;
+        PASS_WITH_WARNINGS) final_line "Status" "$VERIFY_STATUS" "$YW" ;;
+        FAIL) final_line "Status" "$VERIFY_STATUS" "$RD" ;;
+        *) final_line "Status" "${VERIFY_STATUS:-unknown}" "$YW" ;;
     esac
-    echo -e "  ${BL}Passed checks:${CL} ${GN}${VERIFY_PASS_COUNT}${CL}"
-    echo -e "  ${BL}Warnings:${CL} ${YW}${VERIFY_WARN_COUNT}${CL}"
-    echo -e "  ${BL}Failed checks:${CL} ${RD}${VERIFY_FAIL_COUNT}${CL}"
-    echo -e "  ${BL}Setup log:${CL} ${GN}${LOG_FILE}${CL}"
-    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+    final_line "Pass" "$VERIFY_PASS_COUNT" "$GN"
+    final_line "Warn" "$VERIFY_WARN_COUNT" "$YW"
+    final_line "Fail" "$VERIFY_FAIL_COUNT" "$RD"
+    final_line "Setup log" "$LOG_FILE" "$GN"
+    final_line "Verify log" "$VERIFY_LOG" "$GN"
+    final_line "Display log" "$VERIFY_DISPLAY_LOG" "$GN"
+    final_line "Marker" "$COMPLETED_MARKER" "$GN"
 
     if [ -n "$VERIFY_FIRST_ISSUE_TYPE" ]; then
         echo ""
         echo -e "${YW}${VERIFY_FIRST_ISSUE_TYPE} 1:${CL}"
-        echo -e "  ${BL}Check:${CL} ${GN}${VERIFY_FIRST_ISSUE_CHECK}${CL}"
-        echo -e "  ${BL}Reason:${CL} ${YW}${VERIFY_FIRST_ISSUE_REASON}${CL}"
-        echo -e "  ${BL}Fix:${CL} ${GN}${VERIFY_FIRST_ISSUE_FIX}${CL}"
+        final_line "Check" "$VERIFY_FIRST_ISSUE_CHECK" "$GN"
+        final_line "Reason" "$VERIFY_FIRST_ISSUE_REASON" "$YW"
+        final_line "Fix" "$VERIFY_FIRST_ISSUE_FIX" "$GN"
     fi
 
     echo ""
-    echo -e "${BL}SECURITY NOTE:${CL}"
-    echo -e "${YW}Docker can publish container ports using Docker-managed firewall rules. Keep public exposure limited to Traefik/80/443 unless intentionally needed.${CL}"
-    echo -e "${YW}Safe Docker cleanup uses host-side /usr/local/sbin/docker-gc-safe and never prunes volumes automatically.${CL}"
+    echo -e "${YW}Security Note:${CL}"
+    echo -e "  ${YW}Docker can publish container ports using Docker-managed firewall rules.${CL}"
+    echo -e "  ${YW}Keep public exposure limited to Traefik 80/443 unless intentionally needed.${CL}"
+    echo -e "  ${YW}Safe Docker cleanup uses host-side /usr/local/sbin/docker-gc-safe and never prunes volumes automatically.${CL}"
     echo ""
-    echo -e "${BL}Next Step${CL}"
-    echo ""
+    echo -e "${YW}Next Step:${CL}"
     if [ "$REBOOT_AFTER_FINISH" == "y" ]; then
-        echo -e "${YW}Reboot the VM, SSH back in, then run ${YL}Script 6${YW}:${CL}"
+        echo -e "  ${YW}Reboot the VM, SSH back in, then run ${YL}Script 6${YW}:${CL}"
         echo -e "  ${BL}6-dockerENVsetup-circl8.sh${CL}"
     else
-        echo -e "${YW}Option A - ${GN}reboot first:${CL}"
-        echo -e "  ${YW}Reboot the VM, SSH back in, then run ${YL}Script 6${YW}:${CL}"
+        echo -e "  ${YW}Option A - ${GN}reboot first:${CL}"
+        echo -e "    ${YW}Reboot the VM, SSH back in, then run ${YL}Script 6${YW}:${CL}"
         echo -e "    ${BL}6-dockerENVsetup-circl8.sh${CL}"
         echo ""
-        echo -e "${YW}Option B - ${GN}continue after re-login:${CL}"
-        echo -e "  ${YW}Log out/in or start a new SSH session so docker group membership applies,${CL}"
-        echo -e "  ${YW}then run ${YL}Script 6${YW}:${CL}"
+        echo -e "  ${YW}Option B - ${GN}continue after re-login:${CL}"
+        echo -e "    ${YW}Log out/in or start a new SSH session so docker group membership applies,${CL}"
+        echo -e "    ${YW}then run ${YL}Script 6${YW}:${CL}"
         echo -e "    ${BL}6-dockerENVsetup-circl8.sh${CL}"
     fi
 }
@@ -2306,8 +2713,9 @@ function main() {
     init_script
 
     detect_environment
+    validate_script4_handoff
     check_previous_marker
-    detect_existing_setup
+    detect_existing_setup "prompt-only"
     start_confirmation
     collect_user_options
     show_ready_to_apply
