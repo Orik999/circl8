@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.6.16"
-SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="proxmox-marker-prefix-route"
+SCRIPT_VERSION="v1.6.23"
+SCRIPT_UPDATED="2026-06-09"
+SCRIPT_BUILD="setup-plan-alignment-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -89,6 +89,14 @@ SCRIPT5_VERIFY_LOG="/var/log/docker-setup-verify.log"
 SCRIPT5_MARKER_STATE="missing"
 SCRIPT5_VERIFY_LOG_STATE="missing"
 SCRIPT5_VERIFY_STATUS="missing"
+SCRIPT5_STATUS="missing"
+SCRIPT5_TARGET_USER=""
+SCRIPT5_DOCKER_SERVICE_STATE="unknown"
+SCRIPT5_CONTAINERD_SERVICE_STATE="unknown"
+SCRIPT5_DOCKER_INFO_READY="unknown"
+SCRIPT5_CROWDSEC_STATE="unknown"
+SCRIPT5_CROWDSEC_BOUNCER_STATE="unknown"
+SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE="unknown"
 SCRIPT35_MARKER="/root/.ubuntu-autoinstall-seed-completed"
 PROXMOX_MARKER_STATE="missing"
 PROXMOX_MARKER_SOURCE="no"
@@ -250,7 +258,7 @@ function setup_options_group_header() {
 
 function begin_existing_setup_check_once() {
     if [ "$EXISTING_SETUP_SECTION_SHOWN" != "yes" ]; then
-        section "EXISTING SETUP CHECK"
+        section "EXISTING DOCKER ENV"
         EXISTING_SETUP_SECTION_SHOWN="yes"
     fi
 }
@@ -368,6 +376,42 @@ function lowercase_value() {
     printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
 }
 
+function trim_value() {
+    local value="${1:-}"
+
+    value="${value//$'\r'/}"
+    value="${value//$'\n'/}"
+
+    # Trim leading/trailing shell whitespace safely.
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    printf '%s' "$value"
+}
+
+function strip_outer_quotes() {
+    local value="${1:-}"
+
+    value="$(trim_value "$value")"
+    if [ "${#value}" -ge 2 ]; then
+        local first="${value:0:1}"
+        local last="${value: -1}"
+        if { [ "$first" = '"' ] && [ "$last" = '"' ]; } || { [ "$first" = "'" ] && [ "$last" = "'" ]; }; then
+            value="${value:1:${#value}-2}"
+        fi
+    fi
+
+    trim_value "$value"
+}
+
+function marker_safe_value() {
+    strip_outer_quotes "${1:-}"
+}
+
+function env_safe_value() {
+    strip_outer_quotes "${1:-}"
+}
+
 function validate_subdomain_prefix() {
     local prefix="${1:-}"
 
@@ -436,7 +480,7 @@ function prompt_subdomain_prefix() {
 
     while true; do
         answer="$(hostname_input "$prompt" "$default_prefix")"
-        answer="$(lowercase_value "$(printf '%s' "$answer" | xargs || true)")"
+        answer="$(lowercase_value "$(trim_value "$answer")")"
 
         if validate_subdomain_prefix "$answer"; then
             printf '%s' "$answer"
@@ -452,7 +496,7 @@ function status_color_for_value() {
 
     case "$value" in
         PASS|present|ready|yes|root|*" ready") printf '%s' "$GN" ;;
-        PASS_WITH_WARNINGS) printf '%s' "$YW" ;;
+        PASS_WITH_WARNINGS|"partial setup detected") printf '%s' "$YW" ;;
         missing|unknown|FAIL|no|"not ready") printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
     esac
@@ -1433,7 +1477,7 @@ function script35_marker_key_value() {
     local value=""
 
     if root_path_exists "$SCRIPT35_MARKER"; then
-        value="$(root_read_file "$SCRIPT35_MARKER" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        value="$(marker_safe_value "$(root_read_file "$SCRIPT35_MARKER" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }')")"
     fi
 
     printf '%s' "$value"
@@ -1540,7 +1584,6 @@ function validate_dependencies() {
         touch
         tput
         tr
-        xargs
     )
 
     local cmd=""
@@ -1743,7 +1786,7 @@ function detect_proxmox_internal_url_default() {
     fi
 
     if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
-        existing_env_url="$(grep -E '^PROXMOX_URL=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_env_url="$(read_existing_env_value "PROXMOX_URL")"
         if [ -n "$existing_env_url" ] && validate_proxmox_lan_url "$existing_env_url"; then
             PROXMOX_URL_SOURCE="existing-env"
             printf '%s' "$existing_env_url"
@@ -1953,7 +1996,7 @@ function marker_display_value() {
     local value=""
 
     if root_path_exists "$file"; then
-        value="$(root_read_file "$file" 2>/dev/null | awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }' | xargs || true)"
+        value="$(marker_safe_value "$(root_read_file "$file" 2>/dev/null | awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }')")"
     fi
 
     [ -n "$value" ] || value="unknown"
@@ -1966,7 +2009,7 @@ function marker_key_value() {
     local value=""
 
     if root_path_exists "$file"; then
-        value="$(root_read_file "$file" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | xargs || true)"
+        value="$(marker_safe_value "$(root_read_file "$file" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }')")"
     fi
 
     echo "$value"
@@ -2070,15 +2113,44 @@ function previous_marker_action_menu() {
 }
 
 function default_docker_env_setup_present() {
-    local default_userdir="/home/${DEFAULT_USER}"
-    local default_docker_dir="${default_userdir}/docker"
-    local default_secrets_dir="${default_docker_dir}/secrets"
+    local default_userdir="${USERDIR:-/home/${DEFAULT_USER}}"
+    local default_docker_dir="${DOCKER_DIR:-${default_userdir}/docker}"
+    local default_secrets_dir="${DOCKER_SECRETS_DIR:-${default_docker_dir}/secrets}"
 
     if root_path_exists "$COMPLETED_MARKER" || root_path_exists "${default_docker_dir}/.env" || root_path_exists "$default_secrets_dir"; then
         return 0
     fi
 
     return 1
+}
+
+function docker_env_setup_state_label() {
+    local default_userdir="${USERDIR:-/home/${DEFAULT_USER}}"
+    local default_docker_dir="${DOCKER_DIR:-${default_userdir}/docker}"
+    local default_secrets_dir="${DOCKER_SECRETS_DIR:-${default_docker_dir}/secrets}"
+    local found_count=0
+
+    root_path_exists "$COMPLETED_MARKER" && found_count=$(( found_count + 1 ))
+    root_path_exists "${default_docker_dir}/.env" && found_count=$(( found_count + 1 ))
+    root_path_exists "$default_secrets_dir" && found_count=$(( found_count + 1 ))
+
+    if [ "$found_count" -eq 0 ]; then
+        printf 'not detected'
+    elif [ "$found_count" -ge 2 ]; then
+        printf 'detected'
+    else
+        printf 'partial setup detected'
+    fi
+}
+
+function docker_env_setup_state_color() {
+    local state="${1:-unknown}"
+
+    case "$state" in
+        "not detected"|detected) printf '%s' "$GN" ;;
+        "partial setup detected") printf '%s' "$YW" ;;
+        *) printf '%s' "$RD" ;;
+    esac
 }
 
 # --- 41. PREVIOUS MARKER CHECK ---
@@ -2090,7 +2162,7 @@ function check_previous_marker() {
     local default_secrets_dir="${default_docker_dir}/secrets"
 
     if root_path_exists "$COMPLETED_MARKER"; then
-        section "EXISTING SETUP CHECK"
+        section "EXISTING DOCKER ENV"
         EXISTING_SETUP_SECTION_SHOWN="yes"
         show_previous_marker_compact_summary "$COMPLETED_MARKER"
         echo ""
@@ -2113,7 +2185,7 @@ function check_previous_marker() {
         DOCKER_SECRETS_DIR="$default_secrets_dir"
         CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
 
-        section "EXISTING SETUP CHECK"
+        section "EXISTING DOCKER ENV"
         EXISTING_SETUP_SECTION_SHOWN="yes"
         show_existing_path_compact_summary
         echo ""
@@ -2166,7 +2238,7 @@ function script5_marker_readable_value() {
     local value=""
 
     if root_path_exists "$SCRIPT5_MARKER"; then
-        value="$(root_read_file "$SCRIPT5_MARKER" 2>/dev/null | awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }' | xargs || true)"
+        value="$(marker_safe_value "$(root_read_file "$SCRIPT5_MARKER" 2>/dev/null | awk -F': ' -v label="$label" '$1 == label { $1=""; sub(/^: /, ""); print; exit }')")"
     fi
 
     printf '%s' "$value"
@@ -2177,7 +2249,7 @@ function script5_marker_key_value() {
     local value=""
 
     if root_path_exists "$SCRIPT5_MARKER"; then
-        value="$(root_read_file "$SCRIPT5_MARKER" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }' | xargs || true)"
+        value="$(marker_safe_value "$(root_read_file "$SCRIPT5_MARKER" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }')")"
     fi
 
     printf '%s' "$value"
@@ -2211,10 +2283,13 @@ function detect_script5_preflight_state() {
 
     if root_path_exists "$SCRIPT5_VERIFY_LOG"; then
         SCRIPT5_VERIFY_LOG_STATE="present"
-        verify_from_log="$(root_read_file "$SCRIPT5_VERIFY_LOG" 2>/dev/null | awk -F= '$1 == "VERIFY_STATUS" {print $2; exit}' | xargs || true)"
+        verify_from_log="$(marker_safe_value "$(root_read_file "$SCRIPT5_VERIFY_LOG" 2>/dev/null | awk -F= '$1 == "VERIFY_STATUS" {print $2; exit}')")"
     else
         SCRIPT5_VERIFY_LOG_STATE="missing"
     fi
+
+    SCRIPT5_STATUS="$(script5_marker_key_value "SCRIPT5_STATUS")"
+    [ -n "$SCRIPT5_STATUS" ] || SCRIPT5_STATUS="missing"
 
     SCRIPT5_VERIFY_STATUS="$(script5_marker_key_value "SCRIPT5_VERIFY_STATUS")"
     [ -n "$SCRIPT5_VERIFY_STATUS" ] || SCRIPT5_VERIFY_STATUS="$verify_from_log"
@@ -2231,6 +2306,7 @@ function detect_script5_preflight_state() {
     [ -n "$marker_user" ] || marker_user="$(script5_marker_readable_value "User")"
     current_user="$(current_login_user_guess)"
 
+    SCRIPT5_TARGET_USER="$marker_user"
     if [ -n "$marker_user" ]; then
         DOCKER_PREFLIGHT_USER="$marker_user"
     else
@@ -2267,17 +2343,40 @@ function script5_preflight_needs_warning() {
     return 1
 }
 
-# --- 43. DOCKER READINESS CHECK ---
-# Checks that script 5 likely ran successfully before this script.
-function check_docker_readiness() {
-    local sudo_state="ready"
-    local script5_verify_display=""
+function systemctl_is_active_value() {
+    local service="$1"
 
-    section "ENVIRONMENT CHECK"
+    systemctl is-active "$service" 2>/dev/null || true
+}
 
-    msg_info "Checking Docker ENV prerequisites"
+function systemctl_substate_value() {
+    local service="$1"
 
-    if command -v docker >/dev/null 2>&1 && docker --version >/dev/null 2>&1; then
+    systemctl show "$service" -p SubState --value 2>/dev/null || true
+}
+
+function docker_cli_ready() {
+    command -v docker >/dev/null 2>&1 && docker --version >/dev/null 2>&1
+}
+
+function docker_compose_ready() {
+    command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1
+}
+
+function docker_info_ready() {
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if command -v docker >/dev/null 2>&1 && [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker info >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 1
+}
+
+function refresh_docker_runtime_state() {
+    if docker_cli_ready; then
         DOCKER_READY="yes"
     elif command -v docker >/dev/null 2>&1 && [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker --version >/dev/null 2>&1; then
         DOCKER_READY="yes"
@@ -2285,7 +2384,7 @@ function check_docker_readiness() {
         DOCKER_READY="no"
     fi
 
-    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    if docker_compose_ready; then
         DOCKER_COMPOSE_READY="yes"
     elif command -v docker >/dev/null 2>&1 && [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version >/dev/null 2>&1; then
         DOCKER_COMPOSE_READY="yes"
@@ -2293,33 +2392,202 @@ function check_docker_readiness() {
         DOCKER_COMPOSE_READY="no"
     fi
 
+    if docker_info_ready; then
+        SCRIPT5_DOCKER_INFO_READY="yes"
+    else
+        SCRIPT5_DOCKER_INFO_READY="no"
+    fi
+
+    SCRIPT5_DOCKER_SERVICE_STATE="$(systemctl_is_active_value docker)"
+    [ -n "$SCRIPT5_DOCKER_SERVICE_STATE" ] || SCRIPT5_DOCKER_SERVICE_STATE="unknown"
+    SCRIPT5_CONTAINERD_SERVICE_STATE="$(systemctl_is_active_value containerd)"
+    [ -n "$SCRIPT5_CONTAINERD_SERVICE_STATE" ] || SCRIPT5_CONTAINERD_SERVICE_STATE="unknown"
+}
+
+function refresh_crowdsec_runtime_state() {
+    SCRIPT5_CROWDSEC_STATE="$(systemctl_is_active_value crowdsec)"
+    [ -n "$SCRIPT5_CROWDSEC_STATE" ] || SCRIPT5_CROWDSEC_STATE="unknown"
+    SCRIPT5_CROWDSEC_BOUNCER_STATE="$(systemctl_is_active_value crowdsec-firewall-bouncer)"
+    [ -n "$SCRIPT5_CROWDSEC_BOUNCER_STATE" ] || SCRIPT5_CROWDSEC_BOUNCER_STATE="unknown"
+    SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE="$(systemctl_substate_value crowdsec-firewall-bouncer)"
+    [ -n "$SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE" ] || SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE="unknown"
+}
+
+function script5_crowdsec_selected_or_active() {
+    local selected=""
+    local marker_bouncer=""
+
+    selected="$(script5_marker_key_value "SCRIPT5_SCRIPT4_CROWDSEC_SELECTED")"
+    marker_bouncer="$(script5_marker_key_value "SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER")"
+
+    [ "$selected" == "yes" ] && return 0
+    [ "$marker_bouncer" == "active" ] && return 0
+    [ "$SCRIPT5_CROWDSEC_STATE" == "active" ] && return 0
+    [ "$SCRIPT5_CROWDSEC_BOUNCER_STATE" == "active" ] && return 0
+
+    return 1
+}
+
+function detect_environment_label() {
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        local virt=""
+        virt="$(systemd-detect-virt 2>/dev/null || true)"
+        if [ -n "$virt" ] && [ "$virt" != "none" ]; then
+            printf '%s VM' "$virt"
+            return 0
+        fi
+    fi
+
+    printf 'bare metal/unknown'
+}
+
+function derive_user_and_docker_paths() {
+    local passwd_home=""
+    local marker_docker_dir=""
+
+    [ -n "${DOCKER_USER:-}" ] || DOCKER_USER="${SCRIPT5_TARGET_USER:-}"
+    passwd_home="$(getent passwd "$DOCKER_USER" 2>/dev/null | cut -d: -f6 || true)"
+    if validate_absolute_path "$passwd_home"; then
+        USERDIR="$passwd_home"
+    else
+        USERDIR="/home/${DOCKER_USER}"
+    fi
+
+    DOCKER_DIR="${USERDIR}/docker"
+    if root_path_exists "$COMPLETED_MARKER"; then
+        marker_docker_dir="$(marker_display_value "Docker dir" "$COMPLETED_MARKER")"
+        if [ "$marker_docker_dir" != "unknown" ] && validate_absolute_path "$marker_docker_dir"; then
+            DOCKER_DIR="$marker_docker_dir"
+            USERDIR="${DOCKER_DIR%/docker}"
+        fi
+    fi
+
+    DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
+    CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
+}
+
+function validate_script5_handoff() {
+    local failure="no"
+
     detect_script5_preflight_state
-    script5_verify_display="$(script5_verify_display_value)"
-    [ -z "$SUDO_CMD" ] && sudo_state="root"
+    refresh_docker_runtime_state
+    refresh_crowdsec_runtime_state
 
-    msg_ok "ENVIRONMENT CHECK COMPLETE"
+    section "SCRIPT 5 HANDOFF"
+    echo -e "${YW}Script 5 handoff:${CL}"
+    aligned_status_line "Status" "$SCRIPT5_STATUS" "$(status_color_for_value "$SCRIPT5_STATUS")" 16
+    aligned_status_line "Verification" "$SCRIPT5_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT5_VERIFY_STATUS")" 16
+    aligned_status_line "Docker user" "${SCRIPT5_TARGET_USER:-missing}" "$(status_color_for_value "${SCRIPT5_TARGET_USER:-missing}")" 16
+    aligned_status_line "Docker" "$SCRIPT5_DOCKER_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_DOCKER_SERVICE_STATE")" 16
+    aligned_status_line "Compose" "$([ "$DOCKER_COMPOSE_READY" == "yes" ] && echo ready || echo "not ready")" "$(status_color_for_value "$([ "$DOCKER_COMPOSE_READY" == "yes" ] && echo ready || echo "not ready")")" 16
+    aligned_status_line "Containerd" "$SCRIPT5_CONTAINERD_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_CONTAINERD_SERVICE_STATE")" 16
 
-    if ! default_docker_env_setup_present; then
-        msg_ok "No existing Docker ENV setup detected"
+    if [ "$SCRIPT5_MARKER_STATE" != "present" ]; then
+        msg_warn "Script 5 marker is missing: ${SCRIPT5_MARKER}"
+        failure="yes"
     fi
 
-    echo ""
-    echo -e "${YW}Environment:${CL}"
-    aligned_status_line "Sudo/passwordless sudo" "$sudo_state" "$(status_color_for_value "$sudo_state")" 27
-    aligned_status_line "Required dependencies" "ready" "$GN" 27
-    aligned_status_line "Docker CLI" "$DOCKER_READY" "$(status_color_for_value "$DOCKER_READY")" 27
-    aligned_status_line "Docker Compose" "$DOCKER_COMPOSE_READY" "$(status_color_for_value "$DOCKER_COMPOSE_READY")" 27
-    aligned_status_line "Docker user/group" "$DOCKER_USER_IN_DOCKER_GROUP" "$(status_color_for_value "$DOCKER_USER_IN_DOCKER_GROUP")" 27
-    aligned_status_line "Previous Script 5 marker" "$SCRIPT5_MARKER_STATE" "$(status_color_for_value "$SCRIPT5_MARKER_STATE")" 27
-    aligned_status_line "Previous Script 5 verify" "$script5_verify_display" "$(status_color_for_value "$script5_verify_display")" 27
-
-    if [ "$DOCKER_READY" != "yes" ] || [ "$DOCKER_COMPOSE_READY" != "yes" ]; then
-        msg_warn "Docker or Docker Compose was not detected. Script 5 should normally run before this script."
+    if [ "$SCRIPT5_STATUS" != "completed" ]; then
+        msg_warn "Script 5 marker is not completed"
+        failure="yes"
     fi
 
-    if script5_preflight_needs_warning; then
-        msg_warn "Script 5 Docker setup was not fully verified. Run Script 5 verify-only before Script 6."
+    if [ "$SCRIPT5_VERIFY_STATUS" != "PASS" ]; then
+        msg_warn "Script 5 verification is not PASS"
+        failure="yes"
     fi
+
+    if ! validate_linux_username "${SCRIPT5_TARGET_USER:-}" || [ "${SCRIPT5_TARGET_USER:-}" == "root" ] || ! id "$SCRIPT5_TARGET_USER" >/dev/null 2>&1; then
+        msg_warn "Script 5 target user is missing, root, invalid, or not a local user"
+        failure="yes"
+    fi
+
+    if [ "$DOCKER_READY" != "yes" ]; then
+        msg_warn "Docker CLI is not ready"
+        failure="yes"
+    fi
+
+    if [ "$DOCKER_COMPOSE_READY" != "yes" ]; then
+        msg_warn "Docker Compose plugin is not ready"
+        failure="yes"
+    fi
+
+    if [ "$SCRIPT5_DOCKER_INFO_READY" != "yes" ]; then
+        msg_warn "docker info is not ready"
+        failure="yes"
+    fi
+
+    if [ "$SCRIPT5_DOCKER_SERVICE_STATE" != "active" ]; then
+        msg_warn "Docker service is not active"
+        failure="yes"
+    fi
+
+    if [ "$SCRIPT5_CONTAINERD_SERVICE_STATE" != "active" ]; then
+        msg_warn "containerd service is not active"
+        failure="yes"
+    fi
+
+    if [ "$DOCKER_USER_IN_DOCKER_GROUP" == "not ready" ]; then
+        msg_warn "Script 5 target user is not confirmed in docker group"
+        failure="yes"
+    fi
+
+    if script5_crowdsec_selected_or_active; then
+        if [ "$SCRIPT5_CROWDSEC_STATE" != "active" ] || [ "$SCRIPT5_CROWDSEC_BOUNCER_STATE" != "active" ] || [ "$SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE" != "running" ]; then
+            msg_warn "CrowdSec runtime continuity is not healthy"
+            failure="yes"
+        fi
+    fi
+
+    if [ "$failure" == "yes" ]; then
+        echo ""
+        echo -e "${RD}Script 6 cannot continue until Script 5 handoff is healthy.${CL}"
+        echo -e "${YW}Complete/fix Script 5 first, then rerun Script 6.${CL}"
+        exit 1
+    fi
+
+    DOCKER_USER="$SCRIPT5_TARGET_USER"
+    DEFAULT_USER="$DOCKER_USER"
+    msg_ok "SCRIPT 5 HANDOFF VERIFIED"
+}
+
+function show_script5_handoff_summary() {
+    echo -e "${YW}Script 5:${CL}"
+    aligned_value_line "Verification" "$SCRIPT5_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT5_VERIFY_STATUS")" 21
+    aligned_value_line "Docker user" "$DOCKER_USER" "$GN" 21
+    aligned_value_line "Docker" "$SCRIPT5_DOCKER_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_DOCKER_SERVICE_STATE")" 21
+    aligned_value_line "Compose" "$([ "$DOCKER_COMPOSE_READY" == "yes" ] && echo ready || echo "not ready")" "$(status_color_for_value "$([ "$DOCKER_COMPOSE_READY" == "yes" ] && echo ready || echo "not ready")")" 21
+    aligned_value_line "Containerd" "$SCRIPT5_CONTAINERD_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_CONTAINERD_SERVICE_STATE")" 21
+}
+
+# --- 43. DOCKER READINESS CHECK ---
+# Checks that script 5 likely ran successfully before this script.
+function check_docker_readiness() {
+    local sudo_state="ready"
+    local env_setup_state=""
+    local env_setup_color=""
+    local env_label_prefix="${CM}"
+
+    detect_script5_preflight_state
+    if validate_linux_username "${SCRIPT5_TARGET_USER:-}" && [ "${SCRIPT5_TARGET_USER:-}" != "root" ]; then
+        DEFAULT_USER="$SCRIPT5_TARGET_USER"
+        DOCKER_USER="$SCRIPT5_TARGET_USER"
+        derive_user_and_docker_paths
+    fi
+
+    section "ENVIRONMENT CHECK"
+
+    [ -z "$SUDO_CMD" ] && sudo_state="ready"
+    env_setup_state="$(docker_env_setup_state_label)"
+    env_setup_color="$(docker_env_setup_state_color "$env_setup_state")"
+    [ "$env_setup_state" == "partial setup detected" ] && env_label_prefix="$WARN"
+
+    msg_ok "ENVIRONMENT DETECTED ($(detect_environment_label))"
+    echo -e " ${CM} ${GN}Passwordless sudo:${CL} ${GN}${sudo_state}${CL}"
+    echo -e " ${CM} ${GN}Required dependencies:${CL} ${GN}ready${CL}"
+    echo -e " ${env_label_prefix} ${GN}Existing Docker ENV setup:${CL} ${env_setup_color}${env_setup_state}${CL}"
+
+    validate_script5_handoff
 }
 
 
@@ -2328,69 +2596,29 @@ function check_docker_readiness() {
 function collect_user_and_path_inputs() {
     setup_options_group_header "User / path"
 
-    while true; do
-        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
-        DOCKER_USER="$(timed_text_input "Enter Linux username" "$DEFAULT_USER")"
-        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
-
-        if validate_linux_username "$DOCKER_USER"; then
-            break
-        fi
-
-        msg_warn "Invalid username. Use lowercase Linux username format, for example: dockeradmin"
-    done
-
-    if ! id "$DOCKER_USER" >/dev/null 2>&1; then
-        msg_error "Linux user ${DOCKER_USER} does not exist. Run script 4 first or create the user."
+    DOCKER_USER="$SCRIPT5_TARGET_USER"
+    if ! validate_linux_username "$DOCKER_USER" || [ "$DOCKER_USER" == "root" ] || ! id "$DOCKER_USER" >/dev/null 2>&1; then
+        msg_error "Script 5 target user is invalid. Complete/fix Script 5 first."
     fi
 
-    DEFAULT_USERDIR="/home/${DOCKER_USER}"
-    DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
-
-    while true; do
-        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
-        USERDIR="$(timed_text_input "Enter user home directory" "$DEFAULT_USERDIR")"
-        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
-
-        if validate_absolute_path "$USERDIR"; then
-            break
-        fi
-
-        msg_warn "Invalid user directory. Use a safe absolute path such as /home/${DOCKER_USER}"
-    done
-
-    DEFAULT_DOCKER_DIR="${USERDIR}/docker"
-
-    while true; do
-        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
-        DOCKER_DIR="$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")"
-        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
-
-        if validate_absolute_path "$DOCKER_DIR"; then
-            break
-        fi
-
-        msg_warn "Invalid Docker directory. Use a safe absolute path such as /home/${DOCKER_USER}/docker"
-    done
-
-    DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
-    CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
+    derive_user_and_docker_paths
 
     PUID_VALUE="$(id -u "$DOCKER_USER")"
     PGID_VALUE="$(id -g "$DOCKER_USER")"
     DOCKER_GID_VALUE="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
 
-    aligned_check_line "Linux username" "$DOCKER_USER" "$ANS" 18
-    aligned_check_line "User home" "$USERDIR" "$ANS" 18
-    aligned_check_line "Docker directory" "$DOCKER_DIR" "$ANS" 18
+    aligned_value_line "Docker user" "$DOCKER_USER" "$GN" 21
+    aligned_value_line "User home" "$USERDIR" "$GN" 21
+    aligned_value_line "Docker directory" "$DOCKER_DIR" "$GN" 21
 
     if id -nG "$DOCKER_USER" 2>/dev/null | grep -qw docker; then
         DOCKER_USER_IN_DOCKER_GROUP="yes"
     else
         DOCKER_USER_IN_DOCKER_GROUP="no"
-        msg_warn "User ${DOCKER_USER} is not currently in docker group. Script 5 should add it; reboot/login may be needed."
+        msg_error "User ${DOCKER_USER} is not in docker group. Complete/fix Script 5 first."
     fi
 }
+
 
 # --- 45. EXISTING SETUP DETECTION ---
 # Detects existing .env, secrets folder or marker to prevent accidental secret rotation.
@@ -2399,7 +2627,7 @@ function read_existing_env_value() {
     local value=""
 
     if [ -n "${DOCKER_DIR:-}" ] && root_path_exists "${DOCKER_DIR}/.env"; then
-        value="$(root_read_file "${DOCKER_DIR}/.env" 2>/dev/null | grep -E "^${key}=" | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        value="$(env_safe_value "$(root_read_file "${DOCKER_DIR}/.env" 2>/dev/null | awk -F= -v key="$key" '$1 == key { $1=""; sub(/^=/, ""); print; exit }')")"
     fi
 
     printf '%s' "$value"
@@ -2412,9 +2640,7 @@ function email_input() {
     local value=""
 
     while true; do
-        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         value="$(timed_text_input "$prompt" "$default")"
-        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
         value="$(printf '%s' "$value" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
         if validate_email "$value"; then
@@ -2465,14 +2691,11 @@ function collect_traefik_authentik_email_inputs() {
         TRAEFIK_ACME_EMAIL_VALUE="$(email_input "Enter ACME email" "$default_acme_email")"
         AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(email_input "Enter Authentik email" "$default_authentik_email")"
 
-        aligned_value_line "ACME email" "$TRAEFIK_ACME_EMAIL_VALUE" "$ANS" 18
-        aligned_value_line "Authentik email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 18
     else
         shared_email="$(email_input "Enter Traefik/AuthentiK email" "$default_shared_email")"
         TRAEFIK_ACME_EMAIL_VALUE="$shared_email"
         AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$shared_email"
 
-        aligned_value_line "Email" "$shared_email" "$ANS" 18
     fi
 
     return 0
@@ -2525,12 +2748,8 @@ function detect_existing_setup() {
     tty_print "${BFR}"
 
     if [ "$MARKER_RERUN_SELECTED" != "yes" ]; then
-        section "EXISTING SETUP CHECK"
-        EXISTING_SETUP_SECTION_SHOWN="yes"
+        echo ""
         show_existing_path_compact_summary
-    fi
-
-    if [ "$MARKER_RERUN_SELECTED" != "yes" ]; then
         echo ""
         echo -e "${YW}Action:${CL}"
         existing_action="$(previous_marker_action_menu)"
@@ -2571,22 +2790,17 @@ function detect_existing_setup() {
 function collect_domain_cloudflare_inputs() {
     local cf_zone_summary="empty"
     local cf_token_summary="not provided"
-    local cf_email_summary="not used"
-
-    setup_options_group_header "Domain / Cloudflare"
-
+    local cf_email_summary=""
     local domain_default=""
+
+    setup_options_group_header "Domain / Timezone"
 
     domain_default="$(proxmox_domain_default)"
 
-    SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
     TZ_VALUE="$(timed_text_input "Enter timezone" "$DEFAULT_TZ")"
-    unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
     while true; do
-        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         DOMAIN_VALUE="$(timed_text_input "Enter domain" "$domain_default")"
-        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
         if validate_domain "$DOMAIN_VALUE"; then
             break
@@ -2595,9 +2809,11 @@ function collect_domain_cloudflare_inputs() {
         msg_warn "Invalid domain. Use a bare domain such as example.com, without https:// or slashes."
     done
 
+    setup_options_group_header "Cloudflare"
+
     while true; do
         CF_ZONE_ID_VALUE="$(sensitive_visible_line_input "Enter Cloudflare Zone ID, or leave empty")" || CF_ZONE_ID_VALUE=""
-        CF_ZONE_ID_VALUE="$(printf '%s' "$CF_ZONE_ID_VALUE" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        CF_ZONE_ID_VALUE="$(trim_value "$CF_ZONE_ID_VALUE")"
 
         if validate_cf_zone_id "$CF_ZONE_ID_VALUE"; then
             if [ -n "$CF_ZONE_ID_VALUE" ]; then
@@ -2605,6 +2821,7 @@ function collect_domain_cloudflare_inputs() {
             else
                 cf_zone_summary="empty"
             fi
+            aligned_check_line "Zone ID" "$cf_zone_summary" "$GN" 21
             break
         fi
 
@@ -2614,7 +2831,7 @@ function collect_domain_cloudflare_inputs() {
     # Ask for API token before email. When token auth is used, Cloudflare email is not required.
     # This avoids cf-companion receiving email-style auth values when a scoped API token is intended.
     CF_API_TOKEN_VALUE="$(sensitive_visible_line_input "Enter Cloudflare API Token, or leave empty")" || CF_API_TOKEN_VALUE=""
-    CF_API_TOKEN_VALUE="$(printf '%s' "$CF_API_TOKEN_VALUE" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    CF_API_TOKEN_VALUE="$(trim_value "$CF_API_TOKEN_VALUE")"
 
     if [ -z "$CF_API_TOKEN_VALUE" ] && root_file_not_empty "$CF_API_TOKEN_FILE"; then
         CF_API_TOKEN_VALUE="$(root_read_file "$CF_API_TOKEN_FILE")"
@@ -2631,12 +2848,13 @@ function collect_domain_cloudflare_inputs() {
         CF_AUTH_MODE="email_or_manual"
         CF_EMAIL_REQUIRED="yes"
         cf_token_summary="not provided"
-        cf_email_summary="required"
+    fi
 
+    aligned_check_line "API token" "$cf_token_summary" "$GN" 21
+
+    if [ "$CF_EMAIL_REQUIRED" == "yes" ]; then
         while true; do
-            SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
             CF_API_EMAIL_VALUE="$(timed_text_input "Enter Cloudflare API Email" "$DEFAULT_CF_API_EMAIL")"
-            unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
             if validate_email "$CF_API_EMAIL_VALUE"; then
                 cf_email_summary="${CF_API_EMAIL_VALUE}"
@@ -2645,26 +2863,83 @@ function collect_domain_cloudflare_inputs() {
 
             msg_warn "Invalid email format."
         done
-    fi
-
-    aligned_check_line "Timezone" "$TZ_VALUE" "$ANS" 19
-    aligned_check_line "Domain" "$DOMAIN_VALUE" "$ANS" 19
-    aligned_check_line "Cloudflare Zone ID" "$cf_zone_summary" "$GN" 19
-    aligned_check_line "Cloudflare token" "$cf_token_summary" "$GN" 19
-    if [ "$CF_EMAIL_REQUIRED" == "yes" ]; then
-        aligned_check_line "Cloudflare email" "$cf_email_summary" "$ANS" 19
+        aligned_check_line "API Email" "$cf_email_summary" "$ANS" 21
     else
-        aligned_check_line "Cloudflare email" "not used" "$GN" 19
+        aligned_value_line "Auth mode" "API token" "$GN" 21
     fi
 
     return 0
 }
 
+function collect_network_proxmox_inputs() {
+    local proxmox_yn=""
+    local default_proxmox_prefix=""
+    local default_proxmox_url=""
+    local detected_primary_ip=""
+    local detected_gateway_ip=""
 
-# --- 47. SERVICE HOSTNAMES INPUTS ---
-# Collects optional per-service hostnames and writes into variables used by write_env_file().
+    setup_options_group_header "Network / Proxmox"
+
+    detected_primary_ip="$(detect_primary_ipv4)"
+    detected_gateway_ip="$(detect_default_gateway_ipv4)"
+    default_proxmox_url="$(detect_proxmox_internal_url_default)"
+
+    [ -n "$detected_primary_ip" ] && aligned_value_line "System IPv4" "$detected_primary_ip" "$GN" 21
+    [ -n "$detected_gateway_ip" ] && aligned_value_line "Default gateway" "$detected_gateway_ip" "$GN" 21
+    aligned_value_line "LAN URL" "$([ -n "$default_proxmox_url" ] && echo "$default_proxmox_url" || echo "not found")" "$GN" 21
+    aligned_value_line "Proxmox marker" "$([ "$PROXMOX_MARKER_SOURCE" == "yes" ] && echo detected || echo not detected)" "$GN" 21
+    echo ""
+
+    proxmox_yn="$(timed_yes_no "Create optional Proxmox route in Traefik dynamic config?" "y")"
+
+    if [[ "$proxmox_yn" =~ ^[Yy] ]]; then
+        PROXMOX_ROUTE_ENABLED="y"
+        default_proxmox_prefix="$(proxmox_prefix_default)"
+        validate_subdomain_prefix "$default_proxmox_prefix" || default_proxmox_prefix="proxmox"
+        PROXMOX_PREFIX="$default_proxmox_prefix"
+        PROXMOX_HOST="$(hostname_from_prefix "$PROXMOX_PREFIX" "$DOMAIN_VALUE")"
+
+        if [ -n "$(read_existing_env_value "PROXMOX_HOST")" ]; then
+            PROXMOX_ROUTE_SOURCE="existing-env"
+        elif [ -n "${PROXMOX_MARKER_HOSTNAME:-}" ] || [ -n "${PROXMOX_MARKER_FQDN:-}" ]; then
+            PROXMOX_ROUTE_SOURCE="marker/default"
+        else
+            PROXMOX_ROUTE_SOURCE="default"
+        fi
+
+        if [ -n "$default_proxmox_url" ]; then
+            PROXMOX_URL="$default_proxmox_url"
+        else
+            while true; do
+                PROXMOX_URL="$(timed_text_input "Enter Proxmox LAN URL" "")"
+                PROXMOX_URL="$(trim_value "$PROXMOX_URL")"
+
+                if validate_proxmox_lan_url "$PROXMOX_URL"; then
+                    PROXMOX_URL_SOURCE="user"
+                    break
+                fi
+
+                msg_warn "Invalid Proxmox LAN URL. Use http:// or https:// URL format with port 8006."
+            done
+        fi
+
+        aligned_value_line "Route" "enabled" "$GN" 21
+        aligned_value_line "Source" "$PROXMOX_ROUTE_SOURCE" "$GN" 21
+    else
+        PROXMOX_ROUTE_ENABLED="n"
+        PROXMOX_PREFIX=""
+        PROXMOX_HOST=""
+        PROXMOX_URL=""
+        PROXMOX_ROUTE_SOURCE="skipped"
+        aligned_value_line "Route" "skipped" "$GN" 21
+        aligned_value_line "Source" "$PROXMOX_ROUTE_SOURCE" "$GN" 21
+    fi
+
+    return 0
+}
+
 function collect_service_hostnames() {
-    setup_options_group_header "Service hostnames"
+    setup_options_group_header "Service URLs"
 
     local d="${DOMAIN_VALUE}"
     local def_landing="${d}"
@@ -2677,12 +2952,14 @@ function collect_service_hostnames() {
     local def_n8n_prefix="n8n"
     local def_files_prefix="files"
     local def_code_prefix="code"
+    local def_proxmox_prefix=""
 
     local landing_www_prefix=""
     local authentik_prefix=""
     local traefik_prefix=""
     local admin_prefix=""
     local admin_dashboard_prefix=""
+    local proxmox_prefix=""
     local postiz_prefix=""
     local n8n_prefix=""
     local files_prefix=""
@@ -2694,6 +2971,7 @@ function collect_service_hostnames() {
     local existing_traefik=""
     local existing_admin=""
     local existing_admin_dashboard=""
+    local existing_proxmox=""
     local existing_postiz=""
     local existing_n8n=""
     local existing_files=""
@@ -2710,19 +2988,20 @@ function collect_service_hostnames() {
     esac
 
     if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
-        existing_landing="$(grep -E '^LANDING_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_landing_www="$(grep -E '^LANDING_WWW_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_authentik="$(grep -E '^AUTHENTIK_ROUTE_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_landing="$(read_existing_env_value "LANDING_HOST")"
+        existing_landing_www="$(read_existing_env_value "LANDING_WWW_HOST")"
+        existing_authentik="$(read_existing_env_value "AUTHENTIK_ROUTE_HOST")"
         if [ -z "$existing_authentik" ]; then
-            existing_authentik="$(grep -E '^AUTHENTIK_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+            existing_authentik="$(read_existing_env_value "AUTHENTIK_HOST")"
         fi
-        existing_traefik="$(grep -E '^TRAEFIK_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_admin="$(grep -E '^ADMIN_UI_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_admin_dashboard="$(grep -E '^ADMIN_DASHBOARD_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_postiz="$(grep -E '^POSTIZ_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_n8n="$(grep -E '^N8N_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_files="$(grep -E '^FILEBROWSER_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_code="$(grep -E '^VSCODE_HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_traefik="$(read_existing_env_value "TRAEFIK_HOST")"
+        existing_admin="$(read_existing_env_value "ADMIN_UI_HOST")"
+        existing_admin_dashboard="$(read_existing_env_value "ADMIN_DASHBOARD_HOST")"
+        existing_proxmox="$(read_existing_env_value "PROXMOX_HOST")"
+        existing_postiz="$(read_existing_env_value "POSTIZ_HOST")"
+        existing_n8n="$(read_existing_env_value "N8N_HOST")"
+        existing_files="$(read_existing_env_value "FILEBROWSER_HOST")"
+        existing_code="$(read_existing_env_value "VSCODE_HOST")"
     fi
 
     if [ -n "${ADMIN_UI_HOST:-}" ]; then
@@ -2744,13 +3023,24 @@ function collect_service_hostnames() {
     files_prefix="$(prefix_from_hostname "$existing_files" "$d" "$def_files_prefix" "Files")"
     code_prefix="$(prefix_from_hostname "$existing_code" "$d" "$def_code_prefix" "VS Code")"
 
+    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
+        def_proxmox_prefix="${PROXMOX_PREFIX:-$(proxmox_prefix_default)}"
+        validate_subdomain_prefix "$def_proxmox_prefix" || def_proxmox_prefix="proxmox"
+        proxmox_prefix="$(prefix_from_hostname "${existing_proxmox:-${PROXMOX_HOST:-}}" "$d" "$def_proxmox_prefix" "Proxmox")"
+    fi
+
     LANDING_WWW_HOST="$(hostname_from_prefix "$landing_www_prefix" "$d")"
     AUTHENTIK_ROUTE_HOST_VALUE="$(hostname_from_prefix "$authentik_prefix" "$d")"
     AUTHENTIK_HOST="$AUTHENTIK_ROUTE_HOST_VALUE"
     TRAEFIK_HOST="$(hostname_from_prefix "$traefik_prefix" "$d")"
+    TRAEFIK_DASHBOARD_HOST="$TRAEFIK_HOST"
     ADMIN_UI_HOST="$(hostname_from_prefix "$admin_prefix" "$d")"
     ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
     ADMIN_DASHBOARD_HOST="$(hostname_from_prefix "$admin_dashboard_prefix" "$d")"
+    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
+        PROXMOX_PREFIX="$proxmox_prefix"
+        PROXMOX_HOST="$(hostname_from_prefix "$PROXMOX_PREFIX" "$d")"
+    fi
     POSTIZ_HOST="$(hostname_from_prefix "$postiz_prefix" "$d")"
     N8N_HOST="$(hostname_from_prefix "$n8n_prefix" "$d")"
     FILEBROWSER_HOST="$(hostname_from_prefix "$files_prefix" "$d")"
@@ -2759,22 +3049,25 @@ function collect_service_hostnames() {
     AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
     AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
 
-    aligned_value_line "Landing page" "$LANDING_HOST" "$GN" 19
-    aligned_value_line "Landing www" "$LANDING_WWW_HOST" "$GN" 19
-    aligned_value_line "Authentik" "$AUTHENTIK_ROUTE_HOST_VALUE" "$GN" 19
-    aligned_value_line "Traefik" "$TRAEFIK_HOST" "$GN" 19
-    aligned_value_line "Admin UI" "$ADMIN_UI_HOST" "$GN" 19
-    aligned_value_line "Admin Dashboard" "$ADMIN_DASHBOARD_HOST" "$GN" 19
-    aligned_value_line "Postiz/Circl8 app" "$POSTIZ_HOST" "$GN" 19
-    aligned_value_line "n8n" "$N8N_HOST" "$GN" 19
-    aligned_value_line "Files" "$FILEBROWSER_HOST" "$GN" 19
-    aligned_value_line "VS Code" "$VSCODE_HOST" "$GN" 19
+    aligned_value_line "Landing page" "$LANDING_HOST" "$GN" 21
+    aligned_value_line "Landing www" "$LANDING_WWW_HOST" "$GN" 21
+    aligned_value_line "Authentik" "$AUTHENTIK_ROUTE_HOST_VALUE" "$GN" 21
+    aligned_value_line "Traefik" "$TRAEFIK_HOST" "$GN" 21
+    aligned_value_line "Admin UI" "$ADMIN_UI_HOST" "$GN" 21
+    aligned_value_line "Admin Dashboard" "$ADMIN_DASHBOARD_HOST" "$GN" 21
+    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
+        aligned_value_line "Proxmox" "$PROXMOX_HOST" "$GN" 21
+    fi
+    aligned_value_line "Postiz/Circl8 app" "$POSTIZ_HOST" "$GN" 21
+    aligned_value_line "n8n" "$N8N_HOST" "$GN" 21
+    aligned_value_line "Files" "$FILEBROWSER_HOST" "$GN" 21
+    aligned_value_line "VS Code" "$VSCODE_HOST" "$GN" 21
     echo ""
 
     customize="$(timed_yes_no "Customize service hostnames?" "N")"
 
     if [[ "$customize" =~ ^[Nn]$ ]]; then
-        msg_ok "Service hostnames set to defaults/preserved values"
+        msg_ok "Service URLs set to defaults/preserved values"
         return 0
     fi
 
@@ -2783,6 +3076,7 @@ function collect_service_hostnames() {
     local original_traefik_prefix="$traefik_prefix"
     local original_admin_prefix="$admin_prefix"
     local original_admin_dashboard_prefix="$admin_dashboard_prefix"
+    local original_proxmox_prefix="$proxmox_prefix"
     local original_postiz_prefix="$postiz_prefix"
     local original_n8n_prefix="$n8n_prefix"
     local original_files_prefix="$files_prefix"
@@ -2792,25 +3086,32 @@ function collect_service_hostnames() {
     echo -e "${YW}Enter subdomain prefixes only. Script 6 will append .${DOMAIN_VALUE}.${CL}"
     echo ""
 
-    SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
     landing_www_prefix="$(prompt_subdomain_prefix "Landing www subdomain" "$landing_www_prefix")"
     authentik_prefix="$(prompt_subdomain_prefix "Authentik subdomain" "$authentik_prefix")"
     traefik_prefix="$(prompt_subdomain_prefix "Traefik subdomain" "$traefik_prefix")"
     admin_prefix="$(prompt_subdomain_prefix "Admin UI subdomain" "$admin_prefix")"
     admin_dashboard_prefix="$(prompt_subdomain_prefix "Admin Dashboard subdomain" "$admin_dashboard_prefix")"
+    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
+        proxmox_prefix="$(prompt_subdomain_prefix "Proxmox subdomain" "$proxmox_prefix")"
+    fi
     postiz_prefix="$(prompt_subdomain_prefix "Postiz app subdomain" "$postiz_prefix")"
     n8n_prefix="$(prompt_subdomain_prefix "n8n subdomain" "$n8n_prefix")"
     files_prefix="$(prompt_subdomain_prefix "Files subdomain" "$files_prefix")"
     code_prefix="$(prompt_subdomain_prefix "VS Code subdomain" "$code_prefix")"
-    unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
     LANDING_WWW_HOST="$(hostname_from_prefix "$landing_www_prefix" "$d")"
     AUTHENTIK_ROUTE_HOST_VALUE="$(hostname_from_prefix "$authentik_prefix" "$d")"
     AUTHENTIK_HOST="$AUTHENTIK_ROUTE_HOST_VALUE"
     TRAEFIK_HOST="$(hostname_from_prefix "$traefik_prefix" "$d")"
+    TRAEFIK_DASHBOARD_HOST="$TRAEFIK_HOST"
     ADMIN_UI_HOST="$(hostname_from_prefix "$admin_prefix" "$d")"
     ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
     ADMIN_DASHBOARD_HOST="$(hostname_from_prefix "$admin_dashboard_prefix" "$d")"
+    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
+        PROXMOX_PREFIX="$proxmox_prefix"
+        PROXMOX_HOST="$(hostname_from_prefix "$PROXMOX_PREFIX" "$d")"
+        PROXMOX_ROUTE_SOURCE="user"
+    fi
     POSTIZ_HOST="$(hostname_from_prefix "$postiz_prefix" "$d")"
     N8N_HOST="$(hostname_from_prefix "$n8n_prefix" "$d")"
     FILEBROWSER_HOST="$(hostname_from_prefix "$files_prefix" "$d")"
@@ -2820,18 +3121,6 @@ function collect_service_hostnames() {
     AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
 
     echo ""
-    echo -e "${YW}Service hostnames:${CL}"
-    aligned_value_line "Landing page" "$LANDING_HOST" "$GN" 19
-    aligned_value_line "Landing www" "$LANDING_WWW_HOST" "$ANS" 19
-    aligned_value_line "Authentik" "$AUTHENTIK_ROUTE_HOST_VALUE" "$ANS" 19
-    aligned_value_line "Traefik" "$TRAEFIK_HOST" "$ANS" 19
-    aligned_value_line "Admin UI" "$ADMIN_UI_HOST" "$ANS" 19
-    aligned_value_line "Admin Dashboard" "$ADMIN_DASHBOARD_HOST" "$ANS" 19
-    aligned_value_line "Postiz/Circl8 app" "$POSTIZ_HOST" "$ANS" 19
-    aligned_value_line "n8n" "$N8N_HOST" "$ANS" 19
-    aligned_value_line "Files" "$FILEBROWSER_HOST" "$ANS" 19
-    aligned_value_line "VS Code" "$VSCODE_HOST" "$ANS" 19
-
     confirm="$(timed_yes_no "Write these hostnames to .env?" "Y")"
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         msg_ok "Hostnames will be written into .env when write_env_file() runs"
@@ -2841,9 +3130,14 @@ function collect_service_hostnames() {
         AUTHENTIK_ROUTE_HOST_VALUE="$(hostname_from_prefix "$original_authentik_prefix" "$d")"
         AUTHENTIK_HOST="$AUTHENTIK_ROUTE_HOST_VALUE"
         TRAEFIK_HOST="$(hostname_from_prefix "$original_traefik_prefix" "$d")"
+        TRAEFIK_DASHBOARD_HOST="$TRAEFIK_HOST"
         ADMIN_UI_HOST="$(hostname_from_prefix "$original_admin_prefix" "$d")"
         ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
         ADMIN_DASHBOARD_HOST="$(hostname_from_prefix "$original_admin_dashboard_prefix" "$d")"
+        if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
+            PROXMOX_PREFIX="$original_proxmox_prefix"
+            PROXMOX_HOST="$(hostname_from_prefix "$PROXMOX_PREFIX" "$d")"
+        fi
         POSTIZ_HOST="$(hostname_from_prefix "$original_postiz_prefix" "$d")"
         N8N_HOST="$(hostname_from_prefix "$original_n8n_prefix" "$d")"
         FILEBROWSER_HOST="$(hostname_from_prefix "$original_files_prefix" "$d")"
@@ -2854,97 +3148,11 @@ function collect_service_hostnames() {
     fi
 }
 
-
-# --- 46A. TRAEFIK CONFIG INPUTS ---
-# Collects non-secret Traefik values used to render template config files.
-# Cloudflare token stays in ${CF_API_TOKEN_FILE}; it is never embedded into Traefik YAML.
 function collect_traefik_inputs() {
-    local default_traefik_host="traefik.${DOMAIN_VALUE}"
-    local proxmox_yn=""
-    local default_proxmox_prefix=""
-    local default_proxmox_url=""
-    local detected_primary_ip=""
-    local detected_gateway_ip=""
+    TRAEFIK_DASHBOARD_HOST="${TRAEFIK_HOST:-traefik.${DOMAIN_VALUE}}"
 
-    detected_primary_ip="$(detect_primary_ipv4)"
-    detected_gateway_ip="$(detect_default_gateway_ipv4)"
-    default_proxmox_url="$(detect_proxmox_internal_url_default)"
-
-    setup_options_group_header "Traefik config"
-
-    while true; do
-        TRAEFIK_DASHBOARD_HOST="$(timed_text_input "Enter Traefik dashboard host" "$default_traefik_host")"
-
-        if validate_domain "$TRAEFIK_DASHBOARD_HOST"; then
-            break
-        fi
-
-        msg_warn "Invalid Traefik host. Use a bare hostname such as traefik.${DOMAIN_VALUE}."
-    done
-
-    echo ""
-    echo -e "${YW}Network / Proxmox:${CL}"
-    [ -n "$detected_primary_ip" ] && aligned_value_line "System IPv4" "$detected_primary_ip" "$GN" 17
-    [ -n "$detected_gateway_ip" ] && aligned_value_line "Default gateway" "$detected_gateway_ip" "$GN" 17
-    aligned_value_line "Proxmox marker" "$([ "$PROXMOX_MARKER_SOURCE" == "yes" ] && echo detected || echo not detected)" "$GN" 17
-    if [ -n "$default_proxmox_url" ]; then
-        aligned_value_line "Proxmox LAN URL" "$default_proxmox_url" "$GN" 17
-    else
-        aligned_value_line "Proxmox LAN URL" "not found" "$GN" 17
-    fi
-    echo ""
-
-    proxmox_yn="$(timed_yes_no "Create optional Proxmox route in Traefik dynamic config?" "y")"
-
-    if [[ "$proxmox_yn" =~ ^[Yy] ]]; then
-        PROXMOX_ROUTE_ENABLED="y"
-        default_proxmox_prefix="$(proxmox_prefix_default)"
-        validate_subdomain_prefix "$default_proxmox_prefix" || default_proxmox_prefix="proxmox"
-
-        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
-        PROXMOX_PREFIX="$(prompt_subdomain_prefix "Enter Proxmox subdomain" "$default_proxmox_prefix")"
-        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
-        PROXMOX_HOST="$(hostname_from_prefix "$PROXMOX_PREFIX" "$DOMAIN_VALUE")"
-
-        if [ "$PROXMOX_PREFIX" == "$default_proxmox_prefix" ]; then
-            if [ -n "$(read_existing_env_value "PROXMOX_HOST")" ]; then
-                PROXMOX_ROUTE_SOURCE="existing-env"
-            elif [ -n "${PROXMOX_MARKER_HOSTNAME:-}" ] || [ -n "${PROXMOX_MARKER_FQDN:-}" ]; then
-                PROXMOX_ROUTE_SOURCE="marker/default"
-            else
-                PROXMOX_ROUTE_SOURCE="default"
-            fi
-        else
-            PROXMOX_ROUTE_SOURCE="user"
-        fi
-
-        if [ -n "$default_proxmox_url" ]; then
-            PROXMOX_URL="$default_proxmox_url"
-        else
-            while true; do
-                PROXMOX_URL="$(editable_input_loop "Enter Proxmox LAN URL" "" "")"
-                PROXMOX_URL="$(printf '%s' "$PROXMOX_URL" | xargs || true)"
-
-                if validate_proxmox_lan_url "$PROXMOX_URL"; then
-                    PROXMOX_URL_SOURCE="user"
-                    break
-                fi
-
-                msg_warn "Invalid Proxmox LAN URL. Use http:// or https:// URL format with port 8006."
-            done
-        fi
-
-        msg_ok "Proxmox route enabled"
-        aligned_value_line "Host" "$PROXMOX_HOST" "$GN" 17
-        aligned_value_line "LAN URL" "$PROXMOX_URL" "$GN" 17
-        aligned_value_line "Source" "$PROXMOX_ROUTE_SOURCE" "$GN" 17
-    else
-        PROXMOX_ROUTE_ENABLED="n"
-        PROXMOX_PREFIX=""
-        PROXMOX_HOST=""
-        PROXMOX_URL=""
-        PROXMOX_ROUTE_SOURCE="skipped"
-        msg_skip "Proxmox route skipped"
+    if ! validate_domain "$TRAEFIK_DASHBOARD_HOST"; then
+        msg_error "Traefik dashboard host is invalid after Service URLs collection."
     fi
 
     TRAEFIK_DIR="${DOCKER_DIR}/appdata/traefik"
@@ -2955,11 +3163,6 @@ function collect_traefik_inputs() {
     return 0
 }
 
-
-# --- 47. HTPASSWD OPTIONAL INPUT ---
-# Handles optional Traefik basic-auth credentials without logging sensitive values.
-# If username/password is entered, final output shows only the generated hashed htpasswd line.
-# If full htpasswd line is provided, final output does not show the provided hash.
 function collect_htpasswd_inputs() {
     local has_htpasswd_yn=""
     local create_htpasswd_yn=""
@@ -2994,9 +3197,7 @@ function collect_htpasswd_inputs() {
         create_htpasswd_yn="$(timed_yes_no "Create htpasswd entry now?" "n")"
 
         if [[ "$create_htpasswd_yn" =~ ^[Yy] ]]; then
-            SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
             HTPASSWD_USER_VALUE="$(timed_text_input "Enter htpasswd username" "$DEFAULT_HTPASSWD_USER")"
-            unset SUPPRESS_TEXT_INPUT_CONFIRMATION
 
             HTPASSWD_PASSWORD_VALUE="$(sensitive_visible_line_input "Enter htpasswd password" "htpasswd password captured")"
 
@@ -3005,7 +3206,6 @@ function collect_htpasswd_inputs() {
                 HTPASSWD_LINE_VALUE="${HTPASSWD_USER_VALUE}:${HTPASSWD_HASH_VALUE}"
                 HTPASSWD_PASSWORD_VALUE=""
                 HTPASSWD_MODE="generated"
-                aligned_value_line "htpasswd user" "$HTPASSWD_USER_VALUE" "$ANS" 15
                 aligned_value_line "htpasswd line" "generated" "$GN" 15
             else
                 HTPASSWD_MODE="empty"
@@ -3078,35 +3278,24 @@ function collect_admin_ui_selection() {
     set_admin_ui_details
 
     msg_ok "Admin UI selected: ${ADMIN_UI_DISPLAY_NAME}"
-    aligned_value_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$ANS" 9
-    aligned_value_line "Host" "$ADMIN_UI_HOST" "$ANS" 9
-    aligned_value_line "URL" "$ADMIN_UI_URL" "$ANS" 9
 
     return 0
 }
 
-# --- 47B. AUTHENTIK BOOTSTRAP INPUTS ---
-# Collects Authentik external URL and bootstrap admin values before .env is written.
 function collect_authentik_inputs() {
     local password_choice=""
     local token_choice=""
-    local api_choice=""
-    local default_admin_email=""
-    local password_summary="generated"
-    local token_summary="generated"
-    local api_summary="reuse bootstrap token"
 
     setup_options_group_header "Authentik bootstrap"
 
-    refresh_authentik_route_url_values
-    SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
-    AUTHENTIK_HOST_VALUE="$(timed_text_input "Enter Authentik external URL" "${AUTHENTIK_EXTERNAL_URL_VALUE:-https://${AUTHENTIK_ROUTE_HOST_VALUE:-auth.${DOMAIN_VALUE}}}")"
-    AUTHENTIK_HOST_BROWSER_VALUE="$(timed_text_input "Enter Authentik browser URL" "${AUTHENTIK_HOST_VALUE}")"
-    unset SUPPRESS_TEXT_INPUT_CONFIRMATION
+    AUTHENTIK_ROUTE_HOST_VALUE="$(bare_host_from_url_or_host "${AUTHENTIK_ROUTE_HOST_VALUE:-auth.${DOMAIN_VALUE}}")"
+    AUTHENTIK_EXTERNAL_URL_VALUE="https://${AUTHENTIK_ROUTE_HOST_VALUE}"
+    AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
+    AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
 
     refresh_authentik_route_url_values
     if [[ "$(lowercase_value "$AUTHENTIK_ROUTE_HOST_VALUE")" != *."$(lowercase_value "$DOMAIN_VALUE")" ]]; then
-        msg_warn "Authentik external URL is outside the configured domain and cannot be used for normal routing. Resetting route to auth.${DOMAIN_VALUE}."
+        msg_warn "Authentik route host is outside the configured domain. Resetting route to auth.${DOMAIN_VALUE}."
         AUTHENTIK_ROUTE_HOST_VALUE="auth.${DOMAIN_VALUE}"
         AUTHENTIK_EXTERNAL_URL_VALUE="https://${AUTHENTIK_ROUTE_HOST_VALUE}"
         AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
@@ -3117,12 +3306,7 @@ function collect_authentik_inputs() {
         AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="admin@${DOMAIN_VALUE}"
     fi
 
-    aligned_value_line "External URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 18
-    aligned_value_line "Browser URL" "$AUTHENTIK_HOST_BROWSER_VALUE" "$ANS" 18
-    aligned_value_line "Bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$GN" 18
-
-    echo ""
-    echo -e "${YW}Authentik bootstrap password:${CL}"
+    echo -e "${YW}Password:${CL}"
     echo -e "  ${BL}1)${CL} Auto-generate password ${GN}(recommended)${CL}"
     echo -e "  ${BL}2)${CL} Enter custom password"
     echo ""
@@ -3130,92 +3314,54 @@ function collect_authentik_inputs() {
     password_choice="$(numeric_menu_input "Select Authentik bootstrap password option [1-2]" "1" "1" "2")"
     case "$password_choice" in
         2)
-            msg_ok "Custom Authentik bootstrap password selected"
-            AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(sensitive_visible_line_input "Enter Authentik bootstrap admin password" "Authentik bootstrap password captured")" || AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
-            AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" | tr -d '\r\n')"
+            AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(sensitive_visible_line_input "Enter Authentik bootstrap admin password" "Authentik custom bootstrap password captured")" || AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
+            AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(trim_value "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE")"
             [ -n "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" ] || msg_error "Authentik bootstrap password cannot be empty."
             AUTHENTIK_BOOTSTRAP_PASSWORD_MODE="custom"
-            password_summary="captured"
             ;;
         *)
             AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(generate_secret)"
             AUTHENTIK_BOOTSTRAP_PASSWORD_MODE="auto"
-            password_summary="generated"
+            msg_ok "Authentik bootstrap password generated"
             ;;
     esac
 
     echo ""
-    echo -e "${YW}Authentik bootstrap token:${CL}"
-    echo -e "  ${BL}1)${CL} Auto-generate token ${GN}(recommended)${CL}"
-    echo -e "  ${BL}2)${CL} Enter custom token"
+    echo -e "${YW}Bootstrap/API token:${CL}"
+    echo -e "  ${BL}1)${CL} Auto-generate bootstrap/API token ${GN}(recommended)${CL}"
+    echo -e "  ${BL}2)${CL} Enter custom bootstrap/API token"
+    echo -e "  ${BL}3)${CL} Skip API automation"
     echo ""
 
-    token_choice="$(numeric_menu_input "Select Authentik bootstrap token option [1-2]" "1" "1" "2")"
+    token_choice="$(numeric_menu_input "Select Authentik bootstrap/API token option [1-3]" "1" "1" "3")"
     case "$token_choice" in
         2)
-            msg_ok "Custom Authentik bootstrap token selected"
-            AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(sensitive_visible_line_input "Enter Authentik bootstrap token" "Authentik bootstrap token captured")" || AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
-            AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" | tr -d '\r\n')"
-            [ -n "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" ] || msg_error "Authentik bootstrap token cannot be empty."
+            AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(sensitive_visible_line_input "Enter Authentik bootstrap/API token" "Authentik custom bootstrap API token captured")" || AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
+            AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(trim_value "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE")"
+            [ -n "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" ] || msg_error "Authentik bootstrap/API token cannot be empty."
             AUTHENTIK_BOOTSTRAP_TOKEN_MODE="custom"
-            token_summary="captured"
+            AUTHENTIK_API_TOKEN_MODE="bootstrap"
+            AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
+            ;;
+        3)
+            AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(generate_secret)"
+            AUTHENTIK_BOOTSTRAP_TOKEN_MODE="auto"
+            AUTHENTIK_API_TOKEN_MODE="skip"
+            AUTHENTIK_API_TOKEN_VALUE=""
+            msg_ok "Authentik API automation skipped"
             ;;
         *)
             AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(generate_secret)"
             AUTHENTIK_BOOTSTRAP_TOKEN_MODE="auto"
-            token_summary="generated"
-            ;;
-    esac
-
-    echo -e "${YW}Authentik API token:${CL}"
-    echo -e "  ${BL}1)${CL} Reuse bootstrap token ${GN}(recommended)${CL}"
-    echo -e "  ${BL}2)${CL} Paste existing API token"
-    echo -e "  ${BL}3)${CL} Skip API automation"
-    echo ""
-
-    api_choice="$(numeric_menu_input "Select Authentik API token option [1-3]" "1" "1" "3")"
-    case "$api_choice" in
-        2)
-            msg_ok "Existing Authentik API token selected"
-            AUTHENTIK_API_TOKEN_VALUE="$(sensitive_visible_line_input "Paste existing Authentik API token" "Authentik API token captured")" || AUTHENTIK_API_TOKEN_VALUE=""
-            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '\r\n')"
-            if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
-                AUTHENTIK_API_TOKEN_MODE="provided"
-                api_summary="captured"
-            else
-                AUTHENTIK_API_TOKEN_MODE="bootstrap"
-                AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
-                api_summary="reuse bootstrap token"
-                msg_skip "No API token pasted; bootstrap token will be used"
-            fi
-            ;;
-        3)
-            AUTHENTIK_API_TOKEN_MODE="skip"
-            AUTHENTIK_API_TOKEN_VALUE=""
-            api_summary="skipped"
-            ;;
-        *)
             AUTHENTIK_API_TOKEN_MODE="bootstrap"
             AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
-            api_summary="reuse bootstrap token"
+            msg_ok "Authentik bootstrap API token generated"
             ;;
     esac
-
-    echo -e "${YW}Authentik bootstrap:${CL}"
-    aligned_value_line "External URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 18
-    aligned_value_line "Browser URL" "$AUTHENTIK_HOST_BROWSER_VALUE" "$ANS" 18
-    aligned_value_line "Bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$GN" 18
-    aligned_value_line "Password" "$password_summary" "$GN" 18
-    aligned_value_line "Bootstrap token" "$token_summary" "$GN" 18
-    aligned_value_line "API token" "$api_summary" "$GN" 18
-
-    collect_authentik_email_smtp_inputs
 
     return 0
 }
 
-# --- 47C. AUTHENTIK SMTP RELAY INPUTS ---
-# Collects optional Authentik SMTP relay values, preserving existing settings when present.
 function collect_authentik_email_smtp_inputs() {
     local configure_choice=""
     local existing_host=""
@@ -3235,14 +3381,14 @@ function collect_authentik_email_smtp_inputs() {
     setup_options_group_header "Authentik SMTP relay"
 
     if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
-        existing_host="$(grep -E '^AUTHENTIK_EMAIL__HOST=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_port="$(grep -E '^AUTHENTIK_EMAIL__PORT=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_username="$(grep -E '^AUTHENTIK_EMAIL__USERNAME=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_password="$(grep -E '^AUTHENTIK_EMAIL__PASSWORD=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_use_tls="$(grep -E '^AUTHENTIK_EMAIL__USE_TLS=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_use_ssl="$(grep -E '^AUTHENTIK_EMAIL__USE_SSL=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_timeout="$(grep -E '^AUTHENTIK_EMAIL__TIMEOUT=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        existing_from="$(grep -E '^AUTHENTIK_EMAIL__FROM=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        existing_host="$(read_existing_env_value "AUTHENTIK_EMAIL__HOST")"
+        existing_port="$(read_existing_env_value "AUTHENTIK_EMAIL__PORT")"
+        existing_username="$(read_existing_env_value "AUTHENTIK_EMAIL__USERNAME")"
+        existing_password="$(read_existing_env_value "AUTHENTIK_EMAIL__PASSWORD")"
+        existing_use_tls="$(read_existing_env_value "AUTHENTIK_EMAIL__USE_TLS")"
+        existing_use_ssl="$(read_existing_env_value "AUTHENTIK_EMAIL__USE_SSL")"
+        existing_timeout="$(read_existing_env_value "AUTHENTIK_EMAIL__TIMEOUT")"
+        existing_from="$(read_existing_env_value "AUTHENTIK_EMAIL__FROM")"
     fi
 
     if [ -n "${AUTHENTIK_EMAIL__HOST:-}" ] || [ -n "${AUTHENTIK_EMAIL__USERNAME:-}" ] || [ -n "${AUTHENTIK_EMAIL__PASSWORD:-}" ] || [ -n "$existing_host" ] || [ -n "$existing_username" ] || [ -n "$existing_password" ]; then
@@ -3260,12 +3406,12 @@ function collect_authentik_email_smtp_inputs() {
 
     if [ "$has_existing_smtp" == "yes" ]; then
         echo -e "${YW}Existing SMTP settings:${CL}"
-        aligned_value_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-not configured}" "$GN" 18
-        aligned_value_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}" "$GN" 18
-        aligned_value_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)" "$GN" 18
-        aligned_value_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE:-not set}" "$GN" 18
-        aligned_value_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}" "$GN" 18
-        aligned_value_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}" "$GN" 18
+        aligned_value_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-not configured}" "$GN" 21
+        aligned_value_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}" "$GN" 21
+        aligned_value_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)" "$GN" 21
+        aligned_value_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE:-not set}" "$GN" 21
+        aligned_value_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}" "$GN" 21
+        aligned_value_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}s" "$GN" 21
         echo ""
 
         configure_choice="$(timed_yes_no "Update Authentik SMTP relay settings?" "N")"
@@ -3277,11 +3423,11 @@ function collect_authentik_email_smtp_inputs() {
         show_smtp_plan="yes"
     else
         echo -e "${YW}Defaults:${CL}"
-        aligned_value_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE}" "$GN" 18
-        aligned_value_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE}" "$GN" 18
-        aligned_value_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE}" "$GN" 18
-        aligned_value_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}" "$GN" 18
-        aligned_value_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE}" "$GN" 18
+        aligned_value_line "SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE}" "$GN" 21
+        aligned_value_line "SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE}" "$GN" 21
+        aligned_value_line "SMTP from" "${AUTHENTIK_EMAIL__FROM_VALUE}" "$GN" 21
+        aligned_value_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}" "$GN" 21
+        aligned_value_line "Timeout" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE}s" "$GN" 21
         echo ""
 
         use_defaults="$(timed_yes_no "Use these SMTP defaults?" "Y")"
@@ -3294,22 +3440,17 @@ function collect_authentik_email_smtp_inputs() {
 
     if [ "$show_smtp_plan" == "yes" ]; then
         while true; do
-            SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
             AUTHENTIK_EMAIL__HOST_VALUE="$(hostname_input "Enter Authentik SMTP host" "${AUTHENTIK_EMAIL__HOST_VALUE:-smtp-relay.brevo.com}")"
-            unset SUPPRESS_TEXT_INPUT_CONFIRMATION
             if [ -n "$AUTHENTIK_EMAIL__HOST_VALUE" ]; then
                 break
             fi
             msg_warn "SMTP host cannot be empty."
         done
 
-        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         AUTHENTIK_EMAIL__PORT_VALUE="$(text_input "Enter Authentik SMTP port" "${AUTHENTIK_EMAIL__PORT_VALUE:-587}")"
-        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
     fi
 
-    AUTHENTIK_EMAIL__USERNAME_VALUE="$(editable_input_loop "Enter Authentik SMTP username" "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}" "")"
-    msg_ok "Authentik SMTP username captured"
+    AUTHENTIK_EMAIL__USERNAME_VALUE="$(text_input "Enter Authentik SMTP username" "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}")"
 
     if [ "$has_existing_smtp" == "yes" ] && [ -n "${AUTHENTIK_EMAIL__PASSWORD_VALUE:-}" ]; then
         password_rotate="$(timed_yes_no "Rotate/update Authentik SMTP password?" "N")"
@@ -3326,25 +3467,8 @@ function collect_authentik_email_smtp_inputs() {
     [ -n "$AUTHENTIK_EMAIL__PASSWORD_VALUE" ] || msg_error "Authentik SMTP password cannot be empty when SMTP host is configured."
 
     if [ "$show_smtp_plan" == "yes" ]; then
-        SUPPRESS_TEXT_INPUT_CONFIRMATION="yes"
         AUTHENTIK_EMAIL__FROM_VALUE="$(text_input "Enter Authentik SMTP sender address" "${AUTHENTIK_EMAIL__FROM_VALUE}")"
         AUTHENTIK_EMAIL__TIMEOUT_VALUE="$(text_input "Enter Authentik SMTP timeout seconds" "${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}")"
-        unset SUPPRESS_TEXT_INPUT_CONFIRMATION
-
-        echo ""
-        echo -e "${YW}SMTP plan:${CL}"
-        aligned_value_line "SMTP host" "$AUTHENTIK_EMAIL__HOST_VALUE" "$ANS" 18
-        aligned_value_line "SMTP port" "$AUTHENTIK_EMAIL__PORT_VALUE" "$ANS" 18
-        aligned_value_line "SMTP username" "$( [ -n "$AUTHENTIK_EMAIL__USERNAME_VALUE" ] && echo set || echo missing)" "$GN" 18
-        aligned_value_line "SMTP from" "$AUTHENTIK_EMAIL__FROM_VALUE" "$ANS" 18
-        aligned_value_line "TLS/SSL" "${AUTHENTIK_EMAIL__USE_TLS_VALUE}/${AUTHENTIK_EMAIL__USE_SSL_VALUE}" "$GN" 18
-        aligned_value_line "Timeout" "$AUTHENTIK_EMAIL__TIMEOUT_VALUE" "$ANS" 18
-    elif [ "$defaults_selected" == "yes" ]; then
-        echo ""
-        echo -e "${YW}SMTP:${CL}"
-        aligned_value_line "Defaults" "selected" "$GN" 18
-        aligned_value_line "Username" "captured" "$GN" 18
-        aligned_value_line "Password" "captured" "$GN" 18
     fi
 }
 # --- 47C. SETUP PLAN SUMMARY ---
@@ -3381,37 +3505,60 @@ function show_ready_summary_and_confirm() {
         service_secret_summary="reuse existing"
     fi
 
-    bootstrap_summary="$([ "${AUTHENTIK_BOOTSTRAP_PASSWORD_MODE:-auto}" == "custom" ] && echo "custom password" || echo "generated password") / $([ "${AUTHENTIK_BOOTSTRAP_TOKEN_MODE:-auto}" == "custom" ] && echo "custom token" || echo "generated token")"
+    if [ "${AUTHENTIK_API_TOKEN_MODE:-skip}" == "skip" ]; then
+        bootstrap_summary="$([ "${AUTHENTIK_BOOTSTRAP_PASSWORD_MODE:-auto}" == "custom" ] && echo "custom password" || echo "generated password") / API automation skipped"
+    else
+        bootstrap_summary="$([ "${AUTHENTIK_BOOTSTRAP_PASSWORD_MODE:-auto}" == "custom" ] && echo "custom password" || echo "generated password") / $([ "${AUTHENTIK_BOOTSTRAP_TOKEN_MODE:-auto}" == "custom" ] && echo "custom token" || echo "generated token")"
+    fi
 
     echo -e "${YW}No Docker ENV files, secrets or templates have been written yet.${CL}"
     echo ""
+    show_script5_handoff_summary
+    echo ""
     echo -e "${YW}User / path:${CL}"
-    aligned_value_line "Docker user" "$DOCKER_USER" "$ANS" 17
-    aligned_value_line "Docker directory" "$DOCKER_DIR" "$ANS" 17
+    aligned_value_line "Docker user" "$DOCKER_USER" "$GN" 21
+    aligned_value_line "User home" "$USERDIR" "$GN" 21
+    aligned_value_line "Docker directory" "$DOCKER_DIR" "$GN" 21
     echo ""
     echo -e "${YW}Domain / routing:${CL}"
-    aligned_value_line "Domain" "$DOMAIN_VALUE" "$ANS" 17
-    aligned_value_line "Cloudflare auth" "$cloudflare_auth_summary" "$GN" 17
-    aligned_value_line "Cloudflare email" "$([ "$CF_EMAIL_REQUIRED" == "yes" ] && echo "${CF_API_EMAIL_VALUE}" || echo "not used")" "$GN" 17
-    aligned_value_line "Proxmox route" "$(yes_no_label "$PROXMOX_ROUTE_ENABLED")" "$GN" 17
+    aligned_value_line "Domain" "$DOMAIN_VALUE" "$ANS" 21
+    aligned_value_line "Cloudflare auth" "$cloudflare_auth_summary" "$ANS" 21
+    if [ "$CF_EMAIL_REQUIRED" == "yes" ]; then
+        aligned_value_line "Cloudflare email" "$CF_API_EMAIL_VALUE" "$GN" 21
+    fi
+    aligned_value_line "Proxmox route" "$(yes_no_label "$PROXMOX_ROUTE_ENABLED")" "$ANS" 21
     if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
-        aligned_value_line "Proxmox host" "$PROXMOX_HOST" "$GN" 17
-        aligned_value_line "Proxmox LAN URL" "$PROXMOX_URL" "$GN" 17
+        aligned_value_line "Proxmox LAN URL" "$PROXMOX_URL" "$GN" 21
     fi
     echo ""
+    echo -e "${YW}Service URLs:${CL}"
+    aligned_value_line "Landing page" "$LANDING_HOST" "$GN" 21
+    aligned_value_line "Landing www" "$LANDING_WWW_HOST" "$GN" 21
+    aligned_value_line "Authentik" "$AUTHENTIK_ROUTE_HOST_VALUE" "$GN" 21
+    aligned_value_line "Traefik" "$TRAEFIK_HOST" "$GN" 21
+    aligned_value_line "Admin UI" "$ADMIN_UI_HOST" "$GN" 21
+    aligned_value_line "Admin Dashboard" "$ADMIN_DASHBOARD_HOST" "$GN" 21
+    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
+        aligned_value_line "Proxmox" "$PROXMOX_HOST" "$GN" 21
+    fi
+    aligned_value_line "Postiz/Circl8 app" "$POSTIZ_HOST" "$GN" 21
+    aligned_value_line "n8n" "$N8N_HOST" "$GN" 21
+    aligned_value_line "Files" "$FILEBROWSER_HOST" "$GN" 21
+    aligned_value_line "VS Code" "$VSCODE_HOST" "$GN" 21
+    echo ""
     echo -e "${YW}Applications:${CL}"
-    aligned_value_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$ANS" 15
-    aligned_value_line "Authentik URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 15
-    aligned_value_line "ACME email" "$TRAEFIK_ACME_EMAIL_VALUE" "$GN" 15
-    aligned_value_line "Authentik email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$GN" 15
-    aligned_value_line "SMTP relay" "$smtp_summary" "$GN" 15
+    aligned_value_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$ANS" 21
+    aligned_value_line "Authentik URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 21
+    aligned_value_line "ACME email" "$TRAEFIK_ACME_EMAIL_VALUE" "$ANS" 21
+    aligned_value_line "Authentik email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 21
+    aligned_value_line "SMTP relay" "$smtp_summary" "$GN" 21
     echo ""
     echo -e "${YW}Secrets:${CL}"
-    aligned_value_line "Service secrets" "$service_secret_summary" "$GN" 22
-    aligned_value_line "Cloudflare token" "$cloudflare_token_summary" "$GN" 22
-    aligned_value_line "Authentik bootstrap" "$bootstrap_summary" "$GN" 22
+    aligned_value_line "Service secrets" "$service_secret_summary" "$GN" 21
+    aligned_value_line "Cloudflare token" "$cloudflare_token_summary" "$GN" 21
+    aligned_value_line "Authentik bootstrap" "$bootstrap_summary" "$ANS" 21
     if [ "$EXISTING_SETUP" == "yes" ]; then
-        aligned_value_line "Regenerate secrets" "$(yes_no_label "$REGENERATE_SECRETS")" "$ANS" 22
+        aligned_value_line "Regenerate secrets" "$(yes_no_label "$REGENERATE_SECRETS")" "$ANS" 21
     fi
     echo ""
     echo -e "${RD}After confirmation, Script 6 will create:${CL}"
@@ -3948,6 +4095,39 @@ function verify_record_first_issue() {
 }
 
 
+function verify_docker_runtime_continuity() {
+    refresh_docker_runtime_state
+
+    if command -v docker >/dev/null 2>&1; then verify_pass "Docker CLI detected"; else verify_fail "Docker CLI detected" "docker command not found" "run Script 5 before deploying"; fi
+    if [ "$SCRIPT5_DOCKER_INFO_READY" == "yes" ]; then verify_pass "Docker info succeeds"; else verify_fail "Docker info succeeds" "docker daemon is not responding" "run sudo systemctl status docker"; fi
+    if [ "$DOCKER_COMPOSE_READY" == "yes" ]; then verify_pass "Docker Compose plugin detected"; else verify_fail "Docker Compose plugin" "docker compose version failed" "run Script 5 and re-login if needed"; fi
+    if [ "$SCRIPT5_DOCKER_SERVICE_STATE" == "active" ]; then verify_pass "Docker service active"; else verify_fail "Docker service active" "state is ${SCRIPT5_DOCKER_SERVICE_STATE:-unknown}" "run sudo systemctl status docker"; fi
+    if [ "$SCRIPT5_CONTAINERD_SERVICE_STATE" == "active" ]; then verify_pass "containerd service active"; else verify_fail "containerd service active" "state is ${SCRIPT5_CONTAINERD_SERVICE_STATE:-unknown}" "run sudo systemctl status containerd"; fi
+    if id "$DOCKER_USER" >/dev/null 2>&1; then verify_pass "Docker user exists"; else verify_fail "Docker user exists" "user ${DOCKER_USER:-unknown} missing" "run Script 4/5 or create the Docker user"; fi
+    if id -nG "$DOCKER_USER" 2>/dev/null | grep -qw docker; then verify_pass "Docker user is in docker group"; else verify_fail "Docker user docker group" "membership not confirmed" "run Script 5 and re-login"; fi
+}
+
+function verify_crowdsec_runtime_continuity() {
+    refresh_crowdsec_runtime_state
+
+    if ! script5_crowdsec_selected_or_active; then
+        verify_info "CrowdSec runtime continuity skipped; CrowdSec was not detected as selected/active"
+        return 0
+    fi
+
+    if [ "$SCRIPT5_CROWDSEC_STATE" == "active" ]; then
+        verify_pass "CrowdSec service active"
+    else
+        verify_warn "CrowdSec service" "state is ${SCRIPT5_CROWDSEC_STATE:-unknown}" "run sudo systemctl status crowdsec"
+    fi
+
+    if [ "$SCRIPT5_CROWDSEC_BOUNCER_STATE" == "active" ] && [ "$SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE" == "running" ]; then
+        verify_pass "CrowdSec firewall bouncer runtime active/running"
+    else
+        verify_warn "CrowdSec firewall bouncer runtime" "state is ${SCRIPT5_CROWDSEC_BOUNCER_STATE:-unknown}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE:-unknown}" "run sudo systemctl status crowdsec-firewall-bouncer"
+    fi
+}
+
 # --- 54. VERIFICATION REPORT ---
 # Creates a verification report without printing secret values.
 function create_verification_report() {
@@ -3960,7 +4140,6 @@ function create_verification_report() {
     local report_body=""
     local secret_file=""
     local current_mode=""
-    local docker_compose_ok="no"
 
     report_body="$(mktemp)"
     TEMP_FILES+=("$report_body")
@@ -4051,14 +4230,8 @@ function create_verification_report() {
     if root_path_exists "${DOCKER_DIR}/.env" && { root_read_file "${DOCKER_DIR}/.env" 2>/dev/null | grep -q '^POSTIZ_JWT_SECRET='; }; then verify_pass "Postiz JWT secret env present"; else verify_fail "Postiz JWT secret env" "missing from .env" "rerun Script 6 .env generation"; fi
     if root_file_not_empty "${DOCKER_SECRETS_DIR}/postiz_jwt_secret"; then verify_pass "postiz_jwt_secret exists and is non-empty"; else verify_fail "postiz_jwt_secret" "missing or empty" "rerun Script 6 setup or restore secret file"; fi
 
-    if command -v docker >/dev/null 2>&1; then verify_pass "Docker CLI detected"; else verify_warn "Docker CLI detected" "docker command not found" "run Script 5 before deploying"; fi
-    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-        docker_compose_ok="yes"
-    elif command -v docker >/dev/null 2>&1 && [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version >/dev/null 2>&1; then
-        docker_compose_ok="yes"
-    fi
-    if [ "$docker_compose_ok" == "yes" ]; then verify_pass "Docker Compose plugin detected"; else verify_warn "Docker Compose plugin" "not detected for current shell" "run Script 5 and re-login if needed"; fi
-    if id -nG "$DOCKER_USER" 2>/dev/null | grep -qw docker; then verify_pass "Docker user is in docker group"; else verify_warn "Docker user docker group" "membership not confirmed" "run Script 5 and re-login"; fi
+    verify_docker_runtime_continuity
+    verify_crowdsec_runtime_continuity
 
     if root_path_exists "$COMPLETED_MARKER"; then verify_pass "Completion marker exists"; else verify_warn "Completion marker exists" "marker not present yet" "rerun marker write step"; fi
 
@@ -4143,6 +4316,13 @@ Htpasswd mode: $HTPASSWD_MODE
 Docker ready: $DOCKER_READY
 Docker Compose ready: $DOCKER_COMPOSE_READY
 Docker user in docker group: $DOCKER_USER_IN_DOCKER_GROUP
+Script 5 status: $SCRIPT5_STATUS
+Script 5 verification: $SCRIPT5_VERIFY_STATUS
+Script 5 target user: $SCRIPT5_TARGET_USER
+Docker service: $SCRIPT5_DOCKER_SERVICE_STATE
+Containerd service: $SCRIPT5_CONTAINERD_SERVICE_STATE
+CrowdSec service: $SCRIPT5_CROWDSEC_STATE
+CrowdSec bouncer: ${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
 Secret screen displayed: $SECRET_DISPLAY_WAS_SHOWN
 Secret screen cleared: $SECRET_SCREEN_CLEARED
 Verify log: $VERIFY_LOG
@@ -4160,6 +4340,12 @@ SCRIPT6_TRAEFIK_CONFIG=$([ -n "$TRAEFIK_STATIC_CONFIG_FILE" ] && [ -n "$TRAEFIK_
 SCRIPT6_PROXMOX_HOST=${PROXMOX_HOST:-}
 SCRIPT6_PROXMOX_LAN_URL=${PROXMOX_URL:-}
 SCRIPT6_PROXMOX_MARKER_SOURCE=$PROXMOX_MARKER_SOURCE
+SCRIPT6_SCRIPT5_STATUS=$SCRIPT5_STATUS
+SCRIPT6_SCRIPT5_VERIFY_STATUS=$SCRIPT5_VERIFY_STATUS
+SCRIPT6_DOCKER_SERVICE=$SCRIPT5_DOCKER_SERVICE_STATE
+SCRIPT6_CONTAINERD_SERVICE=$SCRIPT5_CONTAINERD_SERVICE_STATE
+SCRIPT6_CROWDSEC_SERVICE=$SCRIPT5_CROWDSEC_STATE
+SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
 SCRIPT6_SECRETS_READY=unknown
 SCRIPT6_ENV_FILE_READY=unknown
 SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS
@@ -4191,6 +4377,13 @@ Htpasswd mode: $HTPASSWD_MODE
 Docker ready: $DOCKER_READY
 Docker Compose ready: $DOCKER_COMPOSE_READY
 Docker user in docker group: $DOCKER_USER_IN_DOCKER_GROUP
+Script 5 status: $SCRIPT5_STATUS
+Script 5 verification: $SCRIPT5_VERIFY_STATUS
+Script 5 target user: $SCRIPT5_TARGET_USER
+Docker service: $SCRIPT5_DOCKER_SERVICE_STATE
+Containerd service: $SCRIPT5_CONTAINERD_SERVICE_STATE
+CrowdSec service: $SCRIPT5_CROWDSEC_STATE
+CrowdSec bouncer: ${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
 Secret screen displayed: $SECRET_DISPLAY_WAS_SHOWN
 Secret screen cleared: $SECRET_SCREEN_CLEARED
 Verify log: $VERIFY_LOG
@@ -4208,6 +4401,12 @@ SCRIPT6_TRAEFIK_CONFIG=$([ -n "$TRAEFIK_STATIC_CONFIG_FILE" ] && [ -n "$TRAEFIK_
 SCRIPT6_PROXMOX_HOST=${PROXMOX_HOST:-}
 SCRIPT6_PROXMOX_LAN_URL=${PROXMOX_URL:-}
 SCRIPT6_PROXMOX_MARKER_SOURCE=$PROXMOX_MARKER_SOURCE
+SCRIPT6_SCRIPT5_STATUS=$SCRIPT5_STATUS
+SCRIPT6_SCRIPT5_VERIFY_STATUS=$SCRIPT5_VERIFY_STATUS
+SCRIPT6_DOCKER_SERVICE=$SCRIPT5_DOCKER_SERVICE_STATE
+SCRIPT6_CONTAINERD_SERVICE=$SCRIPT5_CONTAINERD_SERVICE_STATE
+SCRIPT6_CROWDSEC_SERVICE=$SCRIPT5_CROWDSEC_STATE
+SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
 SCRIPT6_SECRETS_READY=unknown
 SCRIPT6_ENV_FILE_READY=unknown
 SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS
@@ -4252,6 +4451,12 @@ function update_completion_marker_script6_fields() {
         echo "SCRIPT6_PROXMOX_HOST=${PROXMOX_HOST:-}"
         echo "SCRIPT6_PROXMOX_LAN_URL=${PROXMOX_URL:-}"
         echo "SCRIPT6_PROXMOX_MARKER_SOURCE=$PROXMOX_MARKER_SOURCE"
+        echo "SCRIPT6_SCRIPT5_STATUS=$SCRIPT5_STATUS"
+        echo "SCRIPT6_SCRIPT5_VERIFY_STATUS=$SCRIPT5_VERIFY_STATUS"
+        echo "SCRIPT6_DOCKER_SERVICE=$SCRIPT5_DOCKER_SERVICE_STATE"
+        echo "SCRIPT6_CONTAINERD_SERVICE=$SCRIPT5_CONTAINERD_SERVICE_STATE"
+        echo "SCRIPT6_CROWDSEC_SERVICE=$SCRIPT5_CROWDSEC_STATE"
+        echo "SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}"
         echo "SCRIPT6_TRAEFIK_CONFIG=$traefik_config_ready"
         echo "SCRIPT6_SECRETS_READY=$secrets_ready"
         echo "SCRIPT6_ENV_FILE_READY=$env_file_ready"
@@ -4464,7 +4669,7 @@ function show_secrets_once_without_logging() {
 
     echo -e "${YW}DOMAIN / CLOUDFLARE:${CL}"
     echo -e "DOMAIN=${GN}${DOMAIN_VALUE}${CL}"
-    echo -e "CF_API_EMAIL=${GN}${CF_API_EMAIL_VALUE:-not used with token auth}${CL}"
+    echo -e "CF_API_EMAIL=${GN}${CF_API_EMAIL_VALUE:-not required with token auth}${CL}"
     echo -e "CF_ZONE_ID=${GN}$([ -n "$CF_ZONE_ID_VALUE" ] && echo captured || echo empty)${CL}"
     echo -e "CF_API_TOKEN_FILE=${GN}${CF_API_TOKEN_FILE}${CL}"
     echo -e "TRAEFIK_STATIC_CONFIG=${GN}${TRAEFIK_STATIC_CONFIG_FILE}${CL}"
@@ -4662,7 +4867,7 @@ function show_clean_final_summary() {
     echo ""
     echo -e "${YW}Sensitive values were displayed once, not logged, then terminal output was cleared where supported.${CL}"
     echo ""
-    echo -e "${BL}Next Step${CL}"
+    echo -e "${BL}Next Step:${CL}"
     echo -e "  ${YW}Run ${ANS}6.5-dockerDeploy-circl8.sh${YW} to create Docker networks and deploy the selected dependency-aware stack plan.${CL}"
     echo ""
 }
@@ -4684,9 +4889,11 @@ function main() {
     collect_domain_cloudflare_inputs
     collect_traefik_authentik_email_inputs
     collect_admin_ui_selection
+    collect_network_proxmox_inputs
     collect_service_hostnames
-    collect_authentik_inputs
     collect_traefik_inputs
+    collect_authentik_inputs
+    collect_authentik_email_smtp_inputs
     collect_htpasswd_inputs
     show_ready_summary_and_confirm
 
