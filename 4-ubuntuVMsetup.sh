@@ -37,9 +37,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.1.20"
+SCRIPT_VERSION="v2.1.21"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="crowdsec-managed-bouncer-cleanup"
+SCRIPT_BUILD="apt-lock-wait-polish"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -317,10 +317,94 @@ function on_error() {
     echo -e "${RD}ERROR:${CL} Script failed at line ${line_no}. Check ${LOG_FILE}"
 }
 
+
+function command_needs_apt_lock_wait() {
+    local arg=""
+
+    for arg in "$@"; do
+        case "$arg" in
+            apt|apt-get|dpkg) return 0 ;;
+        esac
+    done
+
+    return 1
+}
+
+function apt_lock_is_busy() {
+    local lock_file=""
+    local lock_files=(
+        /var/lib/dpkg/lock-frontend
+        /var/lib/dpkg/lock
+        /var/cache/apt/archives/lock
+        /var/lib/apt/lists/lock
+    )
+    local proc=""
+    local processes=(
+        unattended-upgr
+        unattended-upgrade
+        apt
+        apt-get
+        dpkg
+    )
+
+    if command -v fuser >/dev/null 2>&1; then
+        for lock_file in "${lock_files[@]}"; do
+            [ -e "$lock_file" ] || continue
+            if [ -n "$SUDO_CMD" ]; then
+                "$SUDO_CMD" fuser "$lock_file" >/dev/null 2>&1 && return 0
+            else
+                fuser "$lock_file" >/dev/null 2>&1 && return 0
+            fi
+        done
+    fi
+
+    if command -v pgrep >/dev/null 2>&1; then
+        for proc in "${processes[@]}"; do
+            pgrep -x "$proc" >/dev/null 2>&1 && return 0
+        done
+    fi
+
+    return 1
+}
+
+function wait_for_apt_locks() {
+    local max_seconds="600"
+    local interval_seconds="5"
+    local elapsed="0"
+    local printed="no"
+
+    while apt_lock_is_busy; do
+        if [ "$printed" != "yes" ]; then
+            msg_info "Waiting for apt/dpkg lock"
+            printed="yes"
+        fi
+
+        if [ "$elapsed" -ge "$max_seconds" ]; then
+            if [ "$printed" == "yes" ]; then
+                msg_warn "APT/DPKG LOCK TIMEOUT"
+            fi
+            return 1
+        fi
+
+        sleep "$interval_seconds"
+        elapsed="$(( elapsed + interval_seconds ))"
+    done
+
+    if [ "$printed" == "yes" ]; then
+        msg_ok "APT/DPKG LOCK AVAILABLE"
+    fi
+
+    return 0
+}
+
 # --- 10. COMMAND RUNNER ---
 function run_cmd() {
     local description="$1"
     shift
+
+    if command_needs_apt_lock_wait "$@"; then
+        wait_for_apt_locks || msg_error "APT/DPKG lock timeout before: ${description}"
+    fi
 
     local err_file=""
     err_file="$(mktemp)"
@@ -355,6 +439,10 @@ function run_cmd() {
 
 # --- 11. OPTIONAL COMMAND RUNNER ---
 function run_optional() {
+    if command_needs_apt_lock_wait "$@"; then
+        wait_for_apt_locks || msg_error "APT/DPKG lock timeout before optional command: $*"
+    fi
+
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" "$@" >/dev/null 2>&1 || true
     else
