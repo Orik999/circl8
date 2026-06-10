@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.29"
+SCRIPT_VERSION="v1.2.30"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="postinstall-wait-swap-fix"
+SCRIPT_BUILD="ubuntu-swap-detection-fix"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -58,6 +58,7 @@ VM_SWAP_MODE="disk"
 VM_SWAP_SIZE_GB="4"
 VM_ZRAM_SIZE_GB="0"
 VM_SWAP_STATUS="unknown"
+VM_SWAP_FILE="unknown"
 
 POST_INSTALL_START_VM="y"
 DELETE_GENERATED_ISO_AFTER_INSTALL="y"
@@ -894,6 +895,7 @@ SCRIPT35_VM_SWAP_MODE=$(marker_kv_quote "$VM_SWAP_MODE")
 SCRIPT35_VM_SWAP_SIZE_GB=$(marker_kv_quote "$VM_SWAP_SIZE_GB")
 SCRIPT35_VM_ZRAM_SIZE_GB=$(marker_kv_quote "$VM_ZRAM_SIZE_GB")
 SCRIPT35_VM_SWAP_STATUS=$(marker_kv_quote "$VM_SWAP_STATUS")
+SCRIPT35_VM_SWAP_FILE=$(marker_kv_quote "$VM_SWAP_FILE")
 PROXMOX_HOSTNAME=$(marker_kv_quote "$PROXMOX_HOSTNAME")
 PROXMOX_FQDN=$(marker_kv_quote "$PROXMOX_FQDN")
 PROXMOX_DOMAIN=$(marker_kv_quote "$PROXMOX_DOMAIN")
@@ -1185,10 +1187,25 @@ zram_swap_display() {
     fi
 }
 
+swap_file_display() {
+    if [[ "${VM_SWAP_MODE:-none}" == "disk" || "${VM_SWAP_MODE:-none}" == "disk+zram" ]]; then
+        if [ -n "${VM_SWAP_FILE:-}" ] && [ "${VM_SWAP_FILE:-unknown}" != "unknown" ]; then
+            echo "$VM_SWAP_FILE"
+        else
+            echo "detect after install"
+        fi
+    else
+        echo "disabled"
+    fi
+}
+
 swap_summary() {
     group_heading "Swap"
     group_answer_line "Mode" "$(swap_mode_display)"
     group_answer_line "Disk swap" "$(disk_swap_display)"
+    if [[ "${VM_SWAP_MODE:-none}" == "disk" || "${VM_SWAP_MODE:-none}" == "disk+zram" ]] && [ "${VM_SWAP_FILE:-unknown}" != "unknown" ]; then
+        group_status_line "Swap file" "$(swap_file_display)"
+    fi
     group_answer_line "zram" "$(zram_swap_display)"
 }
 
@@ -1247,7 +1264,7 @@ show_previous_marker_summary() {
     local assigned_ipv4="" ssh_command="" raw_ssh=""
     local generated_deleted="" installed_started="" tools_cleanup_enabled=""
     local tools_cleanup_done="" temp_cleanup=""
-    local vm_swap_mode="" vm_disk_swap_size="" vm_zram_size="" vm_swap_status=""
+    local vm_swap_mode="" vm_disk_swap_size="" vm_zram_size="" vm_swap_status="" vm_swap_file=""
 
     completed="$(marker_value_or_default "Ubuntu Auto Install completed on" "$marker" "unknown")"
     vmid="$(marker_value_or_default "VMID" "$marker" "unknown")"
@@ -1274,6 +1291,7 @@ show_previous_marker_summary() {
     vm_disk_swap_size="$(marker_value_or_default "VM Disk Swap Size" "$marker" "unknown")"
     vm_zram_size="$(marker_value_or_default "VM zram Size" "$marker" "unknown")"
     vm_swap_status="$(marker_value_or_default "VM Swap Status" "$marker" "unknown")"
+    vm_swap_file="$(marker_value_or_default "VM Swap File" "$marker" "unknown")"
 
     echo -e "${YW}Marker:${CL}"
     previous_marker_line "path" "$marker"
@@ -1296,6 +1314,7 @@ show_previous_marker_summary() {
     echo -e "${YW}Swap:${CL}"
     previous_marker_line "Mode" "$vm_swap_mode"
     previous_marker_line "Disk swap" "$vm_disk_swap_size"
+    previous_marker_line "Swap file" "$vm_swap_file"
     previous_marker_line "zram" "$vm_zram_size"
     previous_marker_line "Status" "$vm_swap_status"
     echo ""
@@ -1589,45 +1608,68 @@ echo "Expected disk swap: $(disk_swap_display)"
 echo "Expected zram: $(zram_swap_display)"
 swapon --show 2>/dev/null || true
 
-disk_active="no"
-disk_fstab="no"
-disk_mode_ok="no"
+target_mb=${VM_SWAP_SIZE_GB}
+min_mb=\$(( target_mb * 900 / 1000 ))
+swapfile_active="no"
 swapimg_active="no"
-swapimg_fstab="no"
 zram_active="no"
+swapfile_fstab="no"
+swapimg_fstab="no"
+swapfile_mode="unknown"
+swapimg_mode="unknown"
+swap_disk_file="unknown"
+detected_swap_size="0"
+disk_active_count="0"
+disk_fstab_count="0"
+disk_mode_ok="no"
+disk_size_ok="no"
 
-swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && disk_active="yes"
-grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && disk_fstab="yes"
-[ "$(stat -c '%a' /swapfile 2>/dev/null || true)" = "600" ] && disk_mode_ok="yes"
+swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && swapfile_active="yes"
 swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swap.img" && swapimg_active="yes"
-grep -qE "^[[:space:]]*/swap\.img[[:space:]]+" /etc/fstab && swapimg_fstab="yes"
 swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+" && zram_active="yes"
+grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && swapfile_fstab="yes"
+grep -qE "^[[:space:]]*/swap\.img[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && swapimg_fstab="yes"
+swapfile_mode="\$(stat -c '%a' /swapfile 2>/dev/null || true)"
+swapimg_mode="\$(stat -c '%a' /swap.img 2>/dev/null || true)"
+[ "\$swapfile_active" = "yes" ] && disk_active_count=\$((disk_active_count + 1)) && swap_disk_file="/swapfile"
+[ "\$swapimg_active" = "yes" ] && disk_active_count=\$((disk_active_count + 1)) && swap_disk_file="/swap.img"
+[ "\$swapfile_fstab" = "yes" ] && disk_fstab_count=\$((disk_fstab_count + 1))
+[ "\$swapimg_fstab" = "yes" ] && disk_fstab_count=\$((disk_fstab_count + 1))
+if { [ "\$swap_disk_file" = "/swapfile" ] && [ "\$swapfile_mode" = "600" ]; } || { [ "\$swap_disk_file" = "/swap.img" ] && [ "\$swapimg_mode" = "600" ]; }; then
+    disk_mode_ok="yes"
+fi
+if [ "\$swap_disk_file" != "unknown" ]; then
+    detected_swap_size="\$(swapon --bytes --noheadings --show=NAME,SIZE 2>/dev/null | awk -v name="\$swap_disk_file" '\$1 == name { print int(\$2 / 1024 / 1024); exit }')"
+fi
+if [ -n "\$detected_swap_size" ] && [ "\$detected_swap_size" -ge "\$min_mb" ] 2>/dev/null; then
+    disk_size_ok="yes"
+fi
 
 case "${VM_SWAP_MODE}" in
     none)
-        if [ "$disk_active" = "no" ] && [ "$swapimg_active" = "no" ] && [ "$zram_active" = "no" ]; then
+        if [ "\$swapfile_active" = "no" ] && [ "\$swapimg_active" = "no" ] && [ "\$zram_active" = "no" ]; then
             PASS "No swap active as selected"
         else
             FAIL "Swap is active even though none was selected"
         fi
         ;;
     disk)
-        if [ "$disk_active" = "yes" ] && [ "$disk_fstab" = "yes" ] && [ "$disk_mode_ok" = "yes" ] && [ "$swapimg_active" = "no" ] && [ "$swapimg_fstab" = "no" ]; then
-            PASS "Disk swapfile active, persistent, mode 600, and no swap.img duplicate"
+        if [ "\$disk_active_count" -eq 1 ] && [ "\$disk_fstab_count" -eq 1 ] && [ "\$disk_mode_ok" = "yes" ] && [ "\$disk_size_ok" = "yes" ] && [ "\$zram_active" = "no" ]; then
+            PASS "Disk swap active and persistent at \$swap_disk_file"
         else
-            FAIL "Disk swapfile is not cleanly normalized"
+            FAIL "Disk swap is not cleanly normalized"
         fi
         ;;
     zram)
-        if [ "$zram_active" = "yes" ] && [ "$disk_active" = "no" ] && [ "$swapimg_active" = "no" ]; then
-            PASS "zram swap active with no disk swap duplicate"
+        if [ "\$zram_active" = "yes" ] && [ "\$disk_active_count" -eq 0 ]; then
+            PASS "zram swap active with no disk swap"
         else
             FAIL "zram swap is not cleanly normalized"
         fi
         ;;
     disk+zram)
-        if [ "$disk_active" = "yes" ] && [ "$disk_fstab" = "yes" ] && [ "$disk_mode_ok" = "yes" ] && [ "$zram_active" = "yes" ] && [ "$swapimg_active" = "no" ] && [ "$swapimg_fstab" = "no" ]; then
-            PASS "Disk swapfile and zram active with no swap.img duplicate"
+        if [ "\$disk_active_count" -eq 1 ] && [ "\$disk_fstab_count" -eq 1 ] && [ "\$disk_mode_ok" = "yes" ] && [ "\$disk_size_ok" = "yes" ] && [ "\$zram_active" = "yes" ]; then
+            PASS "Disk swap and zram active; disk file: \$swap_disk_file"
         else
             FAIL "disk+zram swap is not cleanly normalized"
         fi
@@ -1655,14 +1697,15 @@ build_swap_late_commands() {
     local disk_mb=$(( VM_SWAP_SIZE_GB * 1024 ))
     local zram_mb=$(( VM_ZRAM_SIZE_GB * 1024 ))
 
-    cat <<EOF
+    case "${VM_SWAP_MODE:-none}" in
+        none|zram)
+            cat <<EOF
   - curtin in-target --target=/target -- bash -c 'swapoff /swap.img 2>/dev/null || true; swapoff /swapfile 2>/dev/null || true; sed -i -E "/^[[:space:]]*\/swap\.img[[:space:]]+/d; /^[[:space:]]*\/swapfile[[:space:]]+/d" /etc/fstab; rm -f /swap.img /swapfile'
 EOF
-
-    case "${VM_SWAP_MODE:-none}" in
+            ;;
         disk|disk+zram)
             cat <<EOF
-  - curtin in-target --target=/target -- bash -c 'set -e; if ! fallocate -l ${VM_SWAP_SIZE_GB}G /swapfile; then dd if=/dev/zero of=/swapfile bs=1M count=${disk_mb} status=none; fi; chmod 600 /swapfile; mkswap /swapfile; echo "/swapfile none swap sw 0 0" >> /etc/fstab; swapon /swapfile || true'
+  - curtin in-target --target=/target -- bash -c 'set -e; swapoff /swapfile 2>/dev/null || true; sed -i -E "/^[[:space:]]*\/swapfile[[:space:]]+/d" /etc/fstab; rm -f /swapfile; if [ -f /swap.img ] || grep -qE "^[[:space:]]*/swap\.img[[:space:]]+" /etc/fstab || swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swap.img"; then chmod 600 /swap.img 2>/dev/null || true; sed -i -E "/^[[:space:]]*\/swap\.img[[:space:]]+/d" /etc/fstab; echo "/swap.img none swap sw 0 0" >> /etc/fstab; swapon /swap.img 2>/dev/null || true; else if ! fallocate -l ${VM_SWAP_SIZE_GB}G /swapfile; then dd if=/dev/zero of=/swapfile bs=1M count=${disk_mb} status=none; fi; chmod 600 /swapfile; mkswap /swapfile; echo "/swapfile none swap sw 0 0" >> /etc/fstab; swapon /swapfile || true; fi'
 EOF
             ;;
     esac
@@ -1671,7 +1714,13 @@ EOF
         zram|disk+zram)
             cat <<EOF
   - curtin in-target --target=/target -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-zram-generator || true'
-  - curtin in-target --target=/target -- bash -c 'printf "%s\n" "[zram0]" "zram-size = ${zram_mb}M" "compression-algorithm = zstd" "swap-priority = 100" > /etc/systemd/zram-generator.conf'
+  - curtin in-target --target=/target -- bash -c 'printf "%s
+" "[zram0]" "zram-size = ${zram_mb}M" "compression-algorithm = zstd" "swap-priority = 100" > /etc/systemd/zram-generator.conf'
+EOF
+            ;;
+        none|disk)
+            cat <<EOF
+  - curtin in-target --target=/target -- bash -c 'rm -f /etc/systemd/zram-generator.conf 2>/dev/null || true'
 EOF
             ;;
     esac
@@ -2415,24 +2464,28 @@ collect_swap_options() {
             VM_SWAP_SIZE_GB="0"
             VM_ZRAM_SIZE_GB="0"
             VM_SWAP_STATUS="disabled"
+            VM_SWAP_FILE="disabled"
             ;;
         2)
             VM_SWAP_MODE="disk"
             VM_SWAP_SIZE_GB="$(timed_number_input "Enter disk swapfile size in GB" "$DEFAULT_VM_SWAP_SIZE_GB" "1" "32")"
             VM_ZRAM_SIZE_GB="0"
             VM_SWAP_STATUS="unknown"
+            VM_SWAP_FILE="unknown"
             ;;
         3)
             VM_SWAP_MODE="zram"
             VM_SWAP_SIZE_GB="0"
             VM_ZRAM_SIZE_GB="$(timed_number_input "Enter zram size in GB" "$DEFAULT_VM_ZRAM_SIZE_GB" "1" "8")"
             VM_SWAP_STATUS="unknown"
+            VM_SWAP_FILE="unknown"
             ;;
         4)
             VM_SWAP_MODE="disk+zram"
             VM_SWAP_SIZE_GB="$(timed_number_input "Enter disk swapfile size in GB" "$DEFAULT_VM_SWAP_SIZE_GB" "1" "32")"
             VM_ZRAM_SIZE_GB="$(timed_number_input "Enter zram size in GB" "$DEFAULT_VM_ZRAM_SIZE_GB" "1" "8")"
             VM_SWAP_STATUS="unknown"
+            VM_SWAP_FILE="unknown"
             ;;
     esac
 }
@@ -2874,23 +2927,27 @@ start_installed_vm_and_detect_ip() {
 
 # --- 61. VM SWAP SSH VERIFICATION ---
 verify_vm_swap_via_ssh() {
-    local swap_result=""
+    local swap_probe=""
+    local swap_status=""
+    local swap_file="unknown"
 
     if [ -z "${ASSIGNED_IPV4:-}" ]; then
         VM_SWAP_STATUS="unknown"
+        VM_SWAP_FILE="unknown"
         msg_warn "VM swap verification skipped; no assigned IPv4 detected."
         return 0
     fi
 
     if ! ensure_post_install_ssh_ready; then
         VM_SWAP_STATUS="unknown"
+        VM_SWAP_FILE="unknown"
         msg_warn "VM swap verification skipped; SSH not ready."
         return 0
     fi
 
     msg_info "Verifying VM swap over SSH"
 
-    swap_result="$(ssh \
+    swap_probe="$(ssh \
         -o BatchMode=yes \
         -o ConnectTimeout=10 \
         -o StrictHostKeyChecking=accept-new \
@@ -2898,65 +2955,110 @@ verify_vm_swap_via_ssh() {
         "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
         "sudo -n bash -s" <<EOF 2>/dev/null || true
 mode="${VM_SWAP_MODE}"
-disk_active="no"
-disk_fstab="no"
-disk_mode_ok="no"
-swapimg_active="no"
-swapimg_fstab="no"
-zram_active="no"
+target_mb=${VM_SWAP_SIZE_GB}
+min_mb=\$(( target_mb * 900 / 1000 ))
 
-swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && disk_active="yes"
-grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && disk_fstab="yes"
-[ "\$(stat -c '%a' /swapfile 2>/dev/null || true)" = "600" ] && disk_mode_ok="yes"
+swapfile_active="no"
+swapimg_active="no"
+zram_active="no"
+swapfile_fstab="no"
+swapimg_fstab="no"
+swapfile_mode="unknown"
+swapimg_mode="unknown"
+swap_disk_file="unknown"
+detected_swap_size="0"
+disk_active_count="0"
+disk_fstab_count="0"
+disk_mode_ok="no"
+disk_size_ok="no"
+
+swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && swapfile_active="yes"
 swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swap.img" && swapimg_active="yes"
-grep -qE "^[[:space:]]*/swap\.img[[:space:]]+" /etc/fstab && swapimg_fstab="yes"
 swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+" && zram_active="yes"
+grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && swapfile_fstab="yes"
+grep -qE "^[[:space:]]*/swap\.img[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && swapimg_fstab="yes"
+
+swapfile_mode="\$(stat -c '%a' /swapfile 2>/dev/null || true)"
+swapimg_mode="\$(stat -c '%a' /swap.img 2>/dev/null || true)"
+
+if [ "\$swapfile_active" = "yes" ]; then
+    disk_active_count=\$((disk_active_count + 1))
+    swap_disk_file="/swapfile"
+fi
+
+if [ "\$swapimg_active" = "yes" ]; then
+    disk_active_count=\$((disk_active_count + 1))
+    swap_disk_file="/swap.img"
+fi
+
+[ "\$swapfile_fstab" = "yes" ] && disk_fstab_count=\$((disk_fstab_count + 1))
+[ "\$swapimg_fstab" = "yes" ] && disk_fstab_count=\$((disk_fstab_count + 1))
+
+if { [ "\$swap_disk_file" = "/swapfile" ] && [ "\$swapfile_mode" = "600" ]; } || { [ "\$swap_disk_file" = "/swap.img" ] && [ "\$swapimg_mode" = "600" ]; }; then
+    disk_mode_ok="yes"
+fi
+
+if [ "\$swap_disk_file" != "unknown" ]; then
+    detected_swap_size="\$(swapon --bytes --noheadings --show=NAME,SIZE 2>/dev/null | awk -v name="\$swap_disk_file" '\$1 == name { print int(\$2 / 1024 / 1024); exit }')"
+fi
+
+if [ -n "\$detected_swap_size" ] && [ "\$detected_swap_size" -ge "\$min_mb" ] 2>/dev/null; then
+    disk_size_ok="yes"
+fi
 
 case "\$mode" in
     none)
-        if [ "\$disk_active" = "no" ] && [ "\$swapimg_active" = "no" ] && [ "\$zram_active" = "no" ]; then
-            echo disabled
+        if [ "\$swapfile_active" = "no" ] && [ "\$swapimg_active" = "no" ] && [ "\$zram_active" = "no" ]; then
+            echo "disabled|disabled"
         else
-            echo failed
+            echo "failed|unknown"
         fi
         ;;
     disk)
-        if [ "\$disk_active" = "yes" ] && [ "\$disk_fstab" = "yes" ] && [ "\$disk_mode_ok" = "yes" ] && [ "\$swapimg_active" = "no" ] && [ "\$swapimg_fstab" = "no" ]; then
-            echo enabled
-        elif [ "\$disk_active" = "yes" ] || [ "\$swapimg_active" = "yes" ] || [ "\$swapimg_fstab" = "yes" ]; then
-            echo partial
+        if [ "\$disk_active_count" -eq 1 ] && [ "\$disk_fstab_count" -eq 1 ] && [ "\$disk_mode_ok" = "yes" ] && [ "\$disk_size_ok" = "yes" ] && [ "\$zram_active" = "no" ]; then
+            echo "enabled|\$swap_disk_file"
+        elif [ "\$disk_active_count" -gt 0 ] || [ "\$disk_fstab_count" -gt 0 ]; then
+            echo "partial|\$swap_disk_file"
         else
-            echo failed
+            echo "failed|unknown"
         fi
         ;;
     zram)
-        if [ "\$zram_active" = "yes" ] && [ "\$disk_active" = "no" ] && [ "\$swapimg_active" = "no" ]; then
-            echo enabled
-        elif [ "\$zram_active" = "yes" ] || [ "\$disk_active" = "yes" ] || [ "\$swapimg_active" = "yes" ]; then
-            echo partial
+        if [ "\$zram_active" = "yes" ] && [ "\$disk_active_count" -eq 0 ] && [ "\$disk_fstab_count" -eq 0 ]; then
+            echo "enabled|disabled"
+        elif [ "\$zram_active" = "yes" ] || [ "\$disk_active_count" -gt 0 ] || [ "\$disk_fstab_count" -gt 0 ]; then
+            echo "partial|unknown"
         else
-            echo failed
+            echo "failed|unknown"
         fi
         ;;
     disk+zram)
-        if [ "\$disk_active" = "yes" ] && [ "\$disk_fstab" = "yes" ] && [ "\$disk_mode_ok" = "yes" ] && [ "\$zram_active" = "yes" ] && [ "\$swapimg_active" = "no" ] && [ "\$swapimg_fstab" = "no" ]; then
-            echo enabled
-        elif [ "\$disk_active" = "yes" ] || [ "\$zram_active" = "yes" ] || [ "\$swapimg_active" = "yes" ] || [ "\$swapimg_fstab" = "yes" ]; then
-            echo partial
+        if [ "\$disk_active_count" -eq 1 ] && [ "\$disk_fstab_count" -eq 1 ] && [ "\$disk_mode_ok" = "yes" ] && [ "\$disk_size_ok" = "yes" ] && [ "\$zram_active" = "yes" ]; then
+            echo "enabled|\$swap_disk_file"
+        elif [ "\$disk_active_count" -gt 0 ] || [ "\$disk_fstab_count" -gt 0 ] || [ "\$zram_active" = "yes" ]; then
+            echo "partial|\$swap_disk_file"
         else
-            echo failed
+            echo "failed|unknown"
         fi
         ;;
     *)
-        echo unknown
+        echo "unknown|unknown"
         ;;
 esac
 EOF
 )"
 
-    case "$swap_result" in
-        enabled|disabled|partial|failed|unknown) VM_SWAP_STATUS="$swap_result" ;;
+    swap_status="${swap_probe%%|*}"
+    swap_file="${swap_probe#*|}"
+
+    case "$swap_status" in
+        enabled|disabled|partial|failed|unknown) VM_SWAP_STATUS="$swap_status" ;;
         *) VM_SWAP_STATUS="unknown" ;;
+    esac
+
+    case "$swap_file" in
+        /swap.img|/swapfile|disabled) VM_SWAP_FILE="$swap_file" ;;
+        *) VM_SWAP_FILE="unknown" ;;
     esac
 
     if [ "$VM_SWAP_STATUS" == "enabled" ] || [ "$VM_SWAP_STATUS" == "disabled" ]; then
@@ -2993,6 +3095,7 @@ VM Swap Mode: $VM_SWAP_MODE
 VM Disk Swap Size: ${VM_SWAP_SIZE_GB} GB
 VM zram Size: ${VM_ZRAM_SIZE_GB} GB
 VM Swap Status: $VM_SWAP_STATUS
+VM Swap File: $VM_SWAP_FILE
 Attach Generated ISO And Start VM: $(yn_word "$ATTACH_START_APPROVED")
 Start Installed VM After Cleanup: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
@@ -3014,6 +3117,7 @@ SCRIPT35_VM_SWAP_MODE="$VM_SWAP_MODE"
 SCRIPT35_VM_SWAP_SIZE_GB="$VM_SWAP_SIZE_GB"
 SCRIPT35_VM_ZRAM_SIZE_GB="$VM_ZRAM_SIZE_GB"
 SCRIPT35_VM_SWAP_STATUS="$VM_SWAP_STATUS"
+SCRIPT35_VM_SWAP_FILE="$VM_SWAP_FILE"
 PROXMOX_HOSTNAME="${PROXMOX_HOSTNAME}"
 PROXMOX_FQDN="${PROXMOX_FQDN}"
 PROXMOX_DOMAIN="${PROXMOX_DOMAIN}"
@@ -3050,6 +3154,7 @@ VM Swap Mode: ${VM_SWAP_MODE}
 VM Disk Swap Size GB: ${VM_SWAP_SIZE_GB}
 VM zram Size GB: ${VM_ZRAM_SIZE_GB}
 VM Swap Status: ${VM_SWAP_STATUS}
+VM Swap File: ${VM_SWAP_FILE}
 Proxmox Hostname: ${PROXMOX_HOSTNAME:-not-detected}
 Proxmox FQDN: ${PROXMOX_FQDN:-not-detected}
 Proxmox Domain: ${PROXMOX_DOMAIN:-not-detected}
@@ -3159,6 +3264,7 @@ show_final_output() {
     status_line "QEMU agent IP" "$qemu_agent_ip" "$GN" 18
     status_line "Swap mode" "$(swap_mode_display)" "$GN" 18
     status_line "Disk swap" "$(disk_swap_display)" "$GN" 18
+    status_line "Swap file" "$(swap_file_display)" "$GN" 18
     status_line "zram" "$(zram_swap_display)" "$GN" 18
     status_line "Swap status" "${VM_SWAP_STATUS:-unknown}" "$GN" 18
     if [ -n "${INSTALL_DURATION_TEXT:-}" ]; then
@@ -3232,6 +3338,7 @@ setup_ui_demo_sample_data() {
     VM_SWAP_SIZE_GB="4"
     VM_ZRAM_SIZE_GB="0"
     VM_SWAP_STATUS="enabled"
+    VM_SWAP_FILE="/swap.img"
     INSTALL_ISO_REF="local:iso/ubuntu-26.04-live-server-amd64.iso"
     AUTOINSTALL_ISO_REF="local:iso/ubuntu-26.04-autoinstall-vm108.iso"
     GENERATED_ISO_ACTION="create"
