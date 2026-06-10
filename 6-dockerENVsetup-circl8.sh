@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.6.23"
-SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="setup-plan-alignment-polish"
+SCRIPT_VERSION="v1.7.0"
+SCRIPT_UPDATED="2026-06-10"
+SCRIPT_BUILD="six-family-env-baseline"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -90,7 +90,20 @@ SCRIPT5_MARKER_STATE="missing"
 SCRIPT5_VERIFY_LOG_STATE="missing"
 SCRIPT5_VERIFY_STATUS="missing"
 SCRIPT5_STATUS="missing"
+SCRIPT5_VERSION="unknown"
+SCRIPT5_BUILD="unknown"
 SCRIPT5_TARGET_USER=""
+SCRIPT5_DOCKER_INSTALLED="unknown"
+SCRIPT5_DOCKER_SERVICE_ENABLED="unknown"
+SCRIPT5_CONTAINERD_SERVICE_ENABLED="unknown"
+SCRIPT5_SWAP_PRESERVE_SELECTED="unknown"
+SCRIPT5_SWAP_RESULT="unknown"
+SCRIPT5_SWAP_FILE="unknown"
+SCRIPT5_SWAP_SIZE="unknown"
+SCRIPT5_UFW_ENABLED="unknown"
+SCRIPT5_REDIS_OVERCOMMIT="unknown"
+SCRIPT5_SCRIPT4_CROWDSEC_SELECTED="unknown"
+SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER="unknown"
 SCRIPT5_DOCKER_SERVICE_STATE="unknown"
 SCRIPT5_CONTAINERD_SERVICE_STATE="unknown"
 SCRIPT5_DOCKER_INFO_READY="unknown"
@@ -111,8 +124,10 @@ REDIS_PASSWORD=""
 AUTHENTIK_SECRET_KEY=""
 AUTHENTIK_POSTGRES_PASSWORD=""
 POSTIZ_POSTGRES_PASSWORD=""
+POSTIZ_REDIS_PASSWORD=""
 POSTIZ_JWT_SECRET=""
 TEMPORAL_POSTGRES_PASSWORD=""
+N8N_ENCRYPTION_KEY=""
 KOMODO_DB_PASSWORD=""
 KOMODO_PASSKEY=""
 KOMODO_JWT_SECRET=""
@@ -180,6 +195,17 @@ SETUP_OPTIONS_CURRENT_GROUP=""
 EXISTING_SETUP_SECTION_SHOWN="no"
 EXISTING_SETUP_CURRENT_GROUP=""
 MARKER_RERUN_SELECTED="no"
+SCRIPT6_TRAEFIK_CONFIG_READY="no"
+SCRIPT6_TRAEFIK_ACME_READY="no"
+SCRIPT6_CF_TOKEN_FILE_READY="unknown"
+SCRIPT6_ENV_FILE_READY="no"
+SCRIPT6_SECRETS_READY="no"
+SCRIPT6_READY_FOR_SCRIPT61="no"
+SCRIPT6_READY_FOR_SCRIPT62="no"
+SCRIPT6_READY_FOR_SCRIPT63="no"
+SCRIPT6_READY_FOR_SCRIPT64="no"
+SCRIPT6_READY_FOR_SCRIPT65="no"
+SCRIPT6_READY_FOR_SCRIPT66="no"
 
 # =========================================================
 #  OUTPUT / LOGGING FUNCTIONS
@@ -756,182 +782,42 @@ function root_stat_mode() {
 # Creates all service bind-mount directories first.
 # Permission changes are intentionally done later in a separate chown stage and chmod stage.
 function ensure_required_service_directories() {
-    # Core project paths.
+    # Script 6 v1.7.0 owns only the neutral environment contract.
+    # Runtime/app-specific bind mounts are created by Scripts 6.1-6.6 or Script 8.
     run_cmd "creating Docker root directory" mkdir -p "$DOCKER_DIR"
     run_cmd "creating Docker appdata directory" mkdir -p "${DOCKER_DIR}/appdata"
     run_cmd "creating Docker compose directory" mkdir -p "${DOCKER_DIR}/compose"
     run_cmd "creating Docker backups directory" mkdir -p "${DOCKER_DIR}/backups"
-    run_cmd "creating Docker shared directory" mkdir -p "${DOCKER_DIR}/shared"
     run_cmd "creating Docker secrets directory" mkdir -p "$DOCKER_SECRETS_DIR"
 
-    # PostgreSQL paths.
-    run_cmd "creating PostgreSQL root directory" mkdir -p "${DOCKER_DIR}/appdata/postgres"
-    run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "creating PostgreSQL legacy data compatibility directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
-
-    # Redis paths.
-    # The active Redis compose bind-mounts ${DOCKER_DIR}/appdata/redis to container /data.
-    # The nested ${DOCKER_DIR}/appdata/redis/data path is also created and permissioned as a
-    # compatibility guard so future/rerun checks and alternate compose revisions cannot fail later.
-    run_cmd "creating Redis data directory" mkdir -p "${DOCKER_DIR}/appdata/redis"
-    run_cmd "creating Redis nested data compatibility directory" mkdir -p "${DOCKER_DIR}/appdata/redis/data"
-
-    # Authentik paths.
-    run_cmd "creating Authentik appdata directory" mkdir -p "${DOCKER_DIR}/appdata/authentik"
-    run_cmd "creating Authentik media directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/media"
-    run_cmd "creating Authentik custom templates directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/custom-templates"
-    run_cmd "creating Authentik certs directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/certs"
-
-    # App and utility paths.
-    run_cmd "creating Filebrowser database directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
-    run_cmd "creating Filebrowser config directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
-    run_cmd "creating Postiz uploads directory" mkdir -p "${DOCKER_DIR}/appdata/postiz/uploads"
-
-    # Admin UI bind-mount paths.
-    # Create every supported admin UI path up front so Script 6.5 can switch options
-    # without Docker later creating missing bind-mount directories as root.
-    run_cmd "creating Dockge appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockge"
-    run_cmd "creating Portainer appdata directory" mkdir -p "${DOCKER_DIR}/appdata/portainer"
-    run_cmd "creating Dockhand appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand"
-    run_cmd "creating Dockhand stacks directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand/stacks"
-    run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
-    run_cmd "creating Komodo PostgreSQL data directory" mkdir -p "${DOCKER_DIR}/appdata/komodo/postgres"
-    run_cmd "creating Komodo core config directory" mkdir -p "${DOCKER_DIR}/appdata/komodo/core"
-    run_cmd "creating Komodo periphery config directory" mkdir -p "${DOCKER_DIR}/appdata/komodo/periphery"
-
-    # Traefik paths.
+    # Script 6 renders Traefik config for Script 6.1, so it owns these config paths.
     run_cmd "creating Traefik config directory" mkdir -p "$TRAEFIK_DIR"
     run_cmd "creating Traefik ACME directory" mkdir -p "$TRAEFIK_ACME_DIR"
     run_cmd "creating Traefik ACME storage" touch "${TRAEFIK_ACME_DIR}/acme.json"
 }
 
-# --- 16B. SERVICE OWNERSHIP HELPER ---
-# Applies ownership after all required folders exist.
 function chown_required_service_directories() {
-    # Base project paths.
     run_cmd "setting Docker root directory ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
     run_cmd "setting Docker appdata directory ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata"
     run_cmd "setting compose directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/compose"
     run_cmd "setting backups directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/backups"
-    run_cmd "setting shared directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/shared"
     run_cmd "setting secrets directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_SECRETS_DIR"
-
-    # PostgreSQL official image data paths use UID/GID 999.
-    run_cmd "setting PostgreSQL root ownership" chown 999:999 "${DOCKER_DIR}/appdata/postgres"
-    run_cmd "setting PostgreSQL PG18-compatible data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "setting PostgreSQL PG18-compatible data directory permissions" find "${DOCKER_DIR}/appdata/postgres/pgdata" -type d -exec chmod 700 {} +
-    run_cmd "setting PostgreSQL PG18-compatible data file permissions" find "${DOCKER_DIR}/appdata/postgres/pgdata" -type f -exec chmod 600 {} +
-
-    if [ -d "${DOCKER_DIR}/appdata/postgres/pgdata" ]; then
-        local postgres_pgdata_offenders=""
-
-        if [ -n "$SUDO_CMD" ]; then
-            postgres_pgdata_offenders="$($SUDO_CMD find "${DOCKER_DIR}/appdata/postgres/pgdata" \( ! -uid 999 -o ! -gid 999 -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
-        else
-            postgres_pgdata_offenders="$(find "${DOCKER_DIR}/appdata/postgres/pgdata" \( ! -uid 999 -o ! -gid 999 -o -type d ! -perm 700 -o -type f ! -perm 600 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
-        fi
-
-        if [ -n "$postgres_pgdata_offenders" ]; then
-            echo -e "${YW}PostgreSQL pgdata audit offenders:${CL}"
-            printf '%s\n' "$postgres_pgdata_offenders"
-            msg_error "PostgreSQL pgdata still contains ownership/permission offenders after repair."
-        fi
-
-        msg_ok "PostgreSQL pgdata ownership and permissions verified"
-    fi
-
-    run_cmd "setting PostgreSQL legacy data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL init ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/postgres/init"
-
-    # Redis official image data path uses UID/GID 999.
-    run_cmd "setting Redis data ownership recursively" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
-
-    # Authentik non-root bind mounts use UID/GID 1000.
-    run_cmd "setting Authentik ownership recursively" chown -R 1000:1000 "${DOCKER_DIR}/appdata/authentik"
-
-    # User-facing application/storage folders.
-    run_cmd "setting Filebrowser ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/filebrowser"
-    run_cmd "setting Postiz ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
-
-    # Admin UI bind-mount ownership.
-    run_cmd "setting Dockge ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockge"
-    run_cmd "setting Portainer ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/portainer"
-    run_cmd "setting Dockhand ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockhand"
-    run_cmd "setting Komodo root ownership" chown "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo"
-    run_cmd "setting Komodo core ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo/core"
-    run_cmd "setting Komodo periphery ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo/periphery"
-    run_cmd "setting Komodo PostgreSQL data ownership recursively" chown -R 999:999 "${DOCKER_DIR}/appdata/komodo/postgres"
-
-    # Traefik config and ACME files.
     run_cmd "setting Traefik ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "$TRAEFIK_DIR"
-
-    # .env is written before permissions are applied and must be owned by the Docker user.
     run_cmd "setting .env ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/.env"
 }
 
-# --- 16C. SERVICE MODE HELPER ---
-# Applies permissions only after folder creation and ownership are complete.
 function chmod_required_service_directories() {
-    # Base project paths.
     run_cmd "setting Docker root directory mode" chmod 755 "$DOCKER_DIR"
     run_cmd "setting Docker appdata directory mode" chmod 755 "${DOCKER_DIR}/appdata"
     run_cmd "setting compose directory permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/compose"
     run_cmd "setting backups directory permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/backups"
-    run_cmd "setting shared directory permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/shared"
 
-    # PostgreSQL data must be private to UID/GID 999.
-    # PostgreSQL 18 stores the real cluster below pgdata/18/docker when
-    # ${DOCKER_DIR}/appdata/postgres/pgdata is mounted to /var/lib/postgresql.
-    # Use find-based modes so every nested PG18 directory/file is corrected,
-    # not only the top-level bind mount.
-    run_cmd "setting PostgreSQL root directory mode" chmod 755 "${DOCKER_DIR}/appdata/postgres"
-    run_cmd "setting PostgreSQL PG18-compatible data directory modes recursively" find "${DOCKER_DIR}/appdata/postgres/pgdata" -type d -exec chmod 700 {} \;
-    run_cmd "setting PostgreSQL PG18-compatible data file modes recursively" find "${DOCKER_DIR}/appdata/postgres/pgdata" -type f -exec chmod 600 {} \;
-    run_cmd "setting PostgreSQL legacy data directory modes recursively" find "${DOCKER_DIR}/appdata/postgres/data" -type d -exec chmod 700 {} \;
-    run_cmd "setting PostgreSQL legacy data file modes recursively" find "${DOCKER_DIR}/appdata/postgres/data" -type f -exec chmod 600 {} \;
-    run_cmd "setting PostgreSQL PG18-compatible data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "setting PostgreSQL legacy data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL init directory mode" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
-    run_cmd "setting PostgreSQL init script mode" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
-
-    # Redis data must be writable by UID/GID 999.
-    # Use recursive directory/file modes so Redis can create temp RDB/AOF files
-    # below /data after fresh deployment and after reruns.
-    run_cmd "setting Redis data directory modes recursively" find "${DOCKER_DIR}/appdata/redis" -type d -exec chmod 770 {} \;
-    run_cmd "setting Redis data file modes recursively" find "${DOCKER_DIR}/appdata/redis" -type f -exec chmod 660 {} \;
-    run_cmd "setting Redis data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
-    run_cmd "setting Redis nested data compatibility directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis/data"
-
-    # Authentik bind mounts must be writable by UID/GID 1000.
-    run_cmd "setting Authentik permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/authentik"
-    run_cmd "setting Authentik appdata directory mode" chmod 770 "${DOCKER_DIR}/appdata/authentik"
-    run_cmd "setting Authentik media directory mode" chmod 770 "${DOCKER_DIR}/appdata/authentik/media"
-    run_cmd "setting Authentik custom templates directory mode" chmod 770 "${DOCKER_DIR}/appdata/authentik/custom-templates"
-    run_cmd "setting Authentik certs directory mode" chmod 770 "${DOCKER_DIR}/appdata/authentik/certs"
-
-    # User-facing application/storage folders.
-    run_cmd "setting Filebrowser permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/filebrowser"
-    run_cmd "setting Postiz permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
-
-    # Admin UI bind-mount permissions.
-    run_cmd "setting Dockge permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockge"
-    run_cmd "setting Portainer permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/portainer"
-    run_cmd "setting Dockhand permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockhand"
-    run_cmd "setting Komodo root directory mode" chmod 755 "${DOCKER_DIR}/appdata/komodo"
-    run_cmd "setting Komodo core permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo/core"
-    run_cmd "setting Komodo periphery permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo/periphery"
-    run_cmd "setting Komodo PostgreSQL data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/komodo/postgres"
-    run_cmd "setting Komodo PostgreSQL data directory mode" chmod 700 "${DOCKER_DIR}/appdata/komodo/postgres"
-
-    # Traefik config and ACME.
     run_cmd "setting Traefik config directory mode" chmod 750 "$TRAEFIK_DIR"
     run_cmd "setting Traefik ACME directory mode" chmod 700 "$TRAEFIK_ACME_DIR"
     run_cmd "setting Traefik static config mode" chmod 644 "$TRAEFIK_STATIC_CONFIG_FILE"
     run_cmd "setting Traefik dynamic config mode" chmod 644 "$TRAEFIK_DYNAMIC_CONFIG_FILE"
     run_cmd "setting Traefik ACME storage mode" chmod 600 "${TRAEFIK_ACME_DIR}/acme.json"
 
-    # Secrets and .env.
     run_cmd "setting .env mode" chmod 600 "${DOCKER_DIR}/.env"
     run_cmd "setting secrets directory mode" chmod 700 "$DOCKER_SECRETS_DIR"
 
@@ -940,12 +826,6 @@ function chmod_required_service_directories() {
     fi
 }
 
-# =========================================================
-#  LOGGING CONTROL
-# =========================================================
-
-# --- 17. ROOT / SUDO DETECTION ---
-# Uses sudo when not root.
 function detect_root_or_sudo() {
     if [ "$EUID" -eq 0 ]; then
         SUDO_CMD=""
@@ -2290,6 +2170,19 @@ function detect_script5_preflight_state() {
 
     SCRIPT5_STATUS="$(script5_marker_key_value "SCRIPT5_STATUS")"
     [ -n "$SCRIPT5_STATUS" ] || SCRIPT5_STATUS="missing"
+    SCRIPT5_VERSION="$(script5_marker_key_value "SCRIPT5_VERSION")"; [ -n "$SCRIPT5_VERSION" ] || SCRIPT5_VERSION="unknown"
+    SCRIPT5_BUILD="$(script5_marker_key_value "SCRIPT5_BUILD")"; [ -n "$SCRIPT5_BUILD" ] || SCRIPT5_BUILD="unknown"
+    SCRIPT5_DOCKER_INSTALLED="$(script5_marker_key_value "SCRIPT5_DOCKER_INSTALLED")"; [ -n "$SCRIPT5_DOCKER_INSTALLED" ] || SCRIPT5_DOCKER_INSTALLED="unknown"
+    SCRIPT5_DOCKER_SERVICE_ENABLED="$(script5_marker_key_value "SCRIPT5_DOCKER_SERVICE_ENABLED")"; [ -n "$SCRIPT5_DOCKER_SERVICE_ENABLED" ] || SCRIPT5_DOCKER_SERVICE_ENABLED="unknown"
+    SCRIPT5_CONTAINERD_SERVICE_ENABLED="$(script5_marker_key_value "SCRIPT5_CONTAINERD_SERVICE_ENABLED")"; [ -n "$SCRIPT5_CONTAINERD_SERVICE_ENABLED" ] || SCRIPT5_CONTAINERD_SERVICE_ENABLED="unknown"
+    SCRIPT5_SWAP_PRESERVE_SELECTED="$(script5_marker_key_value "SCRIPT5_SWAP_PRESERVE_SELECTED")"; [ -n "$SCRIPT5_SWAP_PRESERVE_SELECTED" ] || SCRIPT5_SWAP_PRESERVE_SELECTED="unknown"
+    SCRIPT5_SWAP_RESULT="$(script5_marker_key_value "SCRIPT5_SWAP_RESULT")"; [ -n "$SCRIPT5_SWAP_RESULT" ] || SCRIPT5_SWAP_RESULT="unknown"
+    SCRIPT5_SWAP_FILE="$(script5_marker_key_value "SCRIPT5_SWAP_FILE")"; [ -n "$SCRIPT5_SWAP_FILE" ] || SCRIPT5_SWAP_FILE="unknown"
+    SCRIPT5_SWAP_SIZE="$(script5_marker_key_value "SCRIPT5_SWAP_SIZE")"; [ -n "$SCRIPT5_SWAP_SIZE" ] || SCRIPT5_SWAP_SIZE="unknown"
+    SCRIPT5_UFW_ENABLED="$(script5_marker_key_value "SCRIPT5_UFW_ENABLED")"; [ -n "$SCRIPT5_UFW_ENABLED" ] || SCRIPT5_UFW_ENABLED="unknown"
+    SCRIPT5_REDIS_OVERCOMMIT="$(script5_marker_key_value "SCRIPT5_REDIS_OVERCOMMIT")"; [ -n "$SCRIPT5_REDIS_OVERCOMMIT" ] || SCRIPT5_REDIS_OVERCOMMIT="unknown"
+    SCRIPT5_SCRIPT4_CROWDSEC_SELECTED="$(script5_marker_key_value "SCRIPT5_SCRIPT4_CROWDSEC_SELECTED")"; [ -n "$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED" ] || SCRIPT5_SCRIPT4_CROWDSEC_SELECTED="unknown"
+    SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER="$(script5_marker_key_value "SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER")"; [ -n "$SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER" ] || SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER="unknown"
 
     SCRIPT5_VERIFY_STATUS="$(script5_marker_key_value "SCRIPT5_VERIFY_STATUS")"
     [ -n "$SCRIPT5_VERIFY_STATUS" ] || SCRIPT5_VERIFY_STATUS="$verify_from_log"
@@ -2468,68 +2361,48 @@ function derive_user_and_docker_paths() {
 
 function validate_script5_handoff() {
     local failure="no"
+    local compose_state="not ready"
+    local bouncer_display="${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}"
 
     detect_script5_preflight_state
     refresh_docker_runtime_state
     refresh_crowdsec_runtime_state
+    [ "$DOCKER_COMPOSE_READY" == "yes" ] && compose_state="ready"
 
     section "SCRIPT 5 HANDOFF"
-    echo -e "${YW}Script 5 handoff:${CL}"
-    aligned_status_line "Status" "$SCRIPT5_STATUS" "$(status_color_for_value "$SCRIPT5_STATUS")" 16
-    aligned_status_line "Verification" "$SCRIPT5_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT5_VERIFY_STATUS")" 16
-    aligned_status_line "Docker user" "${SCRIPT5_TARGET_USER:-missing}" "$(status_color_for_value "${SCRIPT5_TARGET_USER:-missing}")" 16
-    aligned_status_line "Docker" "$SCRIPT5_DOCKER_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_DOCKER_SERVICE_STATE")" 16
-    aligned_status_line "Compose" "$([ "$DOCKER_COMPOSE_READY" == "yes" ] && echo ready || echo "not ready")" "$(status_color_for_value "$([ "$DOCKER_COMPOSE_READY" == "yes" ] && echo ready || echo "not ready")")" 16
-    aligned_status_line "Containerd" "$SCRIPT5_CONTAINERD_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_CONTAINERD_SERVICE_STATE")" 16
+    echo -e "${YW}Script 5:${CL}"
+    aligned_status_line "Status" "$SCRIPT5_STATUS" "$(status_color_for_value "$SCRIPT5_STATUS")" 18
+    aligned_status_line "Verification" "$SCRIPT5_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT5_VERIFY_STATUS")" 18
+    aligned_status_line "Docker user" "${SCRIPT5_TARGET_USER:-missing}" "$(status_color_for_value "${SCRIPT5_TARGET_USER:-missing}")" 18
+    aligned_status_line "Docker" "${SCRIPT5_DOCKER_INSTALLED:-unknown}" "$(status_color_for_value "${SCRIPT5_DOCKER_INSTALLED:-unknown}")" 18
+    aligned_status_line "Docker service" "$SCRIPT5_DOCKER_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_DOCKER_SERVICE_STATE")" 18
+    aligned_status_line "Compose" "$compose_state" "$(status_color_for_value "$compose_state")" 18
+    aligned_status_line "containerd" "$SCRIPT5_CONTAINERD_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_CONTAINERD_SERVICE_STATE")" 18
+    echo ""
+    echo -e "${YW}System:${CL}"
+    aligned_status_line "Ubuntu swap" "$SCRIPT5_SWAP_RESULT" "$(status_color_for_value "$SCRIPT5_SWAP_RESULT")" 18
+    aligned_status_line "Swap file" "$SCRIPT5_SWAP_FILE" "$(status_color_for_value "$SCRIPT5_SWAP_FILE")" 18
+    aligned_status_line "Swap size" "$SCRIPT5_SWAP_SIZE" "$(status_color_for_value "$SCRIPT5_SWAP_SIZE")" 18
+    aligned_status_line "UFW firewall" "$SCRIPT5_UFW_ENABLED" "$(status_color_for_value "$SCRIPT5_UFW_ENABLED")" 18
+    aligned_status_line "Redis host tuning" "$SCRIPT5_REDIS_OVERCOMMIT" "$(status_color_for_value "$SCRIPT5_REDIS_OVERCOMMIT")" 18
+    echo ""
+    echo -e "${YW}Security:${CL}"
+    aligned_status_line "CrowdSec selected" "$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED" "$(status_color_for_value "$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED")" 18
+    aligned_status_line "Bouncer" "$bouncer_display" "$(status_color_for_value "$bouncer_display")" 18
 
-    if [ "$SCRIPT5_MARKER_STATE" != "present" ]; then
-        msg_warn "Script 5 marker is missing: ${SCRIPT5_MARKER}"
-        failure="yes"
-    fi
+    if [ "$SCRIPT5_MARKER_STATE" != "present" ]; then msg_warn "Script 5 marker is missing: ${SCRIPT5_MARKER}"; failure="yes"; fi
+    if [ "$SCRIPT5_STATUS" != "completed" ]; then msg_warn "Script 5 marker is not completed"; failure="yes"; fi
+    if [ "$SCRIPT5_VERIFY_STATUS" != "PASS" ]; then msg_warn "Script 5 verification is not PASS"; failure="yes"; fi
+    if ! validate_linux_username "${SCRIPT5_TARGET_USER:-}" || [ "${SCRIPT5_TARGET_USER:-}" == "root" ] || ! id "$SCRIPT5_TARGET_USER" >/dev/null 2>&1; then msg_warn "Script 5 target user is missing, root, invalid, or not a local user"; failure="yes"; fi
+    if [ "$DOCKER_READY" != "yes" ]; then msg_warn "Docker CLI is not ready"; failure="yes"; fi
+    if [ "$DOCKER_COMPOSE_READY" != "yes" ]; then msg_warn "Docker Compose plugin is not ready"; failure="yes"; fi
+    if [ "$SCRIPT5_DOCKER_INFO_READY" != "yes" ]; then msg_warn "docker info is not ready"; failure="yes"; fi
+    if [ "$SCRIPT5_DOCKER_SERVICE_STATE" != "active" ]; then msg_warn "Docker service is not active"; failure="yes"; fi
+    if [ "$SCRIPT5_CONTAINERD_SERVICE_STATE" != "active" ]; then msg_warn "containerd service is not active"; failure="yes"; fi
+    if [ "$DOCKER_USER_IN_DOCKER_GROUP" == "not ready" ]; then msg_warn "Script 5 target user is not confirmed in docker group"; failure="yes"; fi
 
-    if [ "$SCRIPT5_STATUS" != "completed" ]; then
-        msg_warn "Script 5 marker is not completed"
-        failure="yes"
-    fi
-
-    if [ "$SCRIPT5_VERIFY_STATUS" != "PASS" ]; then
-        msg_warn "Script 5 verification is not PASS"
-        failure="yes"
-    fi
-
-    if ! validate_linux_username "${SCRIPT5_TARGET_USER:-}" || [ "${SCRIPT5_TARGET_USER:-}" == "root" ] || ! id "$SCRIPT5_TARGET_USER" >/dev/null 2>&1; then
-        msg_warn "Script 5 target user is missing, root, invalid, or not a local user"
-        failure="yes"
-    fi
-
-    if [ "$DOCKER_READY" != "yes" ]; then
-        msg_warn "Docker CLI is not ready"
-        failure="yes"
-    fi
-
-    if [ "$DOCKER_COMPOSE_READY" != "yes" ]; then
-        msg_warn "Docker Compose plugin is not ready"
-        failure="yes"
-    fi
-
-    if [ "$SCRIPT5_DOCKER_INFO_READY" != "yes" ]; then
-        msg_warn "docker info is not ready"
-        failure="yes"
-    fi
-
-    if [ "$SCRIPT5_DOCKER_SERVICE_STATE" != "active" ]; then
-        msg_warn "Docker service is not active"
-        failure="yes"
-    fi
-
-    if [ "$SCRIPT5_CONTAINERD_SERVICE_STATE" != "active" ]; then
-        msg_warn "containerd service is not active"
-        failure="yes"
-    fi
-
-    if [ "$DOCKER_USER_IN_DOCKER_GROUP" == "not ready" ]; then
-        msg_warn "Script 5 target user is not confirmed in docker group"
-        failure="yes"
+    if [ "$SCRIPT5_SWAP_RESULT" == "unknown" ] || [ "$SCRIPT5_SWAP_FILE" == "unknown" ] || [ "$SCRIPT5_SWAP_SIZE" == "unknown" ]; then
+        msg_warn "Script 5 swap handoff fields are unknown; continuing because swap metadata is informational for Script 6."
     fi
 
     if script5_crowdsec_selected_or_active; then
@@ -2553,15 +2426,21 @@ function validate_script5_handoff() {
 
 function show_script5_handoff_summary() {
     echo -e "${YW}Script 5:${CL}"
+    aligned_value_line "Status" "$SCRIPT5_STATUS" "$(status_color_for_value "$SCRIPT5_STATUS")" 21
     aligned_value_line "Verification" "$SCRIPT5_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT5_VERIFY_STATUS")" 21
     aligned_value_line "Docker user" "$DOCKER_USER" "$GN" 21
     aligned_value_line "Docker" "$SCRIPT5_DOCKER_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_DOCKER_SERVICE_STATE")" 21
     aligned_value_line "Compose" "$([ "$DOCKER_COMPOSE_READY" == "yes" ] && echo ready || echo "not ready")" "$(status_color_for_value "$([ "$DOCKER_COMPOSE_READY" == "yes" ] && echo ready || echo "not ready")")" 21
     aligned_value_line "Containerd" "$SCRIPT5_CONTAINERD_SERVICE_STATE" "$(status_color_for_value "$SCRIPT5_CONTAINERD_SERVICE_STATE")" 21
+    echo ""
+    echo -e "${YW}System:${CL}"
+    aligned_value_line "Ubuntu swap" "$SCRIPT5_SWAP_RESULT" "$(status_color_for_value "$SCRIPT5_SWAP_RESULT")" 21
+    aligned_value_line "Swap file" "$SCRIPT5_SWAP_FILE" "$(status_color_for_value "$SCRIPT5_SWAP_FILE")" 21
+    aligned_value_line "Swap size" "$SCRIPT5_SWAP_SIZE" "$(status_color_for_value "$SCRIPT5_SWAP_SIZE")" 21
+    aligned_value_line "UFW firewall" "$SCRIPT5_UFW_ENABLED" "$(status_color_for_value "$SCRIPT5_UFW_ENABLED")" 21
+    aligned_value_line "Redis host tuning" "$SCRIPT5_REDIS_OVERCOMMIT" "$(status_color_for_value "$SCRIPT5_REDIS_OVERCOMMIT")" 21
 }
 
-# --- 43. DOCKER READINESS CHECK ---
-# Checks that script 5 likely ran successfully before this script.
 function check_docker_readiness() {
     local sudo_state="ready"
     local env_setup_state=""
@@ -2947,36 +2826,26 @@ function collect_service_hostnames() {
     local def_authentik_prefix="auth"
     local def_traefik_prefix="traefik"
     local def_admin_prefix="dockge"
-    local def_admin_dashboard_prefix="admin"
-    local def_postiz_prefix="app"
+        local def_postiz_prefix="app"
     local def_n8n_prefix="n8n"
-    local def_files_prefix="files"
-    local def_code_prefix="code"
-    local def_proxmox_prefix=""
+        local def_proxmox_prefix=""
 
     local landing_www_prefix=""
     local authentik_prefix=""
     local traefik_prefix=""
     local admin_prefix=""
-    local admin_dashboard_prefix=""
     local proxmox_prefix=""
     local postiz_prefix=""
     local n8n_prefix=""
-    local files_prefix=""
-    local code_prefix=""
-
     local existing_landing=""
     local existing_landing_www=""
     local existing_authentik=""
     local existing_traefik=""
     local existing_admin=""
-    local existing_admin_dashboard=""
-    local existing_proxmox=""
+        local existing_proxmox=""
     local existing_postiz=""
     local existing_n8n=""
-    local existing_files=""
-    local existing_code=""
-    local customize=""
+        local customize=""
     local confirm=""
 
     case "$ADMIN_UI" in
@@ -2996,12 +2865,9 @@ function collect_service_hostnames() {
         fi
         existing_traefik="$(read_existing_env_value "TRAEFIK_HOST")"
         existing_admin="$(read_existing_env_value "ADMIN_UI_HOST")"
-        existing_admin_dashboard="$(read_existing_env_value "ADMIN_DASHBOARD_HOST")"
         existing_proxmox="$(read_existing_env_value "PROXMOX_HOST")"
         existing_postiz="$(read_existing_env_value "POSTIZ_HOST")"
         existing_n8n="$(read_existing_env_value "N8N_HOST")"
-        existing_files="$(read_existing_env_value "FILEBROWSER_HOST")"
-        existing_code="$(read_existing_env_value "VSCODE_HOST")"
     fi
 
     if [ -n "${ADMIN_UI_HOST:-}" ]; then
@@ -3017,11 +2883,8 @@ function collect_service_hostnames() {
     authentik_prefix="$(prefix_from_hostname "$existing_authentik" "$d" "$def_authentik_prefix" "Authentik")"
     traefik_prefix="$(prefix_from_hostname "$existing_traefik" "$d" "$def_traefik_prefix" "Traefik")"
     admin_prefix="$(prefix_from_hostname "$existing_admin" "$d" "$def_admin_prefix" "Admin UI")"
-    admin_dashboard_prefix="$(prefix_from_hostname "$existing_admin_dashboard" "$d" "$def_admin_dashboard_prefix" "Admin Dashboard")"
     postiz_prefix="$(prefix_from_hostname "$existing_postiz" "$d" "$def_postiz_prefix" "Postiz app")"
     n8n_prefix="$(prefix_from_hostname "$existing_n8n" "$d" "$def_n8n_prefix" "n8n")"
-    files_prefix="$(prefix_from_hostname "$existing_files" "$d" "$def_files_prefix" "Files")"
-    code_prefix="$(prefix_from_hostname "$existing_code" "$d" "$def_code_prefix" "VS Code")"
 
     if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
         def_proxmox_prefix="${PROXMOX_PREFIX:-$(proxmox_prefix_default)}"
@@ -3036,15 +2899,12 @@ function collect_service_hostnames() {
     TRAEFIK_DASHBOARD_HOST="$TRAEFIK_HOST"
     ADMIN_UI_HOST="$(hostname_from_prefix "$admin_prefix" "$d")"
     ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
-    ADMIN_DASHBOARD_HOST="$(hostname_from_prefix "$admin_dashboard_prefix" "$d")"
     if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
         PROXMOX_PREFIX="$proxmox_prefix"
         PROXMOX_HOST="$(hostname_from_prefix "$PROXMOX_PREFIX" "$d")"
     fi
     POSTIZ_HOST="$(hostname_from_prefix "$postiz_prefix" "$d")"
     N8N_HOST="$(hostname_from_prefix "$n8n_prefix" "$d")"
-    FILEBROWSER_HOST="$(hostname_from_prefix "$files_prefix" "$d")"
-    VSCODE_HOST="$(hostname_from_prefix "$code_prefix" "$d")"
     AUTHENTIK_EXTERNAL_URL_VALUE="https://${AUTHENTIK_ROUTE_HOST_VALUE}"
     AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
     AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
@@ -3054,14 +2914,11 @@ function collect_service_hostnames() {
     aligned_value_line "Authentik" "$AUTHENTIK_ROUTE_HOST_VALUE" "$GN" 21
     aligned_value_line "Traefik" "$TRAEFIK_HOST" "$GN" 21
     aligned_value_line "Admin UI" "$ADMIN_UI_HOST" "$GN" 21
-    aligned_value_line "Admin Dashboard" "$ADMIN_DASHBOARD_HOST" "$GN" 21
     if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
         aligned_value_line "Proxmox" "$PROXMOX_HOST" "$GN" 21
     fi
     aligned_value_line "Postiz/Circl8 app" "$POSTIZ_HOST" "$GN" 21
     aligned_value_line "n8n" "$N8N_HOST" "$GN" 21
-    aligned_value_line "Files" "$FILEBROWSER_HOST" "$GN" 21
-    aligned_value_line "VS Code" "$VSCODE_HOST" "$GN" 21
     echo ""
 
     customize="$(timed_yes_no "Customize service hostnames?" "N")"
@@ -3075,12 +2932,9 @@ function collect_service_hostnames() {
     local original_authentik_prefix="$authentik_prefix"
     local original_traefik_prefix="$traefik_prefix"
     local original_admin_prefix="$admin_prefix"
-    local original_admin_dashboard_prefix="$admin_dashboard_prefix"
     local original_proxmox_prefix="$proxmox_prefix"
     local original_postiz_prefix="$postiz_prefix"
     local original_n8n_prefix="$n8n_prefix"
-    local original_files_prefix="$files_prefix"
-    local original_code_prefix="$code_prefix"
 
     echo -e "${BL}Landing root host remains:${CL} ${GN}${LANDING_HOST}${CL}"
     echo -e "${YW}Enter subdomain prefixes only. Script 6 will append .${DOMAIN_VALUE}.${CL}"
@@ -3090,14 +2944,11 @@ function collect_service_hostnames() {
     authentik_prefix="$(prompt_subdomain_prefix "Authentik subdomain" "$authentik_prefix")"
     traefik_prefix="$(prompt_subdomain_prefix "Traefik subdomain" "$traefik_prefix")"
     admin_prefix="$(prompt_subdomain_prefix "Admin UI subdomain" "$admin_prefix")"
-    admin_dashboard_prefix="$(prompt_subdomain_prefix "Admin Dashboard subdomain" "$admin_dashboard_prefix")"
     if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
         proxmox_prefix="$(prompt_subdomain_prefix "Proxmox subdomain" "$proxmox_prefix")"
     fi
     postiz_prefix="$(prompt_subdomain_prefix "Postiz app subdomain" "$postiz_prefix")"
     n8n_prefix="$(prompt_subdomain_prefix "n8n subdomain" "$n8n_prefix")"
-    files_prefix="$(prompt_subdomain_prefix "Files subdomain" "$files_prefix")"
-    code_prefix="$(prompt_subdomain_prefix "VS Code subdomain" "$code_prefix")"
 
     LANDING_WWW_HOST="$(hostname_from_prefix "$landing_www_prefix" "$d")"
     AUTHENTIK_ROUTE_HOST_VALUE="$(hostname_from_prefix "$authentik_prefix" "$d")"
@@ -3106,7 +2957,6 @@ function collect_service_hostnames() {
     TRAEFIK_DASHBOARD_HOST="$TRAEFIK_HOST"
     ADMIN_UI_HOST="$(hostname_from_prefix "$admin_prefix" "$d")"
     ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
-    ADMIN_DASHBOARD_HOST="$(hostname_from_prefix "$admin_dashboard_prefix" "$d")"
     if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
         PROXMOX_PREFIX="$proxmox_prefix"
         PROXMOX_HOST="$(hostname_from_prefix "$PROXMOX_PREFIX" "$d")"
@@ -3114,8 +2964,6 @@ function collect_service_hostnames() {
     fi
     POSTIZ_HOST="$(hostname_from_prefix "$postiz_prefix" "$d")"
     N8N_HOST="$(hostname_from_prefix "$n8n_prefix" "$d")"
-    FILEBROWSER_HOST="$(hostname_from_prefix "$files_prefix" "$d")"
-    VSCODE_HOST="$(hostname_from_prefix "$code_prefix" "$d")"
     AUTHENTIK_EXTERNAL_URL_VALUE="https://${AUTHENTIK_ROUTE_HOST_VALUE}"
     AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
     AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
@@ -3133,15 +2981,12 @@ function collect_service_hostnames() {
         TRAEFIK_DASHBOARD_HOST="$TRAEFIK_HOST"
         ADMIN_UI_HOST="$(hostname_from_prefix "$original_admin_prefix" "$d")"
         ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
-        ADMIN_DASHBOARD_HOST="$(hostname_from_prefix "$original_admin_dashboard_prefix" "$d")"
         if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
             PROXMOX_PREFIX="$original_proxmox_prefix"
             PROXMOX_HOST="$(hostname_from_prefix "$PROXMOX_PREFIX" "$d")"
         fi
         POSTIZ_HOST="$(hostname_from_prefix "$original_postiz_prefix" "$d")"
         N8N_HOST="$(hostname_from_prefix "$original_n8n_prefix" "$d")"
-        FILEBROWSER_HOST="$(hostname_from_prefix "$original_files_prefix" "$d")"
-        VSCODE_HOST="$(hostname_from_prefix "$original_code_prefix" "$d")"
         AUTHENTIK_EXTERNAL_URL_VALUE="https://${AUTHENTIK_ROUTE_HOST_VALUE}"
         AUTHENTIK_HOST_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
         AUTHENTIK_HOST_BROWSER_VALUE="$AUTHENTIK_EXTERNAL_URL_VALUE"
@@ -3277,7 +3122,7 @@ function collect_admin_ui_selection() {
 
     set_admin_ui_details
 
-    msg_ok "Admin UI selected: ${ADMIN_UI_DISPLAY_NAME}"
+    msg_ok "Admin UI default preseeded for Script 6.2: ${ADMIN_UI_DISPLAY_NAME}"
 
     return 0
 }
@@ -3537,17 +3382,14 @@ function show_ready_summary_and_confirm() {
     aligned_value_line "Authentik" "$AUTHENTIK_ROUTE_HOST_VALUE" "$GN" 21
     aligned_value_line "Traefik" "$TRAEFIK_HOST" "$GN" 21
     aligned_value_line "Admin UI" "$ADMIN_UI_HOST" "$GN" 21
-    aligned_value_line "Admin Dashboard" "$ADMIN_DASHBOARD_HOST" "$GN" 21
     if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
         aligned_value_line "Proxmox" "$PROXMOX_HOST" "$GN" 21
     fi
     aligned_value_line "Postiz/Circl8 app" "$POSTIZ_HOST" "$GN" 21
     aligned_value_line "n8n" "$N8N_HOST" "$GN" 21
-    aligned_value_line "Files" "$FILEBROWSER_HOST" "$GN" 21
-    aligned_value_line "VS Code" "$VSCODE_HOST" "$GN" 21
     echo ""
     echo -e "${YW}Applications:${CL}"
-    aligned_value_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME" "$ANS" 21
+    aligned_value_line "Admin UI default" "$ADMIN_UI_DISPLAY_NAME" "$ANS" 21
     aligned_value_line "Authentik URL" "$AUTHENTIK_HOST_VALUE" "$ANS" 21
     aligned_value_line "ACME email" "$TRAEFIK_ACME_EMAIL_VALUE" "$ANS" 21
     aligned_value_line "Authentik email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" "$ANS" 21
@@ -3596,84 +3438,26 @@ function create_docker_directories() {
 function generate_or_reuse_secrets() {
     apply_group_header "Secret generation / reuse"
 
-    msg_info "Generating or reusing secrets"
+    msg_info "Generating or reusing 6-family service secrets"
 
-    POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postgres_password")"
-    REDIS_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/redis_password")"
     AUTHENTIK_SECRET_KEY="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_secret_key")"
     AUTHENTIK_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_postgres_password")"
     POSTIZ_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_postgres_password")"
+    POSTIZ_REDIS_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_redis_password")"
     POSTIZ_JWT_SECRET="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_jwt_secret")"
     TEMPORAL_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/temporal_postgres_password")"
-    KOMODO_DB_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_db_password")"
-    KOMODO_PASSKEY="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_passkey")"
-    KOMODO_JWT_SECRET="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_jwt_secret")"
-    KOMODO_WEBHOOK_SECRET="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_webhook_secret")"
+    N8N_ENCRYPTION_KEY="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/n8n_encryption_key")"
 
     tty_print "${BFR}"
     apply_status_line "$(secret_generation_status_label)"
 }
 
-# --- 50. POSTGRES INIT SCRIPT CREATION ---
-# Creates unattended PostgreSQL init script for app databases on first PostgreSQL container startup.
 function create_postgres_init_script() {
-    apply_group_header "PostgreSQL init script"
-
-    msg_info "Writing PostgreSQL unattended app database init script"
-
-    write_root_file "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-create_user_and_db() {
-    local app_user="$1"
-    local app_db="$2"
-    local app_password="$3"
-
-    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<SQL
-DO \$\$
-BEGIN
-    IF NOT EXISTS (
-        SELECT FROM pg_catalog.pg_roles
-        WHERE rolname = '${app_user}'
-    ) THEN
-        CREATE USER ${app_user} WITH PASSWORD '${app_password}';
-    ELSE
-        ALTER USER ${app_user} WITH PASSWORD '${app_password}';
-    END IF;
-END
-\$\$;
-
-SELECT 'CREATE DATABASE ${app_db} OWNER ${app_user}'
-WHERE NOT EXISTS (
-    SELECT FROM pg_database
-    WHERE datname = '${app_db}'
-)\gexec
-
-GRANT ALL PRIVILEGES ON DATABASE ${app_db} TO ${app_user};
-SQL
+    # Deprecated in Script 6 v1.7.0.
+    # Service-owned databases are created by their owning 6-family deployment scripts.
+    return 0
 }
 
-: "${AUTHENTIK_POSTGRES_PASSWORD:?AUTHENTIK_POSTGRES_PASSWORD is required}"
-: "${POSTIZ_POSTGRES_PASSWORD:?POSTIZ_POSTGRES_PASSWORD is required}"
-: "${TEMPORAL_POSTGRES_PASSWORD:?TEMPORAL_POSTGRES_PASSWORD is required}"
-
-create_user_and_db "authentik" "authentik" "$AUTHENTIK_POSTGRES_PASSWORD"
-create_user_and_db "postiz" "postiz" "$POSTIZ_POSTGRES_PASSWORD"
-create_user_and_db "temporal" "temporal" "$TEMPORAL_POSTGRES_PASSWORD"
-create_user_and_db "temporal" "temporal_visibility" "$TEMPORAL_POSTGRES_PASSWORD"
-EOF
-
-    run_cmd "making PostgreSQL init script executable" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
-
-    tty_print "${BFR}"
-    apply_status_line "created"
-}
-
-
-# --- 50A. TRAEFIK CONFIG TEMPLATE RENDERING ---
-# Downloads public Traefik template files from GitHub and renders local config files.
-# Only non-secret placeholders are replaced. Cloudflare token remains file-based via Docker secret.
 function create_traefik_config_files() {
     local static_template=""
     local dynamic_template=""
@@ -3709,7 +3493,7 @@ function create_traefik_config_files() {
 }
 
 # --- 50B. TRAEFIK CONFIG POST-RENDER VERIFICATION ---
-# Verifies Traefik files immediately after rendering so Script 6 fails here, not later in Script 6.5.
+# Verifies Traefik files immediately after rendering so Script 6 fails here, not later in Script 6.1.
 function verify_traefik_config_files_created() {
     apply_group_header "Traefik config files"
 
@@ -3742,19 +3526,15 @@ function verify_traefik_config_files_created() {
 function write_secret_files() {
     apply_group_header "Secret files"
 
-    msg_info "Writing secret files"
+    msg_info "Writing 6-family secret files"
 
-    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postgres_password" "$POSTGRES_PASSWORD"
-    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/redis_password" "$REDIS_PASSWORD"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/authentik_secret_key" "$AUTHENTIK_SECRET_KEY"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/authentik_postgres_password" "$AUTHENTIK_POSTGRES_PASSWORD"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postiz_postgres_password" "$POSTIZ_POSTGRES_PASSWORD"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postiz_redis_password" "$POSTIZ_REDIS_PASSWORD"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postiz_jwt_secret" "$POSTIZ_JWT_SECRET"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/temporal_postgres_password" "$TEMPORAL_POSTGRES_PASSWORD"
-    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/komodo_db_password" "$KOMODO_DB_PASSWORD"
-    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/komodo_passkey" "$KOMODO_PASSKEY"
-    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/komodo_jwt_secret" "$KOMODO_JWT_SECRET"
-    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/komodo_webhook_secret" "$KOMODO_WEBHOOK_SECRET"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/n8n_encryption_key" "$N8N_ENCRYPTION_KEY"
 
     if [ -n "$CF_API_TOKEN_VALUE" ]; then
         write_secret_file_no_newline "$CF_API_TOKEN_FILE" "$CF_API_TOKEN_VALUE"
@@ -3776,24 +3556,15 @@ function write_secret_files() {
     apply_status_line "written"
 }
 
-# --- 52. ENV FILE CREATION ---
-# Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
-# This file contains secrets and is locked down to 600 later.
 function write_env_file() {
     apply_group_header ".env file"
 
     msg_info "Creating Docker .env file"
 
-    # Defensive compatibility alias for any legacy/template line that still
-    # references the old DOMAIN variable name. Script 6's collected canonical
-    # value is DOMAIN_VALUE, but set -u turns stale expansion into a hard failure
-    # during heredoc rendering.
     local DOMAIN="${DOMAIN_VALUE}"
 
     refresh_authentik_route_url_values
 
-    # Fail with a clear message before the heredoc if any required collected
-    # value is unexpectedly empty/unset. This avoids cryptic set -u messages.
     : "${DOMAIN_VALUE:?DOMAIN_VALUE is required before writing .env}"
     : "${DOCKER_DIR:?DOCKER_DIR is required before writing .env}"
     : "${DOCKER_SECRETS_DIR:?DOCKER_SECRETS_DIR is required before writing .env}"
@@ -3803,7 +3574,9 @@ function write_env_file() {
 
     write_root_file "${DOCKER_DIR}/.env" <<EOF
 # =========================================================
-#  Project: Home-Hosted Social Media SaaS
+#  Project: Circl8
+#  Owner: Script 6 v1.7.0 six-family environment baseline
+#  Notes: Local runtime file. Do not commit real values or secrets.
 # =========================================================
 
 # --- Core paths ---
@@ -3819,8 +3592,19 @@ DOCKER_GID="${DOCKER_GID_VALUE}"
 # --- Localisation ---
 TZ="${TZ_VALUE}"
 
-# --- Domain / Cloudflare ---
-DOMAIN="${DOMAIN_VALUE}"
+# --- Script 5 handoff ---
+SCRIPT5_STATUS="${SCRIPT5_STATUS}"
+SCRIPT5_VERSION="${SCRIPT5_VERSION}"
+SCRIPT5_VERIFY_STATUS="${SCRIPT5_VERIFY_STATUS}"
+SCRIPT5_SWAP_PRESERVE_SELECTED="${SCRIPT5_SWAP_PRESERVE_SELECTED}"
+SCRIPT5_SWAP_RESULT="${SCRIPT5_SWAP_RESULT}"
+SCRIPT5_SWAP_FILE="${SCRIPT5_SWAP_FILE}"
+SCRIPT5_SWAP_SIZE="${SCRIPT5_SWAP_SIZE}"
+SCRIPT5_UFW_ENABLED="${SCRIPT5_UFW_ENABLED}"
+SCRIPT5_REDIS_OVERCOMMIT="${SCRIPT5_REDIS_OVERCOMMIT}"
+
+# --- Domain / Cloudflare / Traefik ---
+DOMAIN="${DOMAIN}"
 CF_AUTH_MODE="${CF_AUTH_MODE}"
 CF_EMAIL_REQUIRED="${CF_EMAIL_REQUIRED}"
 CF_API_EMAIL="${CF_API_EMAIL_VALUE}"
@@ -3835,37 +3619,24 @@ PROXMOX_URL="${PROXMOX_URL}"
 PROXMOX_ROUTE_SOURCE="${PROXMOX_ROUTE_SOURCE}"
 PROXMOX_URL_SOURCE="${PROXMOX_URL_SOURCE}"
 TRAEFIK_DASHBOARD_HOST="${TRAEFIK_DASHBOARD_HOST}"
+TRAEFIK_HOST="${TRAEFIK_HOST}"
 TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_STATIC_CONFIG_FILE}"
 TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DYNAMIC_CONFIG_FILE}"
 TRAEFIK_ACME_STORAGE="${TRAEFIK_ACME_DIR}/acme.json"
 TRAEFIK_ACME_EMAIL="${TRAEFIK_ACME_EMAIL_VALUE}"
 
-# --- Service hostnames (set by collect_service_hostnames) ---
+# --- Script 6-family service hostnames ---
 LANDING_HOST="${LANDING_HOST}"
 LANDING_WWW_HOST="${LANDING_WWW_HOST}"
 AUTHENTIK_ROUTE_HOST="${AUTHENTIK_ROUTE_HOST_VALUE}"
-TRAEFIK_HOST="${TRAEFIK_HOST}"
-ADMIN_DASHBOARD_HOST="${ADMIN_DASHBOARD_HOST}"
-# POSTIZ_HOST is populated by Batch 2 and preserved here
-N8N_HOST="${N8N_HOST}"
-FILEBROWSER_HOST="${FILEBROWSER_HOST}"
-VSCODE_HOST="${VSCODE_HOST}"
-
-# --- Admin UI selection ---
 ADMIN_UI="${ADMIN_UI}"
 ADMIN_UI_DISPLAY_NAME="${ADMIN_UI_DISPLAY_NAME}"
 ADMIN_UI_HOST="${ADMIN_UI_HOST}"
 ADMIN_UI_URL="${ADMIN_UI_URL}"
+POSTIZ_HOST="${POSTIZ_HOST:-app.${DOMAIN_VALUE}}"
+N8N_HOST="${N8N_HOST}"
 
-# --- PostgreSQL root/admin password ---
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
-
-# --- Redis ---
-REDIS_PASSWORD="${REDIS_PASSWORD}"
-
-# --- Authentik ---
-# Compatibility note: AUTHENTIK_HOST is kept once as the legacy external URL value.
-# Route labels must use AUTHENTIK_ROUTE_HOST; runtime/API consumers should use AUTHENTIK_EXTERNAL_URL.
+# --- Authentik owned by Script 6.3 ---
 AUTHENTIK_EXTERNAL_URL="${AUTHENTIK_EXTERNAL_URL_VALUE}"
 AUTHENTIK_HOST="${AUTHENTIK_EXTERNAL_URL_VALUE}"
 AUTHENTIK_HOST_BROWSER_VALUE="${AUTHENTIK_HOST_BROWSER_VALUE}"
@@ -3877,10 +3648,6 @@ AUTHENTIK_BOOTSTRAP_PASSWORD="${AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE}"
 AUTHENTIK_BOOTSTRAP_TOKEN="${AUTHENTIK_BOOTSTRAP_TOKEN_VALUE}"
 AUTHENTIK_API_TOKEN_MODE="${AUTHENTIK_API_TOKEN_MODE}"
 AUTHENTIK_API_TOKEN="${AUTHENTIK_API_TOKEN_VALUE}"
-
-# --- Authentik runtime safety / optional SMTP ---
-# Disable update-check notifications unless SMTP is deliberately configured later.
-# This prevents a healthy fresh Authentik worker from retrying failed update-notification emails.
 AUTHENTIK_DISABLE_UPDATE_CHECK="true"
 AUTHENTIK_DISABLE_STARTUP_ANALYTICS="true"
 AUTHENTIK_ERROR_REPORTING__ENABLED="false"
@@ -3893,55 +3660,37 @@ AUTHENTIK_EMAIL__USE_SSL="${AUTHENTIK_EMAIL__USE_SSL_VALUE:-false}"
 AUTHENTIK_EMAIL__TIMEOUT="${AUTHENTIK_EMAIL__TIMEOUT_VALUE:-30}"
 AUTHENTIK_EMAIL__FROM="${AUTHENTIK_EMAIL__FROM_VALUE:-Circl8 <no-reply@${DOMAIN_VALUE}>}"
 
-# --- Postiz ---
+# --- Postiz owned by Script 6.4 ---
 POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
+POSTIZ_REDIS_PASSWORD="${POSTIZ_REDIS_PASSWORD}"
 POSTIZ_JWT_SECRET="${POSTIZ_JWT_SECRET}"
 POSTIZ_HOST="${POSTIZ_HOST:-app.${DOMAIN_VALUE}}"
-
-# --- Temporal ---
 TEMPORAL_POSTGRES_PASSWORD="${TEMPORAL_POSTGRES_PASSWORD}"
 TEMPORAL_DBNAME="temporal"
 TEMPORAL_VISIBILITY_DBNAME="temporal_visibility"
 
-# --- Komodo ---
-KOMODO_DB_PASSWORD="${KOMODO_DB_PASSWORD}"
-KOMODO_PASSKEY="${KOMODO_PASSKEY}"
-KOMODO_JWT_SECRET="${KOMODO_JWT_SECRET}"
-KOMODO_WEBHOOK_SECRET="${KOMODO_WEBHOOK_SECRET}"
+# --- n8n owned by Script 6.5 ---
+N8N_ENCRYPTION_KEY="${N8N_ENCRYPTION_KEY}"
+N8N_DB_MODE="sqlite"
+N8N_WEBHOOK_URL="https://${N8N_HOST}/"
 
 # --- Image defaults / development mode ---
-# These intentionally default to latest during active testing.
-# Script 7 can generate a lock report after a successful deployment.
 SOCKET_PROXY_IMAGE="tecnativa/docker-socket-proxy:latest"
 DOCKGE_IMAGE="louislam/dockge:latest"
 DOCKHAND_IMAGE="fnsys/dockhand:latest"
-KOMODO_POSTGRES_IMAGE="postgres:latest"
-KOMODO_FERRETDB_IMAGE="ghcr.io/ferretdb/ferretdb:latest"
-KOMODO_CORE_IMAGE="ghcr.io/moghtech/komodo-core:latest"
-KOMODO_PERIPHERY_IMAGE="ghcr.io/moghtech/komodo-periphery:latest"
 PORTAINER_IMAGE="portainer/portainer-ce:latest"
-POSTGRES_IMAGE="postgres:latest"
-REDIS_IMAGE="redis:latest"
 TRAEFIK_IMAGE="traefik:latest"
 AUTHENTIK_IMAGE="ghcr.io/goauthentik/server:latest"
-TEMPORAL_IMAGE="temporalio/auto-setup:latest"
-TEMPORAL_ADMIN_TOOLS_IMAGE="temporalio/admin-tools:latest"
 POSTIZ_IMAGE="ghcr.io/gitroomhq/postiz-app:latest"
 CF_DDNS_IMAGE="oznu/cloudflare-ddns:latest"
 CF_COMPANION_IMAGE="tiredofit/traefik-cloudflare-companion:latest"
-VSCODE_IMAGE="lscr.io/linuxserver/code-server:latest"
-FILEBROWSER_IMAGE="filebrowser/filebrowser:latest"
+N8N_IMAGE="n8nio/n8n:latest"
 EOF
 
     tty_print "${BFR}"
     apply_status_line "created"
 }
 
-
-
-# --- 53. PERMISSIONS ---
-# Applies secure permissions without breaking PostgreSQL init script readability.
-# .env and secret files are treated as high-value secret material.
 function apply_permissions() {
     apply_group_header "Permissions"
 
@@ -3970,9 +3719,8 @@ function assert_owner_mode() {
     local actual=""
 
     # Use sudo-aware existence/stat checks because service paths such as
-    # ${DOCKER_DIR}/appdata/redis are intentionally locked to UID/GID 999 with
-    # mode 770. A normal shell user cannot traverse those directories, so plain
-    # [ -e ] and stat can falsely report nested paths like redis/data as missing.
+    # Some future service-owned paths may be locked to service-specific UIDs.
+    # Use sudo-aware existence/stat checks so audits do not false-report paths as missing.
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" test -e "$path" || msg_error "Permission audit path missing: ${path}"
         actual="$("$SUDO_CMD" stat -c '%u:%g:%a' "$path" 2>/dev/null || true)"
@@ -4018,68 +3766,21 @@ function assert_user_writable_dir() {
 }
 
 function verify_service_permissions() {
-    apply_group_header "Service permission audit"
+    apply_group_header "Environment permission audit"
 
-    # This audit deliberately does not create or repair paths.
-    # It verifies that Script 6's create -> chown -> chmod stages already left the expected final state.
-
-    # Core project paths.
     assert_owner_mode "$DOCKER_DIR" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "755"
     assert_owner_mode "${DOCKER_DIR}/appdata" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "755"
-
-    # PostgreSQL latest/18 path and legacy compatibility path.
-    assert_owner_mode "${DOCKER_DIR}/appdata/postgres" "999" "999" "755"
-    assert_owner_mode "${DOCKER_DIR}/appdata/postgres/pgdata" "999" "999" "700"
-    assert_owner_mode "${DOCKER_DIR}/appdata/postgres/data" "999" "999" "700"
-
-    assert_root_executable "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
-
-    # Redis: both the active bind target and nested compatibility path must exist
-    # and be writable by UID/GID 999 before Script 6.5 deploys Redis.
-    assert_owner_mode "${DOCKER_DIR}/appdata/redis" "999" "999" "770"
-    assert_owner_mode "${DOCKER_DIR}/appdata/redis/data" "999" "999" "770"
-
-    # Authentik bind mounts must be owned by the non-root Authentik UID/GID.
-    assert_owner_mode "${DOCKER_DIR}/appdata/authentik" "1000" "1000" "770"
-    assert_owner_mode "${DOCKER_DIR}/appdata/authentik/media" "1000" "1000" "770"
-    assert_owner_mode "${DOCKER_DIR}/appdata/authentik/custom-templates" "1000" "1000" "770"
-    assert_owner_mode "${DOCKER_DIR}/appdata/authentik/certs" "1000" "1000" "770"
-
-    # User-facing appdata and shared folders should be writable by the selected Docker user.
     assert_user_writable_dir "${DOCKER_DIR}/compose"
-    assert_user_writable_dir "${DOCKER_DIR}/shared"
     assert_user_writable_dir "${DOCKER_DIR}/backups"
-    assert_user_writable_dir "${DOCKER_DIR}/appdata/filebrowser/database"
-    assert_user_writable_dir "${DOCKER_DIR}/appdata/filebrowser/config"
-    assert_user_writable_dir "${DOCKER_DIR}/appdata/postiz/uploads"
 
-    # Admin UI bind-mount paths. These are all created by Script 6 so Docker never
-    # has to create them later as root during Script 6.5 deployment.
-    assert_user_writable_dir "${DOCKER_DIR}/appdata/dockge"
-    assert_user_writable_dir "${DOCKER_DIR}/appdata/portainer"
-    assert_user_writable_dir "${DOCKER_DIR}/appdata/dockhand"
-    assert_user_writable_dir "${DOCKER_DIR}/appdata/dockhand/stacks"
-    assert_owner_mode "${DOCKER_DIR}/appdata/komodo" "$PUID_VALUE" "$PGID_VALUE" "755"
-    assert_owner_mode "${DOCKER_DIR}/appdata/komodo/postgres" "999" "999" "700"
-    assert_user_writable_dir "${DOCKER_DIR}/appdata/komodo/core"
-    assert_user_writable_dir "${DOCKER_DIR}/appdata/komodo/periphery"
-
-    # Secrets and Traefik ACME must remain locked down.
     assert_owner_mode "$DOCKER_SECRETS_DIR" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "700"
     assert_owner_mode "${DOCKER_DIR}/.env" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "600"
     assert_owner_mode "${TRAEFIK_ACME_DIR}/acme.json" "$PUID_VALUE" "$PGID_VALUE" "600"
 
     PERMISSION_AUDIT_STATUS="PASS"
-    msg_ok "SERVICE PERMISSION AUDIT PASSED"
+    msg_ok "ENVIRONMENT PERMISSION AUDIT PASSED"
 }
 
-
-# =========================================================
-#  VERIFICATION / MARKER / SUMMARY
-# =========================================================
-
-# --- 54. VERIFICATION REPORT ---
-# Creates a verification report without printing secret values.
 function verify_record_first_issue() {
     local issue_type="$1"
     local check="$2"
@@ -4153,32 +3854,14 @@ function create_verification_report() {
     VERIFY_FIRST_ISSUE_REASON=""
     VERIFY_FIRST_ISSUE_FIX=""
 
-    verify_pass() {
-        VERIFY_PASS_COUNT="$(( VERIFY_PASS_COUNT + 1 ))"
-        echo "✓ PASS - $1" >> "$report_body"
-    }
+    verify_pass() { VERIFY_PASS_COUNT="$(( VERIFY_PASS_COUNT + 1 ))"; echo "✓ PASS - $1" >> "$report_body"; }
+    verify_warn() { local check="$1" reason="${2:-warning condition detected}" fix="${3:-review ${VERIFY_LOG}}"; VERIFY_WARN_COUNT="$(( VERIFY_WARN_COUNT + 1 ))"; verify_record_first_issue "Warning" "$check" "$reason" "$fix"; echo "! WARN - ${check}: ${reason}" >> "$report_body"; }
+    verify_fail() { local check="$1" reason="${2:-check failed}" fix="${3:-review ${VERIFY_LOG}}"; VERIFY_FAIL_COUNT="$(( VERIFY_FAIL_COUNT + 1 ))"; verify_record_first_issue "Failure" "$check" "$reason" "$fix"; echo "✗ FAIL - ${check}: ${reason}" >> "$report_body"; }
+    verify_info() { echo "- INFO - $1" >> "$report_body"; }
 
-    verify_warn() {
-        local check="$1"
-        local reason="${2:-warning condition detected}"
-        local fix="${3:-review ${VERIFY_LOG}}"
-        VERIFY_WARN_COUNT="$(( VERIFY_WARN_COUNT + 1 ))"
-        verify_record_first_issue "Warning" "$check" "$reason" "$fix"
-        echo "! WARN - ${check}: ${reason}" >> "$report_body"
-    }
-
-    verify_fail() {
-        local check="$1"
-        local reason="${2:-check failed}"
-        local fix="${3:-review ${VERIFY_LOG}}"
-        VERIFY_FAIL_COUNT="$(( VERIFY_FAIL_COUNT + 1 ))"
-        verify_record_first_issue "Failure" "$check" "$reason" "$fix"
-        echo "✗ FAIL - ${check}: ${reason}" >> "$report_body"
-    }
-
-    verify_info() {
-        echo "- INFO - $1" >> "$report_body"
-    }
+    if [ "$SCRIPT5_STATUS" == "completed" ]; then verify_pass "Script 5 status completed"; else verify_fail "Script 5 status" "status is ${SCRIPT5_STATUS}" "complete/fix Script 5 first"; fi
+    if [ "$SCRIPT5_VERIFY_STATUS" == "PASS" ]; then verify_pass "Script 5 verification PASS"; else verify_fail "Script 5 verification" "status is ${SCRIPT5_VERIFY_STATUS}" "resolve Script 5 verification first"; fi
+    if [ "$SCRIPT5_SWAP_RESULT" == "unknown" ]; then verify_warn "Script 5 swap handoff" "swap result is unknown" "inspect ${SCRIPT5_MARKER}"; else verify_pass "Script 5 swap handoff present"; fi
 
     if id "$DOCKER_USER" >/dev/null 2>&1; then verify_pass "Docker user exists"; else verify_fail "Docker user exists" "user ${DOCKER_USER:-unknown} missing" "run Script 4/5 or create the Docker user"; fi
     if root_path_exists "$DOCKER_DIR"; then verify_pass "Docker directory exists"; else verify_fail "Docker directory exists" "${DOCKER_DIR:-unknown} missing" "rerun Script 6 setup"; fi
@@ -4192,56 +3875,33 @@ function create_verification_report() {
     if [ "$current_mode" == "700" ]; then verify_pass "secrets directory mode is 700"; else verify_warn "secrets directory mode is 700" "current mode is ${current_mode:-unknown}" "run normal Script 6 setup to repair permissions"; fi
 
     for secret_file in \
-        postgres_password \
-        redis_password \
         authentik_secret_key \
         authentik_postgres_password \
         postiz_postgres_password \
+        postiz_redis_password \
         postiz_jwt_secret \
         temporal_postgres_password \
-        komodo_db_password \
-        komodo_passkey \
-        komodo_jwt_secret \
-        komodo_webhook_secret
+        n8n_encryption_key
     do
-        if root_file_not_empty "${DOCKER_SECRETS_DIR}/${secret_file}"; then
-            verify_pass "${secret_file} exists and is non-empty"
-        else
-            verify_fail "${secret_file}" "secret file missing or empty" "rerun Script 6 setup or restore secret file from backup"
-        fi
-
+        if root_file_not_empty "${DOCKER_SECRETS_DIR}/${secret_file}"; then verify_pass "${secret_file} exists and is non-empty"; else verify_fail "${secret_file}" "secret file missing or empty" "rerun Script 6 setup or restore secret file from backup"; fi
         current_mode="$(root_stat_mode "${DOCKER_SECRETS_DIR}/${secret_file}")"
-        if [ "$current_mode" == "600" ]; then
-            verify_pass "${secret_file} mode is 600"
-        else
-            verify_warn "${secret_file} mode is 600" "current mode is ${current_mode:-unknown}" "run normal Script 6 setup to repair permissions"
-        fi
+        if [ "$current_mode" == "600" ]; then verify_pass "${secret_file} mode is 600"; else verify_warn "${secret_file} mode is 600" "current mode is ${current_mode:-unknown}" "run normal Script 6 setup to repair permissions"; fi
     done
 
     if root_path_exists "$CF_API_TOKEN_FILE"; then verify_pass "Cloudflare token file exists"; else verify_warn "Cloudflare token file exists" "token file missing" "create token file or rerun Script 6 if Cloudflare DNS automation is required"; fi
     if root_path_exists "${DOCKER_SECRETS_DIR}/htpasswd"; then verify_pass "htpasswd file exists"; else verify_info "htpasswd file missing; acceptable when SSO/auth gateway is used"; fi
-    if root_path_exists "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" && { [ -z "$SUDO_CMD" ] && [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ] || [ -n "$SUDO_CMD" ] && "$SUDO_CMD" test -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" 2>/dev/null; }; then verify_pass "PostgreSQL init script exists and is executable"; else verify_fail "PostgreSQL init script" "missing or not executable" "rerun Script 6 setup"; fi
     if root_path_exists "$TRAEFIK_STATIC_CONFIG_FILE"; then verify_pass "Traefik static config exists"; else verify_fail "Traefik static config" "missing" "rerun Script 6 template render step"; fi
     if root_path_exists "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then verify_pass "Traefik dynamic config exists"; else verify_fail "Traefik dynamic config" "missing" "rerun Script 6 template render step"; fi
     if root_path_exists "${TRAEFIK_ACME_DIR}/acme.json"; then verify_pass "Traefik acme.json exists"; else verify_fail "Traefik acme.json" "missing" "rerun Script 6 setup"; fi
     current_mode="$(root_stat_mode "${TRAEFIK_ACME_DIR}/acme.json")"
     if [ "$current_mode" == "600" ]; then verify_pass "Traefik acme.json mode is 600"; else verify_warn "Traefik acme.json mode is 600" "current mode is ${current_mode:-unknown}" "run normal Script 6 setup to repair permissions"; fi
 
-    if root_path_exists "${DOCKER_DIR}/.env" && { root_read_file "${DOCKER_DIR}/.env" 2>/dev/null | grep -q '^POSTIZ_JWT_SECRET='; }; then verify_pass "Postiz JWT secret env present"; else verify_fail "Postiz JWT secret env" "missing from .env" "rerun Script 6 .env generation"; fi
-    if root_file_not_empty "${DOCKER_SECRETS_DIR}/postiz_jwt_secret"; then verify_pass "postiz_jwt_secret exists and is non-empty"; else verify_fail "postiz_jwt_secret" "missing or empty" "rerun Script 6 setup or restore secret file"; fi
-
     verify_docker_runtime_continuity
     verify_crowdsec_runtime_continuity
 
     if root_path_exists "$COMPLETED_MARKER"; then verify_pass "Completion marker exists"; else verify_warn "Completion marker exists" "marker not present yet" "rerun marker write step"; fi
 
-    if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then
-        VERIFY_STATUS="FAIL"
-    elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then
-        VERIFY_STATUS="PASS_WITH_WARNINGS"
-    else
-        VERIFY_STATUS="PASS"
-    fi
+    if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then VERIFY_STATUS="FAIL"; elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then VERIFY_STATUS="PASS_WITH_WARNINGS"; else VERIFY_STATUS="PASS"; fi
 
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" bash -c "cat > '$VERIFY_LOG'" <<EOF
@@ -4251,6 +3911,9 @@ Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
 Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
+Script 5 status: $SCRIPT5_STATUS
+Script 5 verification: $SCRIPT5_VERIFY_STATUS
+Script 5 swap: $SCRIPT5_SWAP_RESULT $SCRIPT5_SWAP_FILE $SCRIPT5_SWAP_SIZE
 VERIFY_STATUS=$VERIFY_STATUS
 VERIFY_PASS_COUNT=$VERIFY_PASS_COUNT
 VERIFY_WARN_COUNT=$VERIFY_WARN_COUNT
@@ -4267,6 +3930,9 @@ Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
 Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
+Script 5 status: $SCRIPT5_STATUS
+Script 5 verification: $SCRIPT5_VERIFY_STATUS
+Script 5 swap: $SCRIPT5_SWAP_RESULT $SCRIPT5_SWAP_FILE $SCRIPT5_SWAP_SIZE
 VERIFY_STATUS=$VERIFY_STATUS
 VERIFY_PASS_COUNT=$VERIFY_PASS_COUNT
 VERIFY_WARN_COUNT=$VERIFY_WARN_COUNT
@@ -4281,18 +3947,61 @@ EOF
     msg_ok "DOCKER ENV VERIFICATION REPORT CREATED"
 }
 
-# --- 55. COMPLETION MARKER ---
-# Creates marker showing ENV setup completed successfully.
-# No secret values are stored in the marker.
+function marker_readiness_values() {
+    SCRIPT6_TRAEFIK_CONFIG_READY="no"
+    SCRIPT6_TRAEFIK_ACME_READY="no"
+    SCRIPT6_CF_TOKEN_FILE_READY="no"
+    SCRIPT6_ENV_FILE_READY="no"
+    SCRIPT6_SECRETS_READY="no"
+    SCRIPT6_READY_FOR_SCRIPT61="no"
+    SCRIPT6_READY_FOR_SCRIPT62="no"
+    SCRIPT6_READY_FOR_SCRIPT63="no"
+    SCRIPT6_READY_FOR_SCRIPT64="no"
+    SCRIPT6_READY_FOR_SCRIPT65="no"
+    SCRIPT6_READY_FOR_SCRIPT66="no"
+
+    root_path_exists "$TRAEFIK_STATIC_CONFIG_FILE" && root_path_exists "$TRAEFIK_DYNAMIC_CONFIG_FILE" && SCRIPT6_TRAEFIK_CONFIG_READY="yes"
+    root_path_exists "${TRAEFIK_ACME_DIR}/acme.json" && [ "$(root_stat_mode "${TRAEFIK_ACME_DIR}/acme.json")" == "600" ] && SCRIPT6_TRAEFIK_ACME_READY="yes"
+    root_path_exists "${DOCKER_DIR}/.env" && SCRIPT6_ENV_FILE_READY="yes"
+    if root_file_not_empty "${DOCKER_SECRETS_DIR}/authentik_secret_key" \
+        && root_file_not_empty "${DOCKER_SECRETS_DIR}/authentik_postgres_password" \
+        && root_file_not_empty "${DOCKER_SECRETS_DIR}/postiz_postgres_password" \
+        && root_file_not_empty "${DOCKER_SECRETS_DIR}/postiz_redis_password" \
+        && root_file_not_empty "${DOCKER_SECRETS_DIR}/postiz_jwt_secret" \
+        && root_file_not_empty "${DOCKER_SECRETS_DIR}/temporal_postgres_password" \
+        && root_file_not_empty "${DOCKER_SECRETS_DIR}/n8n_encryption_key"; then
+        SCRIPT6_SECRETS_READY="yes"
+    fi
+
+    if root_file_not_empty "$CF_API_TOKEN_FILE"; then
+        SCRIPT6_CF_TOKEN_FILE_READY="yes"
+    elif [ "${CF_AUTH_MODE:-}" == "email_or_manual" ]; then
+        SCRIPT6_CF_TOKEN_FILE_READY="skipped"
+    else
+        SCRIPT6_CF_TOKEN_FILE_READY="no"
+    fi
+
+    if [ "$SCRIPT6_TRAEFIK_CONFIG_READY" == "yes" ] && [ "$SCRIPT6_TRAEFIK_ACME_READY" == "yes" ] && [ "$SCRIPT6_ENV_FILE_READY" == "yes" ] && [ "$SCRIPT6_SECRETS_READY" == "yes" ]; then
+        SCRIPT6_READY_FOR_SCRIPT61="yes"
+        SCRIPT6_READY_FOR_SCRIPT62="yes"
+        SCRIPT6_READY_FOR_SCRIPT63="yes"
+        SCRIPT6_READY_FOR_SCRIPT64="yes"
+        SCRIPT6_READY_FOR_SCRIPT65="yes"
+        SCRIPT6_READY_FOR_SCRIPT66="yes"
+    fi
+}
+
 function write_completion_marker() {
     apply_group_header "Marker / verification"
 
     msg_info "Writing completion marker"
+    marker_readiness_values
 
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" bash -c "cat > '$COMPLETED_MARKER'" <<EOF
 Docker ENV Setup completed on: $(date)
 Docker dir: $DOCKER_DIR
+Compose dir: ${DOCKER_DIR}/compose
 Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
 User: $DOCKER_USER
@@ -4319,6 +4028,11 @@ Docker user in docker group: $DOCKER_USER_IN_DOCKER_GROUP
 Script 5 status: $SCRIPT5_STATUS
 Script 5 verification: $SCRIPT5_VERIFY_STATUS
 Script 5 target user: $SCRIPT5_TARGET_USER
+Script 5 swap result: $SCRIPT5_SWAP_RESULT
+Script 5 swap file: $SCRIPT5_SWAP_FILE
+Script 5 swap size: $SCRIPT5_SWAP_SIZE
+Script 5 UFW: $SCRIPT5_UFW_ENABLED
+Script 5 Redis host tuning: $SCRIPT5_REDIS_OVERCOMMIT
 Docker service: $SCRIPT5_DOCKER_SERVICE_STATE
 Containerd service: $SCRIPT5_CONTAINERD_SERVICE_STATE
 CrowdSec service: $SCRIPT5_CROWDSEC_STATE
@@ -4332,28 +4046,45 @@ SCRIPT6_BUILD=$SCRIPT_BUILD
 SCRIPT6_VERIFY_STATUS=$VERIFY_STATUS
 SCRIPT6_VERIFY_LOG=$VERIFY_LOG
 SCRIPT6_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
+SCRIPT6_DOCKER_USER=$DOCKER_USER
 SCRIPT6_DOCKER_DIR=$DOCKER_DIR
+SCRIPT6_COMPOSE_DIR=${DOCKER_DIR}/compose
 SCRIPT6_SECRETS_DIR=$DOCKER_SECRETS_DIR
 SCRIPT6_DOMAIN=$DOMAIN_VALUE
-SCRIPT6_ADMIN_UI=$ADMIN_UI
-SCRIPT6_TRAEFIK_CONFIG=$([ -n "$TRAEFIK_STATIC_CONFIG_FILE" ] && [ -n "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] && echo yes || echo no)
+SCRIPT6_TIMEZONE=$TZ_VALUE
+SCRIPT6_PUID=$PUID_VALUE
+SCRIPT6_PGID=$PGID_VALUE
+SCRIPT6_SCRIPT5_STATUS=$SCRIPT5_STATUS
+SCRIPT6_SCRIPT5_VERIFY_STATUS=$SCRIPT5_VERIFY_STATUS
+SCRIPT6_SCRIPT5_SWAP_RESULT=$SCRIPT5_SWAP_RESULT
+SCRIPT6_SCRIPT5_SWAP_FILE=$SCRIPT5_SWAP_FILE
+SCRIPT6_SCRIPT5_SWAP_SIZE=$SCRIPT5_SWAP_SIZE
+SCRIPT6_SCRIPT5_UFW_ENABLED=$SCRIPT5_UFW_ENABLED
+SCRIPT6_SCRIPT5_REDIS_OVERCOMMIT=$SCRIPT5_REDIS_OVERCOMMIT
+SCRIPT6_CROWDSEC_SELECTED=$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED
+SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
+SCRIPT6_TRAEFIK_CONFIG_READY=$SCRIPT6_TRAEFIK_CONFIG_READY
+SCRIPT6_TRAEFIK_ACME_READY=$SCRIPT6_TRAEFIK_ACME_READY
+SCRIPT6_CF_TOKEN_FILE_READY=$SCRIPT6_CF_TOKEN_FILE_READY
+SCRIPT6_ENV_FILE_READY=$SCRIPT6_ENV_FILE_READY
+SCRIPT6_SECRETS_READY=$SCRIPT6_SECRETS_READY
+SCRIPT6_READY_FOR_SCRIPT61=$SCRIPT6_READY_FOR_SCRIPT61
+SCRIPT6_READY_FOR_SCRIPT62=$SCRIPT6_READY_FOR_SCRIPT62
+SCRIPT6_READY_FOR_SCRIPT63=$SCRIPT6_READY_FOR_SCRIPT63
+SCRIPT6_READY_FOR_SCRIPT64=$SCRIPT6_READY_FOR_SCRIPT64
+SCRIPT6_READY_FOR_SCRIPT65=$SCRIPT6_READY_FOR_SCRIPT65
+SCRIPT6_READY_FOR_SCRIPT66=$SCRIPT6_READY_FOR_SCRIPT66
+SCRIPT6_ADMIN_UI_DEFAULT=$ADMIN_UI
 SCRIPT6_PROXMOX_HOST=${PROXMOX_HOST:-}
 SCRIPT6_PROXMOX_LAN_URL=${PROXMOX_URL:-}
 SCRIPT6_PROXMOX_MARKER_SOURCE=$PROXMOX_MARKER_SOURCE
-SCRIPT6_SCRIPT5_STATUS=$SCRIPT5_STATUS
-SCRIPT6_SCRIPT5_VERIFY_STATUS=$SCRIPT5_VERIFY_STATUS
-SCRIPT6_DOCKER_SERVICE=$SCRIPT5_DOCKER_SERVICE_STATE
-SCRIPT6_CONTAINERD_SERVICE=$SCRIPT5_CONTAINERD_SERVICE_STATE
-SCRIPT6_CROWDSEC_SERVICE=$SCRIPT5_CROWDSEC_STATE
-SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
-SCRIPT6_SECRETS_READY=unknown
-SCRIPT6_ENV_FILE_READY=unknown
 SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS
 EOF
     else
         cat > "$COMPLETED_MARKER" <<EOF
 Docker ENV Setup completed on: $(date)
 Docker dir: $DOCKER_DIR
+Compose dir: ${DOCKER_DIR}/compose
 Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
 User: $DOCKER_USER
@@ -4380,6 +4111,11 @@ Docker user in docker group: $DOCKER_USER_IN_DOCKER_GROUP
 Script 5 status: $SCRIPT5_STATUS
 Script 5 verification: $SCRIPT5_VERIFY_STATUS
 Script 5 target user: $SCRIPT5_TARGET_USER
+Script 5 swap result: $SCRIPT5_SWAP_RESULT
+Script 5 swap file: $SCRIPT5_SWAP_FILE
+Script 5 swap size: $SCRIPT5_SWAP_SIZE
+Script 5 UFW: $SCRIPT5_UFW_ENABLED
+Script 5 Redis host tuning: $SCRIPT5_REDIS_OVERCOMMIT
 Docker service: $SCRIPT5_DOCKER_SERVICE_STATE
 Containerd service: $SCRIPT5_CONTAINERD_SERVICE_STATE
 CrowdSec service: $SCRIPT5_CROWDSEC_STATE
@@ -4393,22 +4129,38 @@ SCRIPT6_BUILD=$SCRIPT_BUILD
 SCRIPT6_VERIFY_STATUS=$VERIFY_STATUS
 SCRIPT6_VERIFY_LOG=$VERIFY_LOG
 SCRIPT6_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG
+SCRIPT6_DOCKER_USER=$DOCKER_USER
 SCRIPT6_DOCKER_DIR=$DOCKER_DIR
+SCRIPT6_COMPOSE_DIR=${DOCKER_DIR}/compose
 SCRIPT6_SECRETS_DIR=$DOCKER_SECRETS_DIR
 SCRIPT6_DOMAIN=$DOMAIN_VALUE
-SCRIPT6_ADMIN_UI=$ADMIN_UI
-SCRIPT6_TRAEFIK_CONFIG=$([ -n "$TRAEFIK_STATIC_CONFIG_FILE" ] && [ -n "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] && echo yes || echo no)
+SCRIPT6_TIMEZONE=$TZ_VALUE
+SCRIPT6_PUID=$PUID_VALUE
+SCRIPT6_PGID=$PGID_VALUE
+SCRIPT6_SCRIPT5_STATUS=$SCRIPT5_STATUS
+SCRIPT6_SCRIPT5_VERIFY_STATUS=$SCRIPT5_VERIFY_STATUS
+SCRIPT6_SCRIPT5_SWAP_RESULT=$SCRIPT5_SWAP_RESULT
+SCRIPT6_SCRIPT5_SWAP_FILE=$SCRIPT5_SWAP_FILE
+SCRIPT6_SCRIPT5_SWAP_SIZE=$SCRIPT5_SWAP_SIZE
+SCRIPT6_SCRIPT5_UFW_ENABLED=$SCRIPT5_UFW_ENABLED
+SCRIPT6_SCRIPT5_REDIS_OVERCOMMIT=$SCRIPT5_REDIS_OVERCOMMIT
+SCRIPT6_CROWDSEC_SELECTED=$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED
+SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
+SCRIPT6_TRAEFIK_CONFIG_READY=$SCRIPT6_TRAEFIK_CONFIG_READY
+SCRIPT6_TRAEFIK_ACME_READY=$SCRIPT6_TRAEFIK_ACME_READY
+SCRIPT6_CF_TOKEN_FILE_READY=$SCRIPT6_CF_TOKEN_FILE_READY
+SCRIPT6_ENV_FILE_READY=$SCRIPT6_ENV_FILE_READY
+SCRIPT6_SECRETS_READY=$SCRIPT6_SECRETS_READY
+SCRIPT6_READY_FOR_SCRIPT61=$SCRIPT6_READY_FOR_SCRIPT61
+SCRIPT6_READY_FOR_SCRIPT62=$SCRIPT6_READY_FOR_SCRIPT62
+SCRIPT6_READY_FOR_SCRIPT63=$SCRIPT6_READY_FOR_SCRIPT63
+SCRIPT6_READY_FOR_SCRIPT64=$SCRIPT6_READY_FOR_SCRIPT64
+SCRIPT6_READY_FOR_SCRIPT65=$SCRIPT6_READY_FOR_SCRIPT65
+SCRIPT6_READY_FOR_SCRIPT66=$SCRIPT6_READY_FOR_SCRIPT66
+SCRIPT6_ADMIN_UI_DEFAULT=$ADMIN_UI
 SCRIPT6_PROXMOX_HOST=${PROXMOX_HOST:-}
 SCRIPT6_PROXMOX_LAN_URL=${PROXMOX_URL:-}
 SCRIPT6_PROXMOX_MARKER_SOURCE=$PROXMOX_MARKER_SOURCE
-SCRIPT6_SCRIPT5_STATUS=$SCRIPT5_STATUS
-SCRIPT6_SCRIPT5_VERIFY_STATUS=$SCRIPT5_VERIFY_STATUS
-SCRIPT6_DOCKER_SERVICE=$SCRIPT5_DOCKER_SERVICE_STATE
-SCRIPT6_CONTAINERD_SERVICE=$SCRIPT5_CONTAINERD_SERVICE_STATE
-SCRIPT6_CROWDSEC_SERVICE=$SCRIPT5_CROWDSEC_STATE
-SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
-SCRIPT6_SECRETS_READY=unknown
-SCRIPT6_ENV_FILE_READY=unknown
 SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS
 EOF
     fi
@@ -4419,20 +4171,14 @@ EOF
 function update_completion_marker_script6_fields() {
     local marker_tmp=""
     local existing_marker=""
-    local traefik_config_ready="no"
-    local secrets_ready="no"
-    local env_file_ready="no"
 
+    marker_readiness_values
     marker_tmp="$(mktemp)"
     TEMP_FILES+=("$marker_tmp")
 
     if root_path_exists "$COMPLETED_MARKER"; then
         existing_marker="$(root_read_file "$COMPLETED_MARKER" 2>/dev/null | grep -Ev '^SCRIPT6_' || true)"
     fi
-
-    root_path_exists "$TRAEFIK_STATIC_CONFIG_FILE" && root_path_exists "$TRAEFIK_DYNAMIC_CONFIG_FILE" && traefik_config_ready="yes"
-    root_path_exists "${DOCKER_DIR}/.env" && env_file_ready="yes"
-    root_file_not_empty "${DOCKER_SECRETS_DIR}/postgres_password" && root_file_not_empty "${DOCKER_SECRETS_DIR}/redis_password" && secrets_ready="yes"
 
     {
         [ -n "$existing_marker" ] && printf '%s\n' "$existing_marker"
@@ -4442,24 +4188,40 @@ function update_completion_marker_script6_fields() {
         echo "SCRIPT6_VERIFY_STATUS=$VERIFY_STATUS"
         echo "SCRIPT6_VERIFY_LOG=$VERIFY_LOG"
         echo "SCRIPT6_VERIFY_DISPLAY_LOG=$VERIFY_DISPLAY_LOG"
+        echo "SCRIPT6_DOCKER_USER=$DOCKER_USER"
         echo "SCRIPT6_DOCKER_DIR=$DOCKER_DIR"
+        echo "SCRIPT6_COMPOSE_DIR=${DOCKER_DIR}/compose"
         echo "SCRIPT6_SECRETS_DIR=$DOCKER_SECRETS_DIR"
         echo "SCRIPT6_DOMAIN=$DOMAIN_VALUE"
-        echo "SCRIPT6_ADMIN_UI=$ADMIN_UI"
+        echo "SCRIPT6_TIMEZONE=$TZ_VALUE"
+        echo "SCRIPT6_PUID=$PUID_VALUE"
+        echo "SCRIPT6_PGID=$PGID_VALUE"
+        echo "SCRIPT6_SCRIPT5_STATUS=$SCRIPT5_STATUS"
+        echo "SCRIPT6_SCRIPT5_VERIFY_STATUS=$SCRIPT5_VERIFY_STATUS"
+        echo "SCRIPT6_SCRIPT5_SWAP_RESULT=$SCRIPT5_SWAP_RESULT"
+        echo "SCRIPT6_SCRIPT5_SWAP_FILE=$SCRIPT5_SWAP_FILE"
+        echo "SCRIPT6_SCRIPT5_SWAP_SIZE=$SCRIPT5_SWAP_SIZE"
+        echo "SCRIPT6_SCRIPT5_UFW_ENABLED=$SCRIPT5_UFW_ENABLED"
+        echo "SCRIPT6_SCRIPT5_REDIS_OVERCOMMIT=$SCRIPT5_REDIS_OVERCOMMIT"
+        echo "SCRIPT6_CROWDSEC_SELECTED=$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED"
+        echo "SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}"
+        echo "SCRIPT6_TRAEFIK_CONFIG_READY=$SCRIPT6_TRAEFIK_CONFIG_READY"
+        echo "SCRIPT6_TRAEFIK_ACME_READY=$SCRIPT6_TRAEFIK_ACME_READY"
+        echo "SCRIPT6_CF_TOKEN_FILE_READY=$SCRIPT6_CF_TOKEN_FILE_READY"
+        echo "SCRIPT6_ENV_FILE_READY=$SCRIPT6_ENV_FILE_READY"
+        echo "SCRIPT6_SECRETS_READY=$SCRIPT6_SECRETS_READY"
+        echo "SCRIPT6_READY_FOR_SCRIPT61=$SCRIPT6_READY_FOR_SCRIPT61"
+        echo "SCRIPT6_READY_FOR_SCRIPT62=$SCRIPT6_READY_FOR_SCRIPT62"
+        echo "SCRIPT6_READY_FOR_SCRIPT63=$SCRIPT6_READY_FOR_SCRIPT63"
+        echo "SCRIPT6_READY_FOR_SCRIPT64=$SCRIPT6_READY_FOR_SCRIPT64"
+        echo "SCRIPT6_READY_FOR_SCRIPT65=$SCRIPT6_READY_FOR_SCRIPT65"
+        echo "SCRIPT6_READY_FOR_SCRIPT66=$SCRIPT6_READY_FOR_SCRIPT66"
+        echo "SCRIPT6_ADMIN_UI_DEFAULT=$ADMIN_UI"
         echo "SCRIPT6_TRAEFIK_ACME_EMAIL=$TRAEFIK_ACME_EMAIL_VALUE"
         echo "SCRIPT6_AUTHENTIK_EMAIL=$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
         echo "SCRIPT6_PROXMOX_HOST=${PROXMOX_HOST:-}"
         echo "SCRIPT6_PROXMOX_LAN_URL=${PROXMOX_URL:-}"
         echo "SCRIPT6_PROXMOX_MARKER_SOURCE=$PROXMOX_MARKER_SOURCE"
-        echo "SCRIPT6_SCRIPT5_STATUS=$SCRIPT5_STATUS"
-        echo "SCRIPT6_SCRIPT5_VERIFY_STATUS=$SCRIPT5_VERIFY_STATUS"
-        echo "SCRIPT6_DOCKER_SERVICE=$SCRIPT5_DOCKER_SERVICE_STATE"
-        echo "SCRIPT6_CONTAINERD_SERVICE=$SCRIPT5_CONTAINERD_SERVICE_STATE"
-        echo "SCRIPT6_CROWDSEC_SERVICE=$SCRIPT5_CROWDSEC_STATE"
-        echo "SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}"
-        echo "SCRIPT6_TRAEFIK_CONFIG=$traefik_config_ready"
-        echo "SCRIPT6_SECRETS_READY=$secrets_ready"
-        echo "SCRIPT6_ENV_FILE_READY=$env_file_ready"
         echo "SCRIPT6_PERMISSION_AUDIT=$PERMISSION_AUDIT_STATUS"
     } > "$marker_tmp"
 
@@ -4490,6 +4252,7 @@ function write_verify_display_log() {
     local result_lines=""
     local line=""
 
+    marker_readiness_values
     display_tmp="$(mktemp)"
     TEMP_FILES+=("$display_tmp")
 
@@ -4502,18 +4265,24 @@ function write_verify_display_log() {
         echo -e "${BL}SCRIPT 6 VERIFICATION SUMMARY${CL}"
         echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
         echo ""
-        echo -e "${YW}Docker ENV:${CL}"
+        echo -e "${YW}Prepared environment:${CL}"
         echo -e "  ${BL}Docker dir:${CL} ${GN}${DOCKER_DIR:-unknown}${CL}"
+        echo -e "  ${BL}Compose dir:${CL} ${GN}${DOCKER_DIR:-unknown}/compose${CL}"
         echo -e "  ${BL}.env file:${CL} ${GN}${DOCKER_DIR:-unknown}/.env${CL}"
         echo -e "  ${BL}Secrets dir:${CL} ${GN}${DOCKER_SECRETS_DIR:-unknown}${CL}"
         echo -e "  ${BL}Domain:${CL} ${GN}${DOMAIN_VALUE:-unknown}${CL}"
-        echo -e "  ${BL}Admin UI:${CL} ${GN}${ADMIN_UI:-unknown}${CL}"
+        echo ""
+        echo -e "${YW}6-family readiness:${CL}"
+        echo -e "  ${BL}Ready for Script 6.1:${CL} ${GN}${SCRIPT6_READY_FOR_SCRIPT61}${CL}"
+        echo -e "  ${BL}Ready for Script 6.2:${CL} ${GN}${SCRIPT6_READY_FOR_SCRIPT62}${CL}"
+        echo -e "  ${BL}Ready for Script 6.3:${CL} ${GN}${SCRIPT6_READY_FOR_SCRIPT63}${CL}"
+        echo -e "  ${BL}Ready for Script 6.4:${CL} ${GN}${SCRIPT6_READY_FOR_SCRIPT64}${CL}"
+        echo -e "  ${BL}Ready for Script 6.5:${CL} ${GN}${SCRIPT6_READY_FOR_SCRIPT65}${CL}"
+        echo -e "  ${BL}Ready for Script 6.6:${CL} ${GN}${SCRIPT6_READY_FOR_SCRIPT66}${CL}"
         echo ""
         echo -e "${YW}Checks:${CL}"
         if [ -n "$result_lines" ]; then
-            while IFS= read -r line; do
-                [ -n "$line" ] && colorize_verify_line "$line"
-            done <<< "$result_lines"
+            while IFS= read -r line; do [ -n "$line" ] && colorize_verify_line "$line"; done <<< "$result_lines"
         else
             echo -e "  ${BL}- INFO - No verification lines recorded${CL}"
         fi
@@ -4532,7 +4301,7 @@ function write_verify_display_log() {
         echo -e "  ${BL}Display log:${CL} ${GN}${VERIFY_DISPLAY_LOG}${CL}"
         echo ""
         echo -e "${YW}Next Step:${CL}"
-        echo -e "  ${YW}Run ${ANS}6.5-dockerDeploy-circl8.sh${YW}.${CL}"
+        echo -e "  ${YW}Build/run ${ANS}Script 6.1 platform core bootstrap${YW}.${CL}"
     } > "$display_tmp"
 
     if [ -n "$SUDO_CMD" ]; then
@@ -4608,7 +4377,7 @@ function show_verify_only_summary() {
 
     echo ""
     echo -e "${YW}Next Step:${CL}"
-    echo -e "  ${YW}Run ${ANS}6.5-dockerDeploy-circl8.sh${YW}.${CL}"
+    echo -e "  ${YW}Build/run ${ANS}Script 6.1 platform core bootstrap${YW}.${CL}"
 }
 
 function run_verify_only_mode() {
@@ -4644,39 +4413,18 @@ function wait_before_secret_display() {
 # After user confirms they saved them, terminal and scrollback are cleared where supported.
 function show_secrets_once_without_logging() {
     disable_logging
-
+    clear_terminal_scrollback
     SECRET_DISPLAY_WAS_SHOWN="yes"
 
-    clear
-    header_info
-    show_script_version
-
-    echo -e "${RD}${CLF}SENSITIVE SECRET OUTPUT - NOT LOGGED${CL}"
-    echo -e "${YW}Save these values now. This screen will be cleared after confirmation.${CL}"
+    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+    echo -e "${BL}SCRIPT 6 SECRET / ENV HANDOFF${CL}"
+    echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+    echo ""
+    echo -e "${RD}Sensitive values are shown once only and are not written to ${LOG_FILE}.${CL}"
     echo ""
 
-    echo -e "${YW}CORE PATHS:${CL}"
-    echo -e "DOCKER_DIR=${GN}${DOCKER_DIR}${CL}"
-    echo -e "DOCKER_SECRETS_DIR=${GN}${DOCKER_SECRETS_DIR}${CL}"
-    echo -e "USERDIR=${GN}${USERDIR}${CL}"
-    echo ""
-
-    echo -e "${YW}LINUX USER / IDS:${CL}"
-    echo -e "DOCKER_USER=${GN}${DOCKER_USER}${CL}"
-    echo -e "PUID=${GN}${PUID_VALUE}${CL}"
-    echo -e "PGID=${GN}${PGID_VALUE}${CL}"
-    echo ""
-
-    echo -e "${YW}DOMAIN / CLOUDFLARE:${CL}"
-    echo -e "DOMAIN=${GN}${DOMAIN_VALUE}${CL}"
-    echo -e "CF_API_EMAIL=${GN}${CF_API_EMAIL_VALUE:-not required with token auth}${CL}"
-    echo -e "CF_ZONE_ID=${GN}$([ -n "$CF_ZONE_ID_VALUE" ] && echo captured || echo empty)${CL}"
+    echo -e "${YW}CLOUDFLARE:${CL}"
     echo -e "CF_API_TOKEN_FILE=${GN}${CF_API_TOKEN_FILE}${CL}"
-    echo -e "TRAEFIK_STATIC_CONFIG=${GN}${TRAEFIK_STATIC_CONFIG_FILE}${CL}"
-    echo -e "TRAEFIK_DYNAMIC_CONFIG=${GN}${TRAEFIK_DYNAMIC_CONFIG_FILE}${CL}"
-    echo -e "TRAEFIK_ACME_STORAGE=${GN}${TRAEFIK_ACME_DIR}/acme.json${CL}"
-    echo -e "TRAEFIK_ACME_EMAIL=${GN}${TRAEFIK_ACME_EMAIL_VALUE}${CL}"
-
     if [ -n "$CF_API_TOKEN_VALUE" ]; then
         echo -e "CF_API_TOKEN=${YW}<captured / not displayed>${CL}"
     else
@@ -4688,9 +4436,6 @@ function show_secrets_once_without_logging() {
     refresh_authentik_route_url_values
     echo -e "AUTHENTIK_ROUTE_HOST=${GN}${AUTHENTIK_ROUTE_HOST_VALUE}${CL}"
     echo -e "AUTHENTIK_EXTERNAL_URL=${GN}${AUTHENTIK_EXTERNAL_URL_VALUE}${CL}"
-    echo -e "AUTHENTIK_HOST=${GN}${AUTHENTIK_EXTERNAL_URL_VALUE}${CL}"
-    echo -e "AUTHENTIK_HOST_BROWSER_VALUE=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
-    echo -e "AUTHENTIK_HOST_BROWSER=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
     echo -e "AUTHENTIK_BOOTSTRAP_EMAIL=${GN}${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}${CL}"
     if [ "${AUTHENTIK_BOOTSTRAP_PASSWORD_MODE:-auto}" == "custom" ]; then
         echo -e "AUTHENTIK_BOOTSTRAP_PASSWORD=${YW}<custom / not displayed>${CL}"
@@ -4708,25 +4453,20 @@ function show_secrets_once_without_logging() {
     else
         echo -e "AUTHENTIK_API_TOKEN=${YW}<empty / skipped>${CL}"
     fi
-    echo -e "${YW}Reminder: for fresh Authentik, AUTHENTIK_BOOTSTRAP_TOKEN creates an akadmin API Access token and Script 6.5 can reuse it.${CL}"
+    echo -e "${YW}Reminder: Script 6.3 can use the Authentik bootstrap/API token when API automation is enabled.${CL}"
 
     echo ""
-    echo -e "${YW}SERVICE SECRETS:${CL}"
-    echo -e "POSTGRES_PASSWORD=${GN}${POSTGRES_PASSWORD}${CL}"
-    echo -e "REDIS_PASSWORD=${GN}${REDIS_PASSWORD}${CL}"
+    echo -e "${YW}6-FAMILY SERVICE SECRETS:${CL}"
     echo -e "AUTHENTIK_SECRET_KEY=${GN}${AUTHENTIK_SECRET_KEY}${CL}"
     echo -e "AUTHENTIK_POSTGRES_PASSWORD=${GN}${AUTHENTIK_POSTGRES_PASSWORD}${CL}"
     echo -e "POSTIZ_POSTGRES_PASSWORD=${GN}${POSTIZ_POSTGRES_PASSWORD}${CL}"
+    echo -e "POSTIZ_REDIS_PASSWORD=${GN}${POSTIZ_REDIS_PASSWORD}${CL}"
     echo -e "POSTIZ_JWT_SECRET=${GN}${POSTIZ_JWT_SECRET}${CL}"
     echo -e "TEMPORAL_POSTGRES_PASSWORD=${GN}${TEMPORAL_POSTGRES_PASSWORD}${CL}"
-    echo -e "KOMODO_DB_PASSWORD=${GN}${KOMODO_DB_PASSWORD}${CL}"
-    echo -e "KOMODO_PASSKEY=${GN}${KOMODO_PASSKEY}${CL}"
-    echo -e "KOMODO_JWT_SECRET=${GN}${KOMODO_JWT_SECRET}${CL}"
-    echo -e "KOMODO_WEBHOOK_SECRET=${GN}${KOMODO_WEBHOOK_SECRET}${CL}"
+    echo -e "N8N_ENCRYPTION_KEY=${GN}${N8N_ENCRYPTION_KEY}${CL}"
     echo ""
 
     echo -e "${YW}HTPASSWD:${CL}"
-
     if [ "$HTPASSWD_MODE" == "generated" ]; then
         echo -e "HTPASSWD_HASHED_LINE=${GN}${HTPASSWD_LINE_VALUE}${CL}"
         echo -e "${YW}Plain htpasswd password was not displayed or logged.${CL}"
@@ -4738,47 +4478,23 @@ function show_secrets_once_without_logging() {
         echo -e "${YW}Existing htpasswd content is intentionally not displayed.${CL}"
     else
         echo -e "${YW}htpasswd file created empty:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
-        echo -e "${YW}This is fine when Authentik/Authelia/SSO is used instead of Traefik basic-auth.${CL}"
+        echo -e "${YW}This is fine when Authentik/SSO is used instead of Traefik basic-auth.${CL}"
     fi
 
-
-    echo ""
-    echo -e "${YW}IMAGE DEFAULTS / DEVELOPMENT MODE:${CL}"
-    echo -e "SOCKET_PROXY_IMAGE=${GN}tecnativa/docker-socket-proxy:latest${CL}"
-    echo -e "DOCKGE_IMAGE=${GN}louislam/dockge:latest${CL}"
-    echo -e "DOCKHAND_IMAGE=${GN}fnsys/dockhand:latest${CL}"
-    echo -e "KOMODO_POSTGRES_IMAGE=${GN}postgres:latest${CL}"
-    echo -e "KOMODO_FERRETDB_IMAGE=${GN}ghcr.io/ferretdb/ferretdb:latest${CL}"
-    echo -e "KOMODO_CORE_IMAGE=${GN}ghcr.io/moghtech/komodo-core:latest${CL}"
-    echo -e "KOMODO_PERIPHERY_IMAGE=${GN}ghcr.io/moghtech/komodo-periphery:latest${CL}"
-    echo -e "PORTAINER_IMAGE=${GN}portainer/portainer-ce:latest${CL}"
-    echo -e "POSTGRES_IMAGE=${GN}postgres:latest${CL}"
-    echo -e "REDIS_IMAGE=${GN}redis:latest${CL}"
-    echo -e "TRAEFIK_IMAGE=${GN}traefik:latest${CL}"
-    echo -e "AUTHENTIK_IMAGE=${GN}ghcr.io/goauthentik/server:latest${CL}"
-    echo -e "TEMPORAL_IMAGE=${GN}temporalio/auto-setup:latest${CL}"
-    echo -e "TEMPORAL_ADMIN_TOOLS_IMAGE=${GN}temporalio/admin-tools:latest${CL}"
-    echo -e "POSTIZ_IMAGE=${GN}ghcr.io/gitroomhq/postiz-app:latest${CL}"
-    echo -e "CF_DDNS_IMAGE=${GN}oznu/cloudflare-ddns:latest${CL}"
-    echo -e "CF_COMPANION_IMAGE=${GN}tiredofit/traefik-cloudflare-companion:latest${CL}"
-    echo -e "VSCODE_IMAGE=${GN}lscr.io/linuxserver/code-server:latest${CL}"
-    echo -e "FILEBROWSER_IMAGE=${GN}filebrowser/filebrowser:latest${CL}"
     echo ""
     echo -e "${YW}Sensitive final output above was intentionally not written to ${LOG_FILE}.${CL}"
 
     wait_then_clear_secret_display
-
     enable_logging
 }
 
-# --- 57. CLEAN FINAL SUMMARY ---
-# Prints non-sensitive final summary after secrets have been cleared from the terminal.
 function show_clean_final_summary() {
     local smtp_summary="skipped"
     local service_secret_summary="generated"
     local htpasswd_summary="empty or existing placeholder"
     local traefik_app_host=""
 
+    marker_readiness_values
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
     if [ -n "${AUTHENTIK_EMAIL__HOST_VALUE:-}" ] && [ -n "${AUTHENTIK_EMAIL__USERNAME_VALUE:-}" ]; then
@@ -4797,41 +4513,43 @@ function show_clean_final_summary() {
 
     traefik_app_host="${TRAEFIK_HOST:-${TRAEFIK_DASHBOARD_HOST:-}}"
 
-    echo -e "${YW}Docker ENV:${CL}"
+    echo -e "${YW}Prepared:${CL}"
     final_line "Docker dir" "$DOCKER_DIR"
-    final_line ".env file" "${DOCKER_DIR}/.env"
+    final_line "Compose dir" "${DOCKER_DIR}/compose"
+    final_line ".env" "${DOCKER_DIR}/.env"
     final_line "Secrets dir" "$DOCKER_SECRETS_DIR"
     final_line "Domain" "$DOMAIN_VALUE"
     final_line "Docker user" "$DOCKER_USER"
     final_line "PUID / PGID" "${PUID_VALUE} / ${PGID_VALUE}"
 
     echo ""
+    echo -e "${YW}Script 5 handoff:${CL}"
+    final_line "Script 5" "$SCRIPT5_STATUS" "$(status_color_for_value "$SCRIPT5_STATUS")"
+    final_line "Verification" "$SCRIPT5_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT5_VERIFY_STATUS")"
+    final_line "Ubuntu swap" "$SCRIPT5_SWAP_RESULT" "$(status_color_for_value "$SCRIPT5_SWAP_RESULT")"
+    final_line "Swap file" "$SCRIPT5_SWAP_FILE" "$(status_color_for_value "$SCRIPT5_SWAP_FILE")"
+    final_line "Swap size" "$SCRIPT5_SWAP_SIZE" "$(status_color_for_value "$SCRIPT5_SWAP_SIZE")"
+    final_line "Redis host tuning" "$SCRIPT5_REDIS_OVERCOMMIT" "$(status_color_for_value "$SCRIPT5_REDIS_OVERCOMMIT")"
+
+    echo ""
     echo -e "${YW}Routing:${CL}"
     final_line "Proxmox route" "$(yes_no_label "$PROXMOX_ROUTE_ENABLED")"
     final_line "Proxmox host" "${PROXMOX_HOST:-skipped}"
     final_line "Proxmox LAN URL" "${PROXMOX_URL:-skipped}"
-    final_line "Proxmox source" "${PROXMOX_ROUTE_SOURCE:-not configured}"
     final_line "Static config" "$TRAEFIK_STATIC_CONFIG_FILE"
     final_line "Dynamic config" "$TRAEFIK_DYNAMIC_CONFIG_FILE"
-    final_line "ACME storage" "${TRAEFIK_ACME_DIR}/acme.json"
-    final_line "ACME email" "$TRAEFIK_ACME_EMAIL_VALUE"
+    final_line "acme.json" "${TRAEFIK_ACME_DIR}/acme.json"
+    final_line "Cloudflare token" "$SCRIPT6_CF_TOKEN_FILE_READY" "$(status_color_for_value "$SCRIPT6_CF_TOKEN_FILE_READY")"
 
     echo ""
-    echo -e "${YW}Applications:${CL}"
-    final_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
-    final_line "Admin UI URL" "$(https_url_or_not_configured "${ADMIN_UI_URL:-${ADMIN_UI_HOST:-}}")"
-    echo ""
+    echo -e "${YW}6-family defaults:${CL}"
+    final_line "Admin UI default" "$ADMIN_UI_DISPLAY_NAME"
     final_line "Landing URL" "$(https_url_or_not_configured "${LANDING_HOST:-}")"
     final_line "Landing www" "$(https_url_or_not_configured "${LANDING_WWW_HOST:-}")"
-    final_line "Postiz URL" "$(https_url_or_not_configured "${POSTIZ_HOST:-}")"
-    echo ""
     final_line "Traefik URL" "$(https_url_or_not_configured "$traefik_app_host")"
-    final_line "n8n URL" "$(https_url_or_not_configured "${N8N_HOST:-}")"
-    final_line "Files URL" "$(https_url_or_not_configured "${FILEBROWSER_HOST:-}")"
-    final_line "VS Code URL" "$(https_url_or_not_configured "${VSCODE_HOST:-}")"
-    echo ""
-    refresh_authentik_route_url_values
     final_line "Authentik URL" "$(https_url_or_not_configured "${AUTHENTIK_EXTERNAL_URL_VALUE:-${AUTHENTIK_HOST_VALUE:-${AUTHENTIK_HOST:-}}}")"
+    final_line "Postiz URL" "$(https_url_or_not_configured "${POSTIZ_HOST:-}")"
+    final_line "n8n URL" "$(https_url_or_not_configured "${N8N_HOST:-}")"
     final_line "Authentik email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
     final_line "SMTP relay" "$smtp_summary"
 
@@ -4841,6 +4559,19 @@ function show_clean_final_summary() {
     final_line "Cloudflare token file" "$CF_API_TOKEN_FILE"
     final_line "Htpasswd file" "$htpasswd_summary"
     final_line "Secret screen cleared" "$SECRET_SCREEN_CLEARED"
+
+    echo ""
+    echo -e "${YW}Readiness:${CL}"
+    final_line "Traefik config" "$SCRIPT6_TRAEFIK_CONFIG_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_CONFIG_READY")"
+    final_line "acme.json" "$SCRIPT6_TRAEFIK_ACME_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_ACME_READY")"
+    final_line ".env" "$SCRIPT6_ENV_FILE_READY" "$(status_color_for_value "$SCRIPT6_ENV_FILE_READY")"
+    final_line "Secrets" "$SCRIPT6_SECRETS_READY" "$(status_color_for_value "$SCRIPT6_SECRETS_READY")"
+    final_line "Ready for 6.1" "$SCRIPT6_READY_FOR_SCRIPT61" "$(status_color_for_value "$SCRIPT6_READY_FOR_SCRIPT61")"
+    final_line "Ready for 6.2" "$SCRIPT6_READY_FOR_SCRIPT62" "$(status_color_for_value "$SCRIPT6_READY_FOR_SCRIPT62")"
+    final_line "Ready for 6.3" "$SCRIPT6_READY_FOR_SCRIPT63" "$(status_color_for_value "$SCRIPT6_READY_FOR_SCRIPT63")"
+    final_line "Ready for 6.4" "$SCRIPT6_READY_FOR_SCRIPT64" "$(status_color_for_value "$SCRIPT6_READY_FOR_SCRIPT64")"
+    final_line "Ready for 6.5" "$SCRIPT6_READY_FOR_SCRIPT65" "$(status_color_for_value "$SCRIPT6_READY_FOR_SCRIPT65")"
+    final_line "Ready for 6.6" "$SCRIPT6_READY_FOR_SCRIPT66" "$(status_color_for_value "$SCRIPT6_READY_FOR_SCRIPT66")"
 
     echo ""
     echo -e "${YW}Verification:${CL}"
@@ -4865,19 +4596,14 @@ function show_clean_final_summary() {
     fi
 
     echo ""
+    echo -e "${YW}Script 6 prepared the environment only. No compose stacks were deployed.${CL}"
     echo -e "${YW}Sensitive values were displayed once, not logged, then terminal output was cleared where supported.${CL}"
     echo ""
     echo -e "${BL}Next Step:${CL}"
-    echo -e "  ${YW}Run ${ANS}6.5-dockerDeploy-circl8.sh${YW} to create Docker networks and deploy the selected dependency-aware stack plan.${CL}"
+    echo -e "  ${YW}Build/run ${ANS}Script 6.1 platform core bootstrap${YW}.${CL}"
     echo ""
 }
 
-# =========================================================
-#  MAIN ORCHESTRATION
-# =========================================================
-
-# --- 58. MAIN FUNCTION ---
-# Runs full setup in validation -> input -> file creation -> verify -> one-time secret display order.
 function main() {
     init_script
 
@@ -4899,7 +4625,6 @@ function main() {
 
     create_docker_directories
     generate_or_reuse_secrets
-    create_postgres_init_script
     create_traefik_config_files
     verify_traefik_config_files_created
     write_secret_files
