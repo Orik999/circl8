@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.7.0"
+SCRIPT_VERSION="v1.7.1"
 SCRIPT_UPDATED="2026-06-10"
-SCRIPT_BUILD="six-family-env-baseline"
+SCRIPT_BUILD="crowdsec-bouncer-handoff-display"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -110,6 +110,8 @@ SCRIPT5_DOCKER_INFO_READY="unknown"
 SCRIPT5_CROWDSEC_STATE="unknown"
 SCRIPT5_CROWDSEC_BOUNCER_STATE="unknown"
 SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE="unknown"
+SCRIPT6_CROWDSEC_BOUNCER_DISPLAY="unknown"
+SCRIPT6_CROWDSEC_BOUNCER_RUNTIME="unknown"
 SCRIPT35_MARKER="/root/.ubuntu-autoinstall-seed-completed"
 PROXMOX_MARKER_STATE="missing"
 PROXMOX_MARKER_SOURCE="no"
@@ -2306,6 +2308,41 @@ function refresh_crowdsec_runtime_state() {
     [ -n "$SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE" ] || SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE="unknown"
 }
 
+function crowdsec_bouncer_runtime_value() {
+    if [ "${SCRIPT5_CROWDSEC_BOUNCER_STATE:-unknown}" == "active" ] && [ -n "${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE:-}" ] && [ "${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE:-unknown}" != "unknown" ]; then
+        printf '%s/%s' "$SCRIPT5_CROWDSEC_BOUNCER_STATE" "$SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE"
+    elif [ "${SCRIPT5_CROWDSEC_BOUNCER_STATE:-unknown}" != "unknown" ]; then
+        printf '%s' "$SCRIPT5_CROWDSEC_BOUNCER_STATE"
+    else
+        printf 'unknown'
+    fi
+}
+
+function crowdsec_bouncer_handoff_display_value() {
+    local runtime_value=""
+    local marker_value="${SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER:-unknown}"
+
+    runtime_value="$(crowdsec_bouncer_runtime_value)"
+    SCRIPT6_CROWDSEC_BOUNCER_RUNTIME="$runtime_value"
+
+    if [ "$runtime_value" == "active/running" ]; then
+        printf '%s' "$runtime_value"
+    elif [ "$marker_value" != "unknown" ] && [ -n "$marker_value" ]; then
+        printf '%s' "$marker_value"
+    elif [ "$runtime_value" != "unknown" ] && [ -n "$runtime_value" ]; then
+        printf '%s' "$runtime_value"
+    elif [ "${SCRIPT5_SCRIPT4_CROWDSEC_SELECTED:-unknown}" == "no" ]; then
+        printf 'skipped'
+    else
+        printf 'unknown'
+    fi
+}
+
+function refresh_crowdsec_bouncer_display_state() {
+    SCRIPT6_CROWDSEC_BOUNCER_DISPLAY="$(crowdsec_bouncer_handoff_display_value)"
+    [ -n "$SCRIPT6_CROWDSEC_BOUNCER_DISPLAY" ] || SCRIPT6_CROWDSEC_BOUNCER_DISPLAY="unknown"
+}
+
 function script5_crowdsec_selected_or_active() {
     local selected=""
     local marker_bouncer=""
@@ -2362,11 +2399,13 @@ function derive_user_and_docker_paths() {
 function validate_script5_handoff() {
     local failure="no"
     local compose_state="not ready"
-    local bouncer_display="${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}"
+    local bouncer_display="unknown"
 
     detect_script5_preflight_state
     refresh_docker_runtime_state
     refresh_crowdsec_runtime_state
+    refresh_crowdsec_bouncer_display_state
+    bouncer_display="$SCRIPT6_CROWDSEC_BOUNCER_DISPLAY"
     [ "$DOCKER_COMPOSE_READY" == "yes" ] && compose_state="ready"
 
     section "SCRIPT 5 HANDOFF"
@@ -2406,8 +2445,17 @@ function validate_script5_handoff() {
     fi
 
     if script5_crowdsec_selected_or_active; then
-        if [ "$SCRIPT5_CROWDSEC_STATE" != "active" ] || [ "$SCRIPT5_CROWDSEC_BOUNCER_STATE" != "active" ] || [ "$SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE" != "running" ]; then
-            msg_warn "CrowdSec runtime continuity is not healthy"
+        if [ "$SCRIPT5_CROWDSEC_STATE" != "active" ] && [ "$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED" != "yes" ]; then
+            msg_warn "CrowdSec service is not active and no Script 5 marker fallback is available"
+            failure="yes"
+        fi
+
+        if [ "$SCRIPT5_CROWDSEC_BOUNCER_STATE" == "active" ] && [ "$SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE" == "running" ]; then
+            :
+        elif [ "$SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER" == "active" ] && [ "$SCRIPT5_VERIFY_STATUS" == "PASS" ]; then
+            :
+        else
+            msg_warn "CrowdSec bouncer runtime/marker continuity is not healthy"
             failure="yes"
         fi
     fi
@@ -3810,6 +3858,7 @@ function verify_docker_runtime_continuity() {
 
 function verify_crowdsec_runtime_continuity() {
     refresh_crowdsec_runtime_state
+    refresh_crowdsec_bouncer_display_state
 
     if ! script5_crowdsec_selected_or_active; then
         verify_info "CrowdSec runtime continuity skipped; CrowdSec was not detected as selected/active"
@@ -3818,14 +3867,18 @@ function verify_crowdsec_runtime_continuity() {
 
     if [ "$SCRIPT5_CROWDSEC_STATE" == "active" ]; then
         verify_pass "CrowdSec service active"
+    elif [ "$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED" == "yes" ] && [ "$SCRIPT5_VERIFY_STATUS" == "PASS" ]; then
+        verify_info "CrowdSec service live state unavailable; Script 5 marker selected CrowdSec and verification was PASS"
     else
         verify_warn "CrowdSec service" "state is ${SCRIPT5_CROWDSEC_STATE:-unknown}" "run sudo systemctl status crowdsec"
     fi
 
     if [ "$SCRIPT5_CROWDSEC_BOUNCER_STATE" == "active" ] && [ "$SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE" == "running" ]; then
         verify_pass "CrowdSec firewall bouncer runtime active/running"
+    elif [ "$SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER" == "active" ] && [ "$SCRIPT5_VERIFY_STATUS" == "PASS" ]; then
+        verify_pass "CrowdSec firewall bouncer marker active"
     else
-        verify_warn "CrowdSec firewall bouncer runtime" "state is ${SCRIPT5_CROWDSEC_BOUNCER_STATE:-unknown}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE:-unknown}" "run sudo systemctl status crowdsec-firewall-bouncer"
+        verify_warn "CrowdSec firewall bouncer runtime" "state is ${SCRIPT5_CROWDSEC_BOUNCER_STATE:-unknown}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE:-unknown}; marker is ${SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER:-unknown}" "run sudo systemctl status crowdsec-firewall-bouncer"
     fi
 }
 
@@ -3995,6 +4048,7 @@ function write_completion_marker() {
     apply_group_header "Marker / verification"
 
     msg_info "Writing completion marker"
+    refresh_crowdsec_bouncer_display_state
     marker_readiness_values
 
     if [ -n "$SUDO_CMD" ]; then
@@ -4036,7 +4090,7 @@ Script 5 Redis host tuning: $SCRIPT5_REDIS_OVERCOMMIT
 Docker service: $SCRIPT5_DOCKER_SERVICE_STATE
 Containerd service: $SCRIPT5_CONTAINERD_SERVICE_STATE
 CrowdSec service: $SCRIPT5_CROWDSEC_STATE
-CrowdSec bouncer: ${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
+CrowdSec bouncer: $SCRIPT6_CROWDSEC_BOUNCER_DISPLAY
 Secret screen displayed: $SECRET_DISPLAY_WAS_SHOWN
 Secret screen cleared: $SECRET_SCREEN_CLEARED
 Verify log: $VERIFY_LOG
@@ -4062,7 +4116,8 @@ SCRIPT6_SCRIPT5_SWAP_SIZE=$SCRIPT5_SWAP_SIZE
 SCRIPT6_SCRIPT5_UFW_ENABLED=$SCRIPT5_UFW_ENABLED
 SCRIPT6_SCRIPT5_REDIS_OVERCOMMIT=$SCRIPT5_REDIS_OVERCOMMIT
 SCRIPT6_CROWDSEC_SELECTED=$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED
-SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
+SCRIPT6_CROWDSEC_BOUNCER=$SCRIPT6_CROWDSEC_BOUNCER_DISPLAY
+SCRIPT6_CROWDSEC_BOUNCER_RUNTIME=$SCRIPT6_CROWDSEC_BOUNCER_RUNTIME
 SCRIPT6_TRAEFIK_CONFIG_READY=$SCRIPT6_TRAEFIK_CONFIG_READY
 SCRIPT6_TRAEFIK_ACME_READY=$SCRIPT6_TRAEFIK_ACME_READY
 SCRIPT6_CF_TOKEN_FILE_READY=$SCRIPT6_CF_TOKEN_FILE_READY
@@ -4119,7 +4174,7 @@ Script 5 Redis host tuning: $SCRIPT5_REDIS_OVERCOMMIT
 Docker service: $SCRIPT5_DOCKER_SERVICE_STATE
 Containerd service: $SCRIPT5_CONTAINERD_SERVICE_STATE
 CrowdSec service: $SCRIPT5_CROWDSEC_STATE
-CrowdSec bouncer: ${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
+CrowdSec bouncer: $SCRIPT6_CROWDSEC_BOUNCER_DISPLAY
 Secret screen displayed: $SECRET_DISPLAY_WAS_SHOWN
 Secret screen cleared: $SECRET_SCREEN_CLEARED
 Verify log: $VERIFY_LOG
@@ -4145,7 +4200,8 @@ SCRIPT6_SCRIPT5_SWAP_SIZE=$SCRIPT5_SWAP_SIZE
 SCRIPT6_SCRIPT5_UFW_ENABLED=$SCRIPT5_UFW_ENABLED
 SCRIPT6_SCRIPT5_REDIS_OVERCOMMIT=$SCRIPT5_REDIS_OVERCOMMIT
 SCRIPT6_CROWDSEC_SELECTED=$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED
-SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}
+SCRIPT6_CROWDSEC_BOUNCER=$SCRIPT6_CROWDSEC_BOUNCER_DISPLAY
+SCRIPT6_CROWDSEC_BOUNCER_RUNTIME=$SCRIPT6_CROWDSEC_BOUNCER_RUNTIME
 SCRIPT6_TRAEFIK_CONFIG_READY=$SCRIPT6_TRAEFIK_CONFIG_READY
 SCRIPT6_TRAEFIK_ACME_READY=$SCRIPT6_TRAEFIK_ACME_READY
 SCRIPT6_CF_TOKEN_FILE_READY=$SCRIPT6_CF_TOKEN_FILE_READY
@@ -4172,6 +4228,7 @@ function update_completion_marker_script6_fields() {
     local marker_tmp=""
     local existing_marker=""
 
+    refresh_crowdsec_bouncer_display_state
     marker_readiness_values
     marker_tmp="$(mktemp)"
     TEMP_FILES+=("$marker_tmp")
@@ -4204,7 +4261,8 @@ function update_completion_marker_script6_fields() {
         echo "SCRIPT6_SCRIPT5_UFW_ENABLED=$SCRIPT5_UFW_ENABLED"
         echo "SCRIPT6_SCRIPT5_REDIS_OVERCOMMIT=$SCRIPT5_REDIS_OVERCOMMIT"
         echo "SCRIPT6_CROWDSEC_SELECTED=$SCRIPT5_SCRIPT4_CROWDSEC_SELECTED"
-        echo "SCRIPT6_CROWDSEC_BOUNCER=${SCRIPT5_CROWDSEC_BOUNCER_STATE}/${SCRIPT5_CROWDSEC_BOUNCER_SUBSTATE}"
+        echo "SCRIPT6_CROWDSEC_BOUNCER=$SCRIPT6_CROWDSEC_BOUNCER_DISPLAY"
+        echo "SCRIPT6_CROWDSEC_BOUNCER_RUNTIME=$SCRIPT6_CROWDSEC_BOUNCER_RUNTIME"
         echo "SCRIPT6_TRAEFIK_CONFIG_READY=$SCRIPT6_TRAEFIK_CONFIG_READY"
         echo "SCRIPT6_TRAEFIK_ACME_READY=$SCRIPT6_TRAEFIK_ACME_READY"
         echo "SCRIPT6_CF_TOKEN_FILE_READY=$SCRIPT6_CF_TOKEN_FILE_READY"
