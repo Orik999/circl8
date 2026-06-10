@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.1-platformCoreBootstrap.sh"
-SCRIPT_VERSION="v1.0.3"
+SCRIPT_VERSION="v1.0.4"
 SCRIPT_UPDATED="2026-06-10"
-SCRIPT_BUILD="quiet-deploy-output-polish"
+SCRIPT_BUILD="platform-owned-port-rerun-fix"
 
 T=15
 LOG_FILE="/var/log/circl8-platform-core.log"
@@ -149,9 +149,9 @@ function final_line() {
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        PASS|completed|active|running|healthy|yes|ready|listening|preserved|active/running) printf '%s' "$GN" ;;
+        PASS|completed|active|running|healthy|yes|ready|listening|preserved|active/running|available/platform|platform-owned) printf '%s' "$GN" ;;
         PASS_WITH_WARNINGS|skipped|unknown|not-listening) printf '%s' "$YW" ;;
-        FAIL|failed|missing|no|inactive|not-ready) printf '%s' "$RD" ;;
+        FAIL|failed|missing|no|inactive|not-ready|blocked) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
     esac
 }
@@ -371,13 +371,46 @@ function port_owner_line() {
     fi
 }
 
-function port_non_platform_blocker() {
+function platform_traefik_container_ids() {
+    {
+        docker ps --filter "label=com.docker.compose.project=${PROJECT_TRAEFIK}" --format '{{.ID}}' 2>/dev/null || true
+        docker ps --filter "name=^/traefik$" --format '{{.ID}}' 2>/dev/null || true
+        docker ps --filter "name=circl8-traefik" --format '{{.ID}}' 2>/dev/null || true
+    } | awk 'NF && !seen[$1]++ { print $1 }'
+}
+
+function platform_traefik_owns_port() {
+    local port="$1" cid="" ports=""
+    while IFS= read -r cid; do
+        [ -n "$cid" ] || continue
+        ports="$(docker port "$cid" "${port}/tcp" 2>/dev/null || true)"
+        [ -n "$ports" ] && return 0
+    done < <(platform_traefik_container_ids)
+    return 1
+}
+
+function port_platform_status() {
+    local port="$1" line=""
+    if platform_traefik_owns_port "$port"; then
+        printf 'platform-owned'
+        return 0
+    fi
+    line="$(port_owner_line "$port")"
+    if [ -z "$line" ]; then
+        printf 'available/platform'
+        return 0
+    fi
+    if grep -Eiq 'traefik|circl8-traefik' <<< "$line"; then
+        printf 'platform-owned'
+        return 0
+    fi
+    printf 'blocked'
+}
+
+function port_blocker_detail() {
     local port="$1" line=""
     line="$(port_owner_line "$port")"
-    [ -z "$line" ] && return 1
-    if grep -Eiq 'docker-proxy|traefik|com.docker' <<< "$line"; then return 1; fi
-    printf '%s' "$line"
-    return 0
+    [ -n "$line" ] && printf '%s' "$line"
 }
 
 function validate_preflight_runtime() {
@@ -408,10 +441,20 @@ function validate_preflight_runtime() {
     if [ "$SCRIPT6_CF_TOKEN_FILE_READY" = "yes" ]; then root_file_not_empty "$CF_API_TOKEN_FILE" && aligned_status_line "Cloudflare token file" "present" "$GN" 24 || { aligned_status_line "Cloudflare token file" "missing" "$RD" 24; failure="yes"; }; else aligned_status_line "Cloudflare token file" "skipped" "$YW" 24; fi
     aligned_status_line "Compose files" "will install" "$YW" 24
 
-    blocker="$(port_non_platform_blocker 80 || true)"
-    if [ -n "$blocker" ]; then aligned_status_line "Port 80 preflight" "blocked" "$RD" 24; echo -e "  ${YW}${blocker}${CL}"; failure="yes"; else aligned_status_line "Port 80 preflight" "available/platform" "$GN" 24; fi
-    blocker="$(port_non_platform_blocker 443 || true)"
-    if [ -n "$blocker" ]; then aligned_status_line "Port 443 preflight" "blocked" "$RD" 24; echo -e "  ${YW}${blocker}${CL}"; failure="yes"; else aligned_status_line "Port 443 preflight" "available/platform" "$GN" 24; fi
+    SCRIPT61_PORT_80="$(port_platform_status 80)"
+    aligned_status_line "Port 80 preflight" "$SCRIPT61_PORT_80" "$(status_color_for_value "$SCRIPT61_PORT_80")" 24
+    if [ "$SCRIPT61_PORT_80" = "blocked" ]; then
+        blocker="$(port_blocker_detail 80)"
+        [ -n "$blocker" ] && echo -e "  ${YW}owner: ${blocker}${CL}"
+        failure="yes"
+    fi
+    SCRIPT61_PORT_443="$(port_platform_status 443)"
+    aligned_status_line "Port 443 preflight" "$SCRIPT61_PORT_443" "$(status_color_for_value "$SCRIPT61_PORT_443")" 24
+    if [ "$SCRIPT61_PORT_443" = "blocked" ]; then
+        blocker="$(port_blocker_detail 443)"
+        [ -n "$blocker" ] && echo -e "  ${YW}owner: ${blocker}${CL}"
+        failure="yes"
+    fi
 
     [ "$failure" = "no" ] || msg_error "Runtime preflight failed. Fix the checks above, then rerun Script 6.1."
     msg_ok "RUNTIME PREFLIGHT PASSED"
@@ -649,8 +692,14 @@ function container_state() {
 }
 
 function port_listening_status() {
-    local port="$1"
-    if [ -n "$(port_owner_line "$port")" ]; then printf 'listening'; else printf 'not-listening'; fi
+    local port="$1" status=""
+    status="$(port_platform_status "$port")"
+    case "$status" in
+        platform-owned) printf 'platform-owned' ;;
+        available/platform) printf 'not-listening' ;;
+        blocked) printf 'blocked' ;;
+        *) printf '%s' "$status" ;;
+    esac
 }
 
 function verify_record_first_issue() {
@@ -697,8 +746,16 @@ function create_verification_report() {
 
     SCRIPT61_PORT_80="$(port_listening_status 80)"
     SCRIPT61_PORT_443="$(port_listening_status 443)"
-    [ "$SCRIPT61_PORT_80" = "listening" ] && verify_pass "Port 80 listening" || verify_warn "Port 80" "not listening" "check Traefik container and port mapping"
-    [ "$SCRIPT61_PORT_443" = "listening" ] && verify_pass "Port 443 listening" || verify_warn "Port 443" "not listening" "check Traefik container and port mapping"
+    case "$SCRIPT61_PORT_80" in
+        platform-owned|listening) verify_pass "Port 80 ${SCRIPT61_PORT_80}" ;;
+        blocked) verify_fail "Port 80" "blocked by non-platform owner" "inspect port owner and Traefik container bindings" ;;
+        *) verify_warn "Port 80" "${SCRIPT61_PORT_80}" "check Traefik container and port mapping" ;;
+    esac
+    case "$SCRIPT61_PORT_443" in
+        platform-owned|listening) verify_pass "Port 443 ${SCRIPT61_PORT_443}" ;;
+        blocked) verify_fail "Port 443" "blocked by non-platform owner" "inspect port owner and Traefik container bindings" ;;
+        *) verify_warn "Port 443" "${SCRIPT61_PORT_443}" "check Traefik container and port mapping" ;;
+    esac
 
     if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then VERIFY_STATUS="FAIL"; elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then VERIFY_STATUS="PASS_WITH_WARNINGS"; else VERIFY_STATUS="PASS"; fi
 
