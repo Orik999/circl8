@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.30"
+SCRIPT_VERSION="v1.2.31"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="ubuntu-swap-detection-fix"
+SCRIPT_BUILD="postinstall-ssh-order-fix"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -65,6 +65,9 @@ DELETE_GENERATED_ISO_AFTER_INSTALL="y"
 
 SSH_IP_DETECT_TIMEOUT_SECONDS="90"
 SSH_IP_CHECK_INTERVAL_SECONDS="3"
+POST_INSTALL_SSH_TIMEOUT_SECONDS="300"
+POST_INSTALL_SSH_CHECK_INTERVAL_SECONDS="5"
+SSH_CONNECT_TIMEOUT_SECONDS="5"
 
 ASSIGNED_IPV4=""
 SSH_COMMAND=""
@@ -111,6 +114,8 @@ QEMU_IPV4_STATUS=""
 HOST_VERIFICATION_STATUS=""
 VM_SIDE_MARKER_UPDATE_STATUS="not-run"
 POST_INSTALL_SSH_READY_STATUS="not-run"
+POST_INSTALL_SSH_LAST_ERROR=""
+POST_INSTALL_SSH_LAST_EXIT=""
 
 CLEANUP_INSTALLED_TOOLS="yes"
 CLEANUP_TEMP_WORKFILES="yes"
@@ -914,26 +919,42 @@ build_vm_side_marker_base64() {
 wait_for_vm_ssh_ready() {
     local deadline=""
     local now=""
+    local err_file=""
+    local ssh_exit="0"
+    local ssh_target=""
 
     [ -n "${ASSIGNED_IPV4:-}" ] || return 1
     [ -n "${TARGET_USERNAME:-}" ] || return 1
 
-    deadline=$(( $(date +%s) + SSH_IP_DETECT_TIMEOUT_SECONDS ))
+    POST_INSTALL_SSH_LAST_ERROR=""
+    POST_INSTALL_SSH_LAST_EXIT=""
+    ssh_target="${TARGET_USERNAME}@${ASSIGNED_IPV4}"
+    deadline=$(( $(date +%s) + POST_INSTALL_SSH_TIMEOUT_SECONDS ))
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
 
     while true; do
+        : > "$err_file"
         if ssh \
             -o BatchMode=yes \
-            -o ConnectTimeout=5 \
-            -o StrictHostKeyChecking=accept-new \
-            -o UserKnownHostsFile=/root/.ssh/known_hosts \
-            "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
-            "true" >/dev/null 2>&1; then
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout="${SSH_CONNECT_TIMEOUT_SECONDS:-5}" \
+            "$ssh_target" \
+            "true" >/dev/null 2>"$err_file"; then
+            POST_INSTALL_SSH_LAST_EXIT="0"
+            POST_INSTALL_SSH_LAST_ERROR=""
+            rm -f "$err_file"
             return 0
         fi
 
+        ssh_exit="$?"
+        POST_INSTALL_SSH_LAST_EXIT="$ssh_exit"
+        POST_INSTALL_SSH_LAST_ERROR="$(tail -n 1 "$err_file" 2>/dev/null | sed -E 's/[[:cntrl:]]//g' || true)"
+
         now=$(date +%s)
-        [ "$now" -ge "$deadline" ] && return 1
-        sleep "$SSH_IP_CHECK_INTERVAL_SECONDS"
+        [ "$now" -ge "$deadline" ] && { rm -f "$err_file"; return 1; }
+        sleep "${POST_INSTALL_SSH_CHECK_INTERVAL_SECONDS:-5}"
     done
 }
 
@@ -987,9 +1008,9 @@ update_vm_side_marker_assigned_ipv4() {
 
     if printf '%s' "$marker_b64" | ssh \
         -o BatchMode=yes \
-        -o ConnectTimeout=10 \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile=/root/.ssh/known_hosts \
+        -o ConnectTimeout="${SSH_CONNECT_TIMEOUT_SECONDS:-5}" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
         "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
         "sudo -n sh -c 'base64 -d > ${VM_SIDE_MARKER_PATH} && chmod 0600 ${VM_SIDE_MARKER_PATH}'" >/dev/null 2>&1; then
         VM_SIDE_MARKER_UPDATE_STATUS="yes"
@@ -2855,7 +2876,7 @@ attach_iso_and_start_install() {
     msg_ok "VM started for autoinstall."
 }
 
-# --- 59. POST-INSTALL CLEANUP ---
+# --- 59. POST-INSTALL MONITORING / CLEANUP ---
 post_install_cleanup() {
     if wait_for_vm_poweroff "$TARGET_VMID" "$INSTALL_WAIT_MINUTES"; then
         INSTALL_POWERED_OFF="yes"
@@ -2870,12 +2891,14 @@ post_install_cleanup() {
         echo -e "${YW}Check the Proxmox console for installer errors.${CL}"
         echo ""
         echo -e "${YW}Useful host checks:${CL}"
-        echo -e "${GN}qm config ${TARGET_VMID} | grep -E \"ide2|boot\"${CL}"
+        echo -e "${GN}qm config ${TARGET_VMID} | grep -E "ide2|boot"${CL}"
         echo -e "${GN}xorriso -indev ${AUTOINSTALL_ISO_PATH} -report_el_torito plain${CL}"
         echo ""
         exit 1
     fi
+}
 
+post_install_cleanup_actions() {
     section "CLEANUP"
 
     msg_info "Detaching generated autoinstall ISO from VM"
@@ -2900,8 +2923,6 @@ post_install_cleanup() {
 
 # --- 60. START INSTALLED VM AND DETECT IP ---
 start_installed_vm_and_detect_ip() {
-    section "INSTALL MONITORING"
-
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
         msg_info "Starting installed Ubuntu VM"
         run_cmd "starting installed Ubuntu VM" qm start "$TARGET_VMID"
@@ -2949,9 +2970,9 @@ verify_vm_swap_via_ssh() {
 
     swap_probe="$(ssh \
         -o BatchMode=yes \
-        -o ConnectTimeout=10 \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile=/root/.ssh/known_hosts \
+        -o ConnectTimeout="${SSH_CONNECT_TIMEOUT_SECONDS:-5}" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
         "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
         "sudo -n bash -s" <<EOF 2>/dev/null || true
 mode="${VM_SWAP_MODE}"
@@ -3147,6 +3168,11 @@ Install Duration: ${INSTALL_DURATION_TEXT:-not-recorded}
 Post Install Start VM: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
+Post Install SSH Status: ${POST_INSTALL_SSH_READY_STATUS}
+Post Install SSH Target: ${TARGET_USERNAME:-unknown}@${ASSIGNED_IPV4:-not-detected}
+Post Install SSH Timeout Seconds: ${POST_INSTALL_SSH_TIMEOUT_SECONDS}
+Post Install SSH Last Exit: ${POST_INSTALL_SSH_LAST_EXIT:-not-recorded}
+Post Install SSH Last Error: ${POST_INSTALL_SSH_LAST_ERROR:-none}
 VM Side Marker: $VM_SIDE_MARKER_PATH
 VM Side Marker Updated: $VM_SIDE_MARKER_UPDATE_STATUS
 VM Marker Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
@@ -3602,6 +3628,7 @@ main() {
     start_installed_vm_and_detect_ip
     verify_vm_swap_via_ssh
     update_vm_side_marker_assigned_ipv4
+    post_install_cleanup_actions
     write_completion_marker
     create_host_verification_report
     show_final_output
