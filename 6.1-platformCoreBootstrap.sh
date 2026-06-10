@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.1-platformCoreBootstrap.sh"
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 SCRIPT_UPDATED="2026-06-10"
-SCRIPT_BUILD="platform-core-bootstrap"
+SCRIPT_BUILD="compose-file-loop-fix"
 
 T=15
 LOG_FILE="/var/log/circl8-platform-core.log"
@@ -109,12 +109,14 @@ SCRIPT61_READY_FOR_SCRIPT66="no"
 function header_info() {
 cat <<'EOF'
 
-  ██████╗   ██╗      ██████╗      ██████╗  ██╗       █████╗ ████████╗ ███████╗ ███████╗ ██████╗ ███╗   ███╗
-  ╚════██╗ ███║     ██╔════╝      ██╔══██╗ ██║      ██╔══██╗╚══██╔══╝ ██╔════╝ ██╔════╝██╔═══██╗████╗ ████║
-   █████╔╝ ╚██║     ███████╗█████╗██████╔╝ ██║      ███████║   ██║    █████╗   █████╗  ██║   ██║██╔████╔██║
-  ██╔═══╝   ██║     ██╔═══██╗╚════╝██╔═══╝  ██║      ██╔══██║   ██║    ██╔══╝   ██╔══╝  ██║   ██║██║╚██╔╝██║
-  ███████╗  ██║     ╚██████╔╝     ██║      ███████╗ ██║  ██║   ██║    ██║      ███████╗╚██████╔╝██║ ╚═╝ ██║
-  ╚══════╝  ╚═╝      ╚═════╝      ╚═╝      ╚══════╝ ╚═╝  ╚═╝   ╚═╝    ╚═╝      ╚══════╝ ╚═════╝ ╚═╝     ╚═╝
+   ██████╗     ██╗        ██████╗ ██████╗ ██████╗ ███████╗
+  ██╔════╝    ███║       ██╔════╝██╔═══██╗██╔══██╗██╔════╝
+  ███████╗    ╚██║       ██║     ██║   ██║██████╔╝█████╗
+  ██╔═══██╗    ██║       ██║     ██║   ██║██╔══██╗██╔══╝
+  ╚██████╔╝    ██║       ╚██████╗╚██████╔╝██║  ██║███████╗
+   ╚═════╝     ╚═╝        ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝
+
+                         6.1-CORE
 EOF
 }
 
@@ -412,17 +414,58 @@ function download_file() {
 }
 
 function install_compose_file() {
-    local filename="$1" local_source="${SCRIPT_DIR}/docker/${filename}" url="${RAW_BASE}/docker/${filename}" dest="${COMPOSE_DIR}/${filename}"
+    local filename="${1:-}"
+    local local_source=""
+    local url=""
+    local dest=""
+    local tmp=""
+
+    [ -n "$filename" ] || msg_error "Compose filename was not provided to install_compose_file."
+
+    local_source="${SCRIPT_DIR}/docker/${filename}"
+    url="${RAW_BASE}/docker/${filename}"
+    dest="${COMPOSE_DIR}/${filename}"
+
     if [ -f "$local_source" ]; then
         run_cmd "installing local ${filename}" cp "$local_source" "$dest"
     else
         msg_info "Downloading ${filename}"
-        local tmp="$(mktemp)"; TEMP_FILES+=("$tmp")
+        tmp="$(mktemp)"
+        TEMP_FILES+=("$tmp")
         download_file "$url" "$tmp" || msg_error "Failed to download ${url}"
         if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" cp "$tmp" "$dest"; else cp "$tmp" "$dest"; fi
     fi
+
+    if ! root_file_not_empty "$dest"; then
+        msg_error "Compose file install failed or produced an empty file: ${dest}"
+    fi
+
     run_cmd "setting ${filename} ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$dest"
     run_cmd "setting ${filename} mode" chmod 640 "$dest"
+}
+
+function verify_core_compose_files_installed() {
+    local file=""
+    local path=""
+    local missing_files=()
+
+    for file in "${CORE_COMPOSE_FILES[@]}"; do
+        path="${COMPOSE_DIR}/${file}"
+        if ! root_file_not_empty "$path"; then
+            missing_files+=("$file")
+        fi
+    done
+
+    if [ "${#missing_files[@]}" -gt 0 ]; then
+        echo ""
+        echo -e "${RD}Missing or empty platform core compose file(s):${CL}"
+        for file in "${missing_files[@]}"; do
+            echo -e "  ${RD}${file}${CL}"
+        done
+        msg_error "Platform core compose file installation did not complete."
+    fi
+
+    msg_ok "PLATFORM CORE COMPOSE FILES VERIFIED"
 }
 
 function install_core_compose_files() {
@@ -432,6 +475,7 @@ function install_core_compose_files() {
         install_compose_file "$file"
         aligned_status_line "$file" "installed" "$GN" 34
     done
+    verify_core_compose_files_installed
 }
 
 function ensure_network() {
