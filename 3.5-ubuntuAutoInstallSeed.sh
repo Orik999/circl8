@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.28"
+SCRIPT_VERSION="v1.2.29"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="swap-detect-monitoring-flow"
+SCRIPT_BUILD="swap-size-display-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -1025,7 +1025,7 @@ SWAP_DETECT_EOF
     esac
 
     VM_SWAP_FILE="$(swap_value_or_unknown "$file")"
-    VM_SWAP_SIZE="$(swap_value_or_unknown "$size")"
+    VM_SWAP_SIZE="$(format_swap_size_display "$(swap_value_or_unknown "$size")")"
     VM_SWAP_TYPE="$(swap_value_or_unknown "$type")"
 
     if [ "$VM_SWAP_STATUS" == "detected" ]; then
@@ -1238,6 +1238,39 @@ swap_value_or_unknown() {
     local value="${1:-unknown}"
 
     [ -n "$value" ] && printf '%s' "$value" || printf 'unknown'
+}
+
+format_swap_size_display() {
+    local value="${1:-unknown}"
+
+    [ -n "$value" ] || { printf 'unknown'; return 0; }
+
+    if [ "$value" == "unknown" ]; then
+        printf 'unknown'
+        return 0
+    fi
+
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        awk -v kib="$value" '
+            BEGIN {
+                gb = kib / 1048576
+                rounded = int(gb + 0.5)
+                diff = gb - rounded
+                if (diff < 0) diff = -diff
+
+                if (gb < 0.05) {
+                    printf "%s KiB", kib
+                } else if (rounded >= 1 && diff < 0.05) {
+                    printf "%d GB", rounded
+                } else {
+                    printf "%.1f GB", gb
+                }
+            }
+        '
+        return 0
+    fi
+
+    printf '%s' "$value"
 }
 
 # Extracts the first IPv4 from possibly polluted multiline text.
@@ -3091,7 +3124,7 @@ setup_ui_demo_sample_data() {
     POST_INSTALL_SSH_LAST_ERROR="none"
     VM_SWAP_STATUS="detected"
     VM_SWAP_FILE="/swap.img"
-    VM_SWAP_SIZE="4G"
+    VM_SWAP_SIZE="4 GB"
     VM_SWAP_TYPE="file"
     HOST_VERIFICATION_STATUS="Host verification report created."
     SSH_COMMAND="ssh orik@192.0.2.108"
