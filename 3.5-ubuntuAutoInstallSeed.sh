@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.27"
+SCRIPT_VERSION="v1.2.28"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="ubuntu-swap-detect-display"
+SCRIPT_BUILD="swap-detect-monitoring-flow"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -55,6 +55,8 @@ DELETE_GENERATED_ISO_AFTER_INSTALL="y"
 
 SSH_IP_DETECT_TIMEOUT_SECONDS="90"
 SSH_IP_CHECK_INTERVAL_SECONDS="3"
+POST_INSTALL_SSH_TIMEOUT_SECONDS="90"
+POST_INSTALL_SSH_CHECK_INTERVAL_SECONDS="5"
 
 ASSIGNED_IPV4=""
 SSH_COMMAND=""
@@ -100,6 +102,12 @@ INSTALLED_VM_STARTED_STATUS=""
 QEMU_IPV4_STATUS=""
 HOST_VERIFICATION_STATUS=""
 VM_SIDE_MARKER_UPDATE_STATUS="not-run"
+INSTALLER_MEDIA_DETACHED_STATUS="no"
+BOOT_ORDER_INSTALLED_STATUS="no"
+POST_INSTALL_SSH_STATUS="not-run"
+POST_INSTALL_SSH_TARGET="unknown"
+POST_INSTALL_SSH_LAST_EXIT="not-run"
+POST_INSTALL_SSH_LAST_ERROR="none"
 VM_SWAP_STATUS="unknown"
 VM_SWAP_FILE="unknown"
 VM_SWAP_SIZE="unknown"
@@ -906,26 +914,58 @@ build_vm_side_marker_base64() {
 wait_for_vm_ssh_ready() {
     local deadline=""
     local now=""
+    local err_file=""
 
-    [ -n "${ASSIGNED_IPV4:-}" ] || return 1
-    [ -n "${TARGET_USERNAME:-}" ] || return 1
+    POST_INSTALL_SSH_STATUS="not-ready"
+    POST_INSTALL_SSH_LAST_EXIT="not-run"
+    POST_INSTALL_SSH_LAST_ERROR="none"
 
-    deadline=$(( $(date +%s) + SSH_IP_DETECT_TIMEOUT_SECONDS ))
+    [ -n "${ASSIGNED_IPV4:-}" ] || {
+        POST_INSTALL_SSH_STATUS="skipped-no-ip"
+        POST_INSTALL_SSH_TARGET="unknown"
+        return 1
+    }
+    [ -n "${TARGET_USERNAME:-}" ] || {
+        POST_INSTALL_SSH_STATUS="skipped-no-user"
+        POST_INSTALL_SSH_TARGET="${ASSIGNED_IPV4}"
+        return 1
+    }
+
+    POST_INSTALL_SSH_TARGET="${TARGET_USERNAME}@${ASSIGNED_IPV4}"
+    msg_info "Waiting for SSH on detected VM IPv4"
+
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    deadline=$(( $(date +%s) + POST_INSTALL_SSH_TIMEOUT_SECONDS ))
 
     while true; do
         if ssh \
             -o BatchMode=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=5 \
-            -o StrictHostKeyChecking=accept-new \
-            -o UserKnownHostsFile=/root/.ssh/known_hosts \
             "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
-            "true" >/dev/null 2>&1; then
+            "true" >/dev/null 2>"$err_file"; then
+            POST_INSTALL_SSH_STATUS="ready"
+            POST_INSTALL_SSH_LAST_EXIT="0"
+            POST_INSTALL_SSH_LAST_ERROR="none"
+            msg_ok "SSH ready."
             return 0
         fi
 
+        POST_INSTALL_SSH_LAST_EXIT="$?"
+        POST_INSTALL_SSH_LAST_ERROR="$(tail -n1 "$err_file" 2>/dev/null | xargs || true)"
+        [ -n "$POST_INSTALL_SSH_LAST_ERROR" ] || POST_INSTALL_SSH_LAST_ERROR="ssh exited ${POST_INSTALL_SSH_LAST_EXIT}"
+
         now=$(date +%s)
-        [ "$now" -ge "$deadline" ] && return 1
-        sleep "$SSH_IP_CHECK_INTERVAL_SECONDS"
+        if [ "$now" -ge "$deadline" ]; then
+            POST_INSTALL_SSH_STATUS="timeout"
+            msg_warn "SSH was not ready before timeout expired."
+            return 1
+        fi
+
+        sleep "$POST_INSTALL_SSH_CHECK_INTERVAL_SECONDS"
     done
 }
 
@@ -948,9 +988,9 @@ detect_vm_swap_readonly() {
 
     probe="$(ssh \
         -o BatchMode=yes \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=5 \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile=/root/.ssh/known_hosts \
         "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
         "bash -s" <<'SWAP_DETECT_EOF' 2>/dev/null | head -n1 || true
 swap_line="$(swapon --show --noheadings --raw --output=NAME,TYPE,SIZE 2>/dev/null | awk 'NF >= 3 {print; exit}' || true)"
@@ -1006,15 +1046,13 @@ update_vm_side_marker_assigned_ipv4() {
         return 0
     fi
 
-    if ! wait_for_vm_ssh_ready; then
+    if [ "${POST_INSTALL_SSH_STATUS:-not-run}" != "ready" ]; then
         VM_SIDE_MARKER_UPDATE_STATUS="ssh-not-ready"
-        msg_warn "VM-side marker IPv4 update skipped; SSH not ready."
+        msg_warn "VM-side marker update skipped; SSH not ready."
         return 0
     fi
 
-    detect_vm_swap_readonly
-
-    msg_info "Updating VM-side marker assigned IPv4"
+    msg_info "Updating VM-side marker"
 
     marker_file="$(mktemp)"
     TEMP_FILES+=("$marker_file")
@@ -1022,16 +1060,16 @@ update_vm_side_marker_assigned_ipv4() {
 
     if printf '%s' "$marker_b64" | ssh \
         -o BatchMode=yes \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile=/root/.ssh/known_hosts \
         "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
         "sudo -n sh -c 'base64 -d > ${VM_SIDE_MARKER_PATH} && chmod 0600 ${VM_SIDE_MARKER_PATH}'" >/dev/null 2>&1; then
         VM_SIDE_MARKER_UPDATE_STATUS="yes"
-        msg_ok "VM-side marker assigned IPv4 updated."
+        msg_ok "VM-side marker updated."
     else
         VM_SIDE_MARKER_UPDATE_STATUS="failed"
-        msg_warn "VM-side marker IPv4 update failed; update manually if needed."
+        msg_warn "VM-side marker update failed; update manually if needed."
     fi
 }
 
@@ -2680,8 +2718,8 @@ attach_iso_and_start_install() {
     msg_ok "VM started for autoinstall."
 }
 
-# --- 59. POST-INSTALL CLEANUP ---
-post_install_cleanup() {
+# --- 59. POST-INSTALL MONITORING / CLEANUP ---
+post_install_wait_for_poweroff() {
     if wait_for_vm_poweroff "$TARGET_VMID" "$INSTALL_WAIT_MINUTES"; then
         INSTALL_POWERED_OFF="yes"
     else
@@ -2700,16 +2738,36 @@ post_install_cleanup() {
         echo ""
         exit 1
     fi
+}
 
+prepare_installed_vm_boot() {
+    run_cmd "detaching installer ISO from VM" qm set "$TARGET_VMID" --delete ide2
+    INSTALLER_MEDIA_DETACHED_STATUS="yes"
+
+    run_cmd "setting VM boot order to installed disk" qm set "$TARGET_VMID" --boot "order=scsi0"
+    BOOT_ORDER_INSTALLED_STATUS="yes"
+}
+
+post_install_cleanup() {
     section "CLEANUP"
 
-    msg_info "Detaching generated autoinstall ISO from VM"
-    run_cmd "detaching installer ISO from VM" qm set "$TARGET_VMID" --delete ide2
-    msg_ok "Installer media detached."
+    if [ "$INSTALLER_MEDIA_DETACHED_STATUS" == "yes" ]; then
+        msg_ok "Installer media detached."
+    else
+        msg_info "Detaching generated autoinstall ISO from VM"
+        run_cmd "detaching installer ISO from VM" qm set "$TARGET_VMID" --delete ide2
+        INSTALLER_MEDIA_DETACHED_STATUS="yes"
+        msg_ok "Installer media detached."
+    fi
 
-    msg_info "Setting VM boot order to installed disk"
-    run_cmd "setting VM boot order to installed disk" qm set "$TARGET_VMID" --boot "order=scsi0"
-    msg_ok "VM boot order set to installed disk."
+    if [ "$BOOT_ORDER_INSTALLED_STATUS" == "yes" ]; then
+        msg_ok "VM boot order set to installed disk."
+    else
+        msg_info "Setting VM boot order to installed disk"
+        run_cmd "setting VM boot order to installed disk" qm set "$TARGET_VMID" --boot "order=scsi0"
+        BOOT_ORDER_INSTALLED_STATUS="yes"
+        msg_ok "VM boot order set to installed disk."
+    fi
 
     if [ "$DELETE_GENERATED_ISO_AFTER_INSTALL" == "y" ]; then
         msg_info "Deleting generated autoinstall ISO"
@@ -2737,6 +2795,7 @@ start_installed_vm_and_detect_ip() {
         if [ -n "$ASSIGNED_IPV4" ]; then
             SSH_COMMAND="ssh ${TARGET_USERNAME}@${ASSIGNED_IPV4}"
             QEMU_IPV4_STATUS="QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}"
+            msg_ok "VM IPv4 detected: ${ASSIGNED_IPV4}"
         else
             QEMU_IPV4_STATUS="QEMU Guest Agent did not report an IPv4 address within ${SSH_IP_DETECT_TIMEOUT_SECONDS}s"
             msg_warn "${QEMU_IPV4_STATUS}"
@@ -2824,6 +2883,11 @@ Install Duration: ${INSTALL_DURATION_TEXT:-not-recorded}
 Post Install Start VM: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
+Post Install SSH Status: ${POST_INSTALL_SSH_STATUS}
+Post Install SSH Target: ${POST_INSTALL_SSH_TARGET}
+Post Install SSH Timeout Seconds: ${POST_INSTALL_SSH_TIMEOUT_SECONDS}
+Post Install SSH Last Exit: ${POST_INSTALL_SSH_LAST_EXIT}
+Post Install SSH Last Error: ${POST_INSTALL_SSH_LAST_ERROR}
 VM Side Marker: $VM_SIDE_MARKER_PATH
 VM Side Marker Updated: $VM_SIDE_MARKER_UPDATE_STATUS
 VM Marker Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
@@ -2936,11 +3000,9 @@ show_final_output() {
     status_line "Installed VM" "$installed_vm_status" "$GN" 18
     status_line "QEMU agent IP" "$qemu_agent_ip" "$GN" 18
     status_line "Swap" "${VM_SWAP_STATUS:-unknown}" "$GN" 18
-    if [ "${VM_SWAP_STATUS:-unknown}" == "detected" ]; then
-        status_line "Swap file" "${VM_SWAP_FILE:-unknown}" "$GN" 18
-        status_line "Swap size" "${VM_SWAP_SIZE:-unknown}" "$GN" 18
-        status_line "Swap type" "${VM_SWAP_TYPE:-unknown}" "$GN" 18
-    fi
+    status_line "Swap file" "${VM_SWAP_FILE:-unknown}" "$GN" 18
+    status_line "Swap size" "${VM_SWAP_SIZE:-unknown}" "$GN" 18
+    status_line "Swap type" "${VM_SWAP_TYPE:-unknown}" "$GN" 18
     if [ -n "${INSTALL_DURATION_TEXT:-}" ]; then
         status_line "Duration" "$INSTALL_DURATION_TEXT" "$GN" 18
     fi
@@ -3023,6 +3085,10 @@ setup_ui_demo_sample_data() {
     INSTALL_DURATION_TEXT="6m 34s"
     INSTALLED_VM_STARTED_STATUS="Installed Ubuntu VM started."
     QEMU_IPV4_STATUS="QEMU Guest Agent reported IPv4 address: 192.0.2.108"
+    POST_INSTALL_SSH_STATUS="ready"
+    POST_INSTALL_SSH_TARGET="${TARGET_USERNAME}@${ASSIGNED_IPV4}"
+    POST_INSTALL_SSH_LAST_EXIT="0"
+    POST_INSTALL_SSH_LAST_ERROR="none"
     VM_SWAP_STATUS="detected"
     VM_SWAP_FILE="/swap.img"
     VM_SWAP_SIZE="4G"
@@ -3171,6 +3237,11 @@ demo_install_monitoring() {
     echo ""
     msg_ok "Ubuntu autoinstall completed. (${INSTALL_DURATION_TEXT})"
     msg_ok "VM ${TARGET_VMID} powered off after install."
+    msg_ok "Installed Ubuntu VM started."
+    msg_ok "VM IPv4 detected: ${ASSIGNED_IPV4}"
+    msg_ok "SSH ready."
+    msg_ok "Ubuntu swap detected: ${VM_SWAP_FILE} (${VM_SWAP_SIZE}, ${VM_SWAP_TYPE})."
+    msg_ok "VM-side marker updated."
 }
 
 demo_cleanup() {
@@ -3264,9 +3335,18 @@ main() {
     fi
 
     attach_iso_and_start_install
-    post_install_cleanup
+    post_install_wait_for_poweroff
+    prepare_installed_vm_boot
     start_installed_vm_and_detect_ip
-    update_vm_side_marker_assigned_ipv4
+    if wait_for_vm_ssh_ready; then
+        detect_vm_swap_readonly
+        update_vm_side_marker_assigned_ipv4
+    else
+        msg_warn "Ubuntu swap detection skipped; SSH not ready."
+        VM_SIDE_MARKER_UPDATE_STATUS="ssh-not-ready"
+        msg_warn "VM-side marker update skipped; SSH not ready."
+    fi
+    post_install_cleanup
     write_completion_marker
     create_host_verification_report
     show_final_output
