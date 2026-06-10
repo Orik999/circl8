@@ -21,14 +21,15 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.1-platformCoreBootstrap.sh"
-SCRIPT_VERSION="v1.0.2"
+SCRIPT_VERSION="v1.0.3"
 SCRIPT_UPDATED="2026-06-10"
-SCRIPT_BUILD="confirm-before-apply-flow"
+SCRIPT_BUILD="quiet-deploy-output-polish"
 
 T=15
 LOG_FILE="/var/log/circl8-platform-core.log"
 RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/circl8-platform-core-verify.log"
+DEPLOY_OUTPUT_FILE=""
 COMPLETED_MARKER="/root/.circl8-platform-core-completed"
 SCRIPT6_MARKER="/root/.docker-env-setup-completed"
 
@@ -224,6 +225,9 @@ function init_logging() {
         RUNTIME_LOG_FILE="$LOG_FILE"
         exec > >(tee -a "$LOG_FILE") 2>&1
     fi
+    DEPLOY_OUTPUT_FILE="$(mktemp /tmp/circl8-platform-core-deploy.XXXXXX)"
+    TEMP_FILES+=("$DEPLOY_OUTPUT_FILE")
+    : > "$DEPLOY_OUTPUT_FILE"
     LOGGING_ENABLED="yes"
 }
 
@@ -575,15 +579,51 @@ function show_setup_plan_and_confirm() {
     fi
 }
 
+
+function write_deployment_failure_log() {
+    local display_name="${1:-unknown}"
+    local failed_file="${2:-unknown}"
+    local failed_project="${3:-unknown}"
+    {
+        echo "--- CIRCL8 PLATFORM CORE DEPLOYMENT FAILURE LOG ---"
+        echo "Date: $(date)"
+        echo "Script: ${SCRIPT_SOURCE} ${SCRIPT_VERSION} ${SCRIPT_BUILD}"
+        echo "Failed stack: ${display_name}"
+        echo "Compose file: ${failed_file}"
+        echo "Compose project: ${failed_project}"
+        echo "Docker dir: ${DOCKER_DIR}"
+        echo "Compose dir: ${COMPOSE_DIR}"
+        echo "Detailed deployment output:"
+        if [ -n "${DEPLOY_OUTPUT_FILE:-}" ] && [ -s "$DEPLOY_OUTPUT_FILE" ]; then
+            cat "$DEPLOY_OUTPUT_FILE"
+        else
+            echo "No deployment output captured."
+        fi
+    } | write_root_file "$VERIFY_LOG"
+    if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" chmod 0644 "$VERIFY_LOG" 2>/dev/null || true; else chmod 0644 "$VERIFY_LOG" 2>/dev/null || true; fi
+}
+
 function deploy_compose_file() {
     local file="${1:-}"
     local project=""
     local display_name=""
+    local compose_path=""
     [ -n "$file" ] || msg_error "Compose filename was not provided to deploy_compose_file."
     project="$(compose_project_for_file "$file")"
     display_name="$(compose_display_name "$file")"
+    compose_path="$(compose_file_path "$file")"
     msg_info "Deploying ${display_name}"
-    docker compose --env-file "$ENV_FILE" -p "$project" -f "$(compose_file_path "$file")" up -d --remove-orphans >/dev/null
+    {
+        echo ""
+        echo "--- Deploying ${display_name} (${file}) ---"
+        echo "Date: $(date)"
+        echo "Project: ${project}"
+        echo "Compose file: ${compose_path}"
+        docker compose --env-file "$ENV_FILE" -p "$project" -f "$compose_path" up -d --remove-orphans
+    } >> "$DEPLOY_OUTPUT_FILE" 2>&1 || {
+        write_deployment_failure_log "$display_name" "$file" "$project"
+        msg_error "${display_name} deployment failed. See ${VERIFY_LOG}"
+    }
     msg_ok "${display_name}: deployed"
 }
 
@@ -621,7 +661,6 @@ function verify_record_first_issue() {
 }
 
 function create_verification_report() {
-    section "VERIFICATION"
     msg_info "Creating platform core verification report"
     local report_body="$(mktemp)" mode=""
     TEMP_FILES+=("$report_body")
@@ -682,14 +721,18 @@ function create_verification_report() {
         echo ""
         echo "Results:"
         cat "$report_body"
+        if [ -n "${DEPLOY_OUTPUT_FILE:-}" ] && [ -s "$DEPLOY_OUTPUT_FILE" ]; then
+            echo ""
+            echo "Deployment output:"
+            cat "$DEPLOY_OUTPUT_FILE"
+        fi
     } | write_root_file "$VERIFY_LOG"
 
     rm -f "$report_body"
-    msg_ok "PLATFORM CORE VERIFICATION REPORT CREATED"
+    msg_ok "Platform core verification report created"
 }
 
 function write_completion_marker() {
-    section "MARKER"
     msg_info "Writing platform core completion marker"
     {
         echo "Platform Core completed on: $(date)"
@@ -725,7 +768,14 @@ function write_completion_marker() {
         echo "SCRIPT61_NEXT_STEP=6.2-admin-ui-bootstrap"
     } | write_root_file "$COMPLETED_MARKER"
     if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" chmod 0644 "$COMPLETED_MARKER"; else chmod 0644 "$COMPLETED_MARKER"; fi
-    msg_ok "COMPLETION MARKER WRITTEN"
+    msg_ok "Completion marker written"
+}
+
+
+function create_verification_and_marker() {
+    section "VERIFICATION / MARKER"
+    create_verification_report
+    write_completion_marker
 }
 
 function show_final_summary() {
@@ -785,8 +835,7 @@ function main() {
     validate_preflight_runtime
     show_setup_plan_and_confirm
     apply_platform_core_changes
-    create_verification_report
-    write_completion_marker
+    create_verification_and_marker
     show_final_summary
 }
 
