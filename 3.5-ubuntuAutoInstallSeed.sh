@@ -2409,6 +2409,7 @@ select_ubuntu_iso() {
     fi
 
     tty_print "${BFR}"
+    echo ""
     echo -e "${YW}Available ISOs:${CL}"
     list_lines=1
 
