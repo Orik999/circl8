@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.27"
+SCRIPT_VERSION="v1.2.28"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="vm-swap-selection"
+SCRIPT_BUILD="install-options-flow-polish"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -2347,51 +2347,50 @@ collect_post_install_options() {
 
     start_installed_yn="$(timed_yes_no "Start installed Ubuntu VM after cleanup?" "y")"
     [[ "$start_installed_yn" =~ ^[Nn] ]] && POST_INSTALL_START_VM="n" || POST_INSTALL_START_VM="y"
-    clear_terminal_lines 3
 }
 
 # --- 45. VM SWAP OPTIONS ---
 collect_swap_options() {
-    local swap_choice=""
+    local swap_index=""
 
-    section "SWAP"
+    echo ""
+    echo -e "${YW}Swap:${CL}"
     echo -e "${YW}Swap protects the Ubuntu guest from guest-side OOM kills.${CL}"
     echo -e "${YW}Recommended for this Circl8 VM: disk swapfile, 4 GB.${CL}"
+    echo ""
+    echo -e "  ${GN}1) none${CL}"
+    echo -e "  ${GN}2) disk swapfile, recommended 4 GB${CL}"
+    echo -e "  ${GN}3) zram, recommended 2 GB${CL}"
+    echo -e "  ${GN}4) disk swapfile + zram, advanced${CL}"
 
-    swap_choice="$(timed_menu_select "Swap" "2" \
-        "none" \
-        "disk swapfile, recommended 4 GB" \
-        "zram, recommended 2 GB" \
-        "disk swapfile + zram, advanced")"
+    swap_index="$(timed_number_input "Select Swap option number" "2" "1" "4")"
 
-    case "$swap_choice" in
-        "none")
+    case "$swap_index" in
+        1)
             VM_SWAP_MODE="none"
             VM_SWAP_SIZE_GB="0"
             VM_ZRAM_SIZE_GB="0"
             VM_SWAP_STATUS="disabled"
             ;;
-        "disk swapfile, recommended 4 GB")
+        2)
             VM_SWAP_MODE="disk"
-            VM_SWAP_SIZE_GB="$(timed_number_input_quiet "Enter disk swapfile size in GB" "$DEFAULT_VM_SWAP_SIZE_GB" "1" "32")"
+            VM_SWAP_SIZE_GB="$(timed_number_input "Enter disk swapfile size in GB" "$DEFAULT_VM_SWAP_SIZE_GB" "1" "32")"
             VM_ZRAM_SIZE_GB="0"
             VM_SWAP_STATUS="unknown"
             ;;
-        "zram, recommended 2 GB")
+        3)
             VM_SWAP_MODE="zram"
             VM_SWAP_SIZE_GB="0"
-            VM_ZRAM_SIZE_GB="$(timed_number_input_quiet "Enter zram size in GB" "$DEFAULT_VM_ZRAM_SIZE_GB" "1" "8")"
+            VM_ZRAM_SIZE_GB="$(timed_number_input "Enter zram size in GB" "$DEFAULT_VM_ZRAM_SIZE_GB" "1" "8")"
             VM_SWAP_STATUS="unknown"
             ;;
-        *)
+        4)
             VM_SWAP_MODE="disk+zram"
-            VM_SWAP_SIZE_GB="$(timed_number_input_quiet "Enter disk swapfile size in GB" "$DEFAULT_VM_SWAP_SIZE_GB" "1" "32")"
-            VM_ZRAM_SIZE_GB="$(timed_number_input_quiet "Enter zram size in GB" "$DEFAULT_VM_ZRAM_SIZE_GB" "1" "8")"
+            VM_SWAP_SIZE_GB="$(timed_number_input "Enter disk swapfile size in GB" "$DEFAULT_VM_SWAP_SIZE_GB" "1" "32")"
+            VM_ZRAM_SIZE_GB="$(timed_number_input "Enter zram size in GB" "$DEFAULT_VM_ZRAM_SIZE_GB" "1" "8")"
             VM_SWAP_STATUS="unknown"
             ;;
     esac
-
-    swap_summary
 }
 
 # --- 46. UBUNTU ISO SELECTION ---
@@ -2420,14 +2419,14 @@ select_ubuntu_iso() {
         list_lines=$((list_lines + 1))
     done
 
-    iso_index="$(timed_number_input "Select Ubuntu ISO number" "$default_iso_index" "1" "${#ISOS[@]}")"
+    iso_index="$(timed_number_input_quiet "Select Ubuntu ISO number" "$default_iso_index" "1" "${#ISOS[@]}")"
     clear_terminal_lines "$((list_lines + 1))"
+    tty_println "${CM} ${BL}Select Ubuntu ISO number:${CL} ${ANS}${iso_index}${CL}"
     INSTALL_ISO_PATH="${ISOS[$((iso_index-1))]}"
     INSTALL_ISO_REF="local:iso/$(basename "$INSTALL_ISO_PATH")"
 
     set_autoinstall_iso_paths
     detect_missing_iso_tools
-    install_options_summary
 }
 
 # --- 46. UBUNTU PRO NOTE ---
@@ -2716,6 +2715,13 @@ show_apply_summary() {
     echo ""
 
     swap_summary
+    echo ""
+
+    group_heading "ISO"
+    group_answer_line "Source ISO" "$(display_iso_ref "$INSTALL_ISO_REF")"
+    group_status_line "Generated ISO" "$(display_iso_ref "$AUTOINSTALL_ISO_REF")"
+    group_status_line "Missing tools" "$(missing_iso_tools_display)"
+    group_status_line "Tool action" "$(iso_tool_action_display)"
     echo ""
 
     group_heading "Proxmox identity"
