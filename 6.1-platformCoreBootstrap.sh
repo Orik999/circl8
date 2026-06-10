@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.1-platformCoreBootstrap.sh"
-SCRIPT_VERSION="v1.0.1"
+SCRIPT_VERSION="v1.0.2"
 SCRIPT_UPDATED="2026-06-10"
-SCRIPT_BUILD="compose-file-loop-fix"
+SCRIPT_BUILD="confirm-before-apply-flow"
 
 T=15
 LOG_FILE="/var/log/circl8-platform-core.log"
@@ -344,8 +344,6 @@ function validate_script6_handoff() {
     aligned_status_line "Traefik config" "$SCRIPT6_TRAEFIK_CONFIG_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_CONFIG_READY")" 26
     aligned_status_line "Traefik ACME" "$SCRIPT6_TRAEFIK_ACME_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_ACME_READY")" 26
     aligned_status_line "Cloudflare token file" "$SCRIPT6_CF_TOKEN_FILE_READY" "$(status_color_for_value "$SCRIPT6_CF_TOKEN_FILE_READY")" 26
-    aligned_status_line "CrowdSec selected" "$SCRIPT6_CROWDSEC_SELECTED" "$(status_color_for_value "$SCRIPT6_CROWDSEC_SELECTED")" 26
-    aligned_status_line "CrowdSec bouncer" "$SCRIPT6_CROWDSEC_BOUNCER" "$(status_color_for_value "$SCRIPT6_CROWDSEC_BOUNCER")" 26
 
     root_path_exists "$SCRIPT6_MARKER" || { msg_warn "Script 6 marker missing: ${SCRIPT6_MARKER}"; failure="yes"; }
     [ "$SCRIPT6_STATUS" = "completed" ] || { msg_warn "Script 6 marker is not completed"; failure="yes"; }
@@ -390,14 +388,21 @@ function validate_preflight_runtime() {
     [ "$(containerd_service_active)" = "active" ] || failure="yes"
 
     root_path_exists "$DOCKER_DIR" && aligned_status_line "Docker dir" "present" "$GN" 24 || { aligned_status_line "Docker dir" "missing" "$RD" 24; failure="yes"; }
-    root_path_exists "$COMPOSE_DIR" || run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
-    root_path_exists "$COMPOSE_DIR" && aligned_status_line "Compose dir" "present" "$GN" 24 || { aligned_status_line "Compose dir" "missing" "$RD" 24; failure="yes"; }
+    if root_path_exists "$COMPOSE_DIR"; then
+        aligned_status_line "Compose dir" "present" "$GN" 24
+    elif root_path_exists "$DOCKER_DIR"; then
+        aligned_status_line "Compose dir" "will create" "$YW" 24
+    else
+        aligned_status_line "Compose dir" "missing" "$RD" 24
+        failure="yes"
+    fi
     root_path_exists "$SECRETS_DIR" && aligned_status_line "Secrets dir" "present" "$GN" 24 || { aligned_status_line "Secrets dir" "missing" "$RD" 24; failure="yes"; }
     root_path_exists "$ENV_FILE" && aligned_status_line ".env file" "present" "$GN" 24 || { aligned_status_line ".env file" "missing" "$RD" 24; failure="yes"; }
     root_path_exists "$TRAEFIK_STATIC_CONFIG_FILE" && aligned_status_line "Traefik static config" "present" "$GN" 24 || { aligned_status_line "Traefik static config" "missing" "$RD" 24; failure="yes"; }
     root_path_exists "$TRAEFIK_DYNAMIC_CONFIG_FILE" && aligned_status_line "Traefik dynamic config" "present" "$GN" 24 || { aligned_status_line "Traefik dynamic config" "missing" "$RD" 24; failure="yes"; }
     if root_path_exists "$TRAEFIK_ACME_FILE" && [ "$(root_stat_mode "$TRAEFIK_ACME_FILE")" = "600" ]; then aligned_status_line "acme.json" "600" "$GN" 24; else aligned_status_line "acme.json" "not-ready" "$RD" 24; failure="yes"; fi
     if [ "$SCRIPT6_CF_TOKEN_FILE_READY" = "yes" ]; then root_file_not_empty "$CF_API_TOKEN_FILE" && aligned_status_line "Cloudflare token file" "present" "$GN" 24 || { aligned_status_line "Cloudflare token file" "missing" "$RD" 24; failure="yes"; }; else aligned_status_line "Cloudflare token file" "skipped" "$YW" 24; fi
+    aligned_status_line "Compose files" "will install" "$YW" 24
 
     blocker="$(port_non_platform_blocker 80 || true)"
     if [ -n "$blocker" ]; then aligned_status_line "Port 80 preflight" "blocked" "$RD" 24; echo -e "  ${YW}${blocker}${CL}"; failure="yes"; else aligned_status_line "Port 80 preflight" "available/platform" "$GN" 24; fi
@@ -419,17 +424,20 @@ function install_compose_file() {
     local url=""
     local dest=""
     local tmp=""
+    local display_name=""
 
     [ -n "$filename" ] || msg_error "Compose filename was not provided to install_compose_file."
 
+    display_name="$(compose_display_name "$filename")"
     local_source="${SCRIPT_DIR}/docker/${filename}"
     url="${RAW_BASE}/docker/${filename}"
     dest="${COMPOSE_DIR}/${filename}"
 
     if [ -f "$local_source" ]; then
+        msg_info "Installing ${display_name}"
         run_cmd "installing local ${filename}" cp "$local_source" "$dest"
     else
-        msg_info "Downloading ${filename}"
+        msg_info "Downloading ${display_name}"
         tmp="$(mktemp)"
         TEMP_FILES+=("$tmp")
         download_file "$url" "$tmp" || msg_error "Failed to download ${url}"
@@ -442,6 +450,7 @@ function install_compose_file() {
 
     run_cmd "setting ${filename} ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$dest"
     run_cmd "setting ${filename} mode" chmod 640 "$dest"
+    msg_ok "${display_name}: installed"
 }
 
 function verify_core_compose_files_installed() {
@@ -471,9 +480,9 @@ function verify_core_compose_files_installed() {
 function install_core_compose_files() {
     section "COMPOSE FILES"
     local file=""
+    run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
     for file in "${CORE_COMPOSE_FILES[@]}"; do
         install_compose_file "$file"
-        aligned_status_line "$file" "installed" "$GN" 34
     done
     verify_core_compose_files_installed
 }
@@ -507,31 +516,48 @@ function compose_project_for_file() {
     esac
 }
 
+function compose_display_name() {
+    case "${1:-}" in
+        "$COMPOSE_SOCKET_PROXY") printf 'Socket Proxy' ;;
+        "$COMPOSE_TRAEFIK") printf 'Traefik' ;;
+        "$COMPOSE_CF_DDNS") printf 'Cloudflare DDNS' ;;
+        "$COMPOSE_CF_COMPANION") printf 'Cloudflare Companion' ;;
+        *) printf '%s' "${1:-unknown}" ;;
+    esac
+}
+
 function validate_compose_files() {
     section "COMPOSE VALIDATION"
-    local file="" project=""
+    local file="" project="" display_name=""
     for file in "${CORE_COMPOSE_FILES[@]}"; do
+        display_name="$(compose_display_name "$file")"
         if [ "$CF_SERVICES_ENABLED" != "yes" ] && { [ "$file" = "$COMPOSE_CF_DDNS" ] || [ "$file" = "$COMPOSE_CF_COMPANION" ]; }; then
-            aligned_status_line "$file" "skipped" "$YW" 34
+            aligned_status_line "$display_name" "skipped" "$YW" 28
             continue
         fi
         project="$(compose_project_for_file "$file")"
-        msg_info "Validating ${file}"
+        msg_info "Validating ${display_name}"
         docker compose --env-file "$ENV_FILE" -p "$project" -f "$(compose_file_path "$file")" config >/dev/null
-        msg_ok "${file} config valid"
+        msg_ok "${display_name}: config valid"
     done
 }
 
 function show_setup_plan_and_confirm() {
     local apply_yn=""
     section "SETUP PLAN"
-    echo -e "${YW}Script 6.1 will deploy only platform core services.${CL}"
+    echo -e "${YW}Script 6.1 will deploy only platform core services after confirmation.${CL}"
+    echo ""
+    echo -e "${YW}Apply changes:${CL}"
+    aligned_status_line "Compose files" "install into compose dir" "$GN" 24
+    aligned_status_line "Docker networks" "create/verify" "$GN" 24
+    aligned_status_line "Compose configs" "validate before deploy" "$GN" 24
+    aligned_status_line "Verification" "write report and marker" "$GN" 24
     echo ""
     echo -e "${YW}Deployment order:${CL}"
-    aligned_status_line "1" "$COMPOSE_SOCKET_PROXY" "$GN" 4
-    aligned_status_line "2" "$COMPOSE_TRAEFIK" "$GN" 4
-    aligned_status_line "3" "$([ "$CF_SERVICES_ENABLED" = "yes" ] && echo "$COMPOSE_CF_DDNS" || echo "${COMPOSE_CF_DDNS} (skipped)")" "$GN" 4
-    aligned_status_line "4" "$([ "$CF_SERVICES_ENABLED" = "yes" ] && echo "$COMPOSE_CF_COMPANION" || echo "${COMPOSE_CF_COMPANION} (skipped)")" "$GN" 4
+    aligned_status_line "1" "$(compose_display_name "$COMPOSE_SOCKET_PROXY")" "$GN" 4
+    aligned_status_line "2" "$(compose_display_name "$COMPOSE_TRAEFIK")" "$GN" 4
+    aligned_status_line "3" "$([ "$CF_SERVICES_ENABLED" = "yes" ] && compose_display_name "$COMPOSE_CF_DDNS" || echo "$(compose_display_name "$COMPOSE_CF_DDNS") (skipped)")" "$GN" 4
+    aligned_status_line "4" "$([ "$CF_SERVICES_ENABLED" = "yes" ] && compose_display_name "$COMPOSE_CF_COMPANION" || echo "$(compose_display_name "$COMPOSE_CF_COMPANION") (skipped)")" "$GN" 4
     echo ""
     echo -e "${YW}Prepared by Script 6:${CL}"
     aligned_status_line "Domain" "$DOMAIN_VALUE" "$GN" 18
@@ -550,10 +576,15 @@ function show_setup_plan_and_confirm() {
 }
 
 function deploy_compose_file() {
-    local file="$1" project="$(compose_project_for_file "$file")"
-    msg_info "Deploying ${file}"
+    local file="${1:-}"
+    local project=""
+    local display_name=""
+    [ -n "$file" ] || msg_error "Compose filename was not provided to deploy_compose_file."
+    project="$(compose_project_for_file "$file")"
+    display_name="$(compose_display_name "$file")"
+    msg_info "Deploying ${display_name}"
     docker compose --env-file "$ENV_FILE" -p "$project" -f "$(compose_file_path "$file")" up -d --remove-orphans >/dev/null
-    msg_ok "${file} deployed"
+    msg_ok "${display_name}: deployed"
 }
 
 function deploy_platform_core() {
@@ -739,15 +770,21 @@ function show_final_summary() {
     echo ""
 }
 
+function apply_platform_core_changes() {
+    section "APPLY CHANGES"
+    echo -e "${YW}Applying confirmed platform core setup plan.${CL}"
+    install_core_compose_files
+    create_networks
+    validate_compose_files
+    deploy_platform_core
+}
+
 function main() {
     init_script
     validate_script6_handoff
     validate_preflight_runtime
-    install_core_compose_files
-    create_networks
-    validate_compose_files
     show_setup_plan_and_confirm
-    deploy_platform_core
+    apply_platform_core_changes
     create_verification_report
     write_completion_marker
     show_final_summary
