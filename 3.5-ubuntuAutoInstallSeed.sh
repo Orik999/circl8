@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.28"
+SCRIPT_VERSION="v1.2.29"
 SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="install-options-flow-polish"
+SCRIPT_BUILD="postinstall-wait-swap-fix"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -109,6 +109,7 @@ INSTALLED_VM_STARTED_STATUS=""
 QEMU_IPV4_STATUS=""
 HOST_VERIFICATION_STATUS=""
 VM_SIDE_MARKER_UPDATE_STATUS="not-run"
+POST_INSTALL_SSH_READY_STATUS="not-run"
 
 CLEANUP_INSTALLED_TOOLS="yes"
 CLEANUP_TEMP_WORKFILES="yes"
@@ -934,6 +935,33 @@ wait_for_vm_ssh_ready() {
     done
 }
 
+ensure_post_install_ssh_ready() {
+    if [ "${POST_INSTALL_SSH_READY_STATUS:-not-run}" == "yes" ]; then
+        return 0
+    fi
+
+    if [ "${POST_INSTALL_SSH_READY_STATUS:-not-run}" == "timeout" ] || [ "${POST_INSTALL_SSH_READY_STATUS:-not-run}" == "skipped-no-ip" ]; then
+        return 1
+    fi
+
+    if [ -z "${ASSIGNED_IPV4:-}" ]; then
+        POST_INSTALL_SSH_READY_STATUS="skipped-no-ip"
+        return 1
+    fi
+
+    msg_info "Waiting for SSH on detected VM IPv4"
+
+    if wait_for_vm_ssh_ready; then
+        POST_INSTALL_SSH_READY_STATUS="yes"
+        msg_ok "SSH ready."
+        return 0
+    fi
+
+    POST_INSTALL_SSH_READY_STATUS="timeout"
+    msg_warn "SSH was not ready before timeout expired."
+    return 1
+}
+
 update_vm_side_marker_assigned_ipv4() {
     local marker_file=""
     local marker_b64=""
@@ -943,13 +971,13 @@ update_vm_side_marker_assigned_ipv4() {
         return 0
     fi
 
-    msg_info "Updating VM-side marker assigned IPv4"
-
-    if ! wait_for_vm_ssh_ready; then
+    if ! ensure_post_install_ssh_ready; then
         VM_SIDE_MARKER_UPDATE_STATUS="ssh-not-ready"
         msg_warn "VM-side marker IPv4 update skipped; SSH not ready."
         return 0
     fi
+
+    msg_info "Updating VM-side marker assigned IPv4"
 
     marker_file="$(mktemp)"
     TEMP_FILES+=("$marker_file")
@@ -1560,39 +1588,51 @@ echo "Expected mode: ${VM_SWAP_MODE}"
 echo "Expected disk swap: $(disk_swap_display)"
 echo "Expected zram: $(zram_swap_display)"
 swapon --show 2>/dev/null || true
+
+disk_active="no"
+disk_fstab="no"
+disk_mode_ok="no"
+swapimg_active="no"
+swapimg_fstab="no"
+zram_active="no"
+
+swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && disk_active="yes"
+grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && disk_fstab="yes"
+[ "$(stat -c '%a' /swapfile 2>/dev/null || true)" = "600" ] && disk_mode_ok="yes"
+swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swap.img" && swapimg_active="yes"
+grep -qE "^[[:space:]]*/swap\.img[[:space:]]+" /etc/fstab && swapimg_fstab="yes"
+swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+" && zram_active="yes"
+
 case "${VM_SWAP_MODE}" in
     none)
-        PASS "Swap not required by selected mode"
+        if [ "$disk_active" = "no" ] && [ "$swapimg_active" = "no" ] && [ "$zram_active" = "no" ]; then
+            PASS "No swap active as selected"
+        else
+            FAIL "Swap is active even though none was selected"
+        fi
         ;;
     disk)
-        if swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab; then
-            PASS "Disk swapfile active and persistent"
+        if [ "$disk_active" = "yes" ] && [ "$disk_fstab" = "yes" ] && [ "$disk_mode_ok" = "yes" ] && [ "$swapimg_active" = "no" ] && [ "$swapimg_fstab" = "no" ]; then
+            PASS "Disk swapfile active, persistent, mode 600, and no swap.img duplicate"
         else
-            FAIL "Disk swapfile is not active or missing fstab entry"
+            FAIL "Disk swapfile is not cleanly normalized"
         fi
         ;;
     zram)
-        if swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+"; then
-            PASS "zram swap active"
+        if [ "$zram_active" = "yes" ] && [ "$disk_active" = "no" ] && [ "$swapimg_active" = "no" ]; then
+            PASS "zram swap active with no disk swap duplicate"
         else
-            FAIL "zram swap is not active"
+            FAIL "zram swap is not cleanly normalized"
         fi
         ;;
     disk+zram)
-        disk_ok="no"
-        zram_ok="no"
-        swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && disk_ok="yes"
-        swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+" && zram_ok="yes"
-        if [ "\$disk_ok" = "yes" ] && [ "\$zram_ok" = "yes" ]; then
-            PASS "Disk swapfile and zram swap active"
-        elif [ "\$disk_ok" = "yes" ] || [ "\$zram_ok" = "yes" ]; then
-            WARN "Only part of disk+zram swap is active"
+        if [ "$disk_active" = "yes" ] && [ "$disk_fstab" = "yes" ] && [ "$disk_mode_ok" = "yes" ] && [ "$zram_active" = "yes" ] && [ "$swapimg_active" = "no" ] && [ "$swapimg_fstab" = "no" ]; then
+            PASS "Disk swapfile and zram active with no swap.img duplicate"
         else
-            FAIL "Neither disk swapfile nor zram swap is active"
+            FAIL "disk+zram swap is not cleanly normalized"
         fi
         ;;
 esac
-
 echo ""
 echo "Network:"
 ip -br addr 2>/dev/null || true
@@ -1615,10 +1655,14 @@ build_swap_late_commands() {
     local disk_mb=$(( VM_SWAP_SIZE_GB * 1024 ))
     local zram_mb=$(( VM_ZRAM_SIZE_GB * 1024 ))
 
+    cat <<EOF
+  - curtin in-target --target=/target -- bash -c 'swapoff /swap.img 2>/dev/null || true; swapoff /swapfile 2>/dev/null || true; sed -i -E "/^[[:space:]]*\/swap\.img[[:space:]]+/d; /^[[:space:]]*\/swapfile[[:space:]]+/d" /etc/fstab; rm -f /swap.img /swapfile'
+EOF
+
     case "${VM_SWAP_MODE:-none}" in
         disk|disk+zram)
             cat <<EOF
-  - curtin in-target --target=/target -- bash -c 'set -e; rm -f /swapfile; if ! fallocate -l ${VM_SWAP_SIZE_GB}G /swapfile; then dd if=/dev/zero of=/swapfile bs=1M count=${disk_mb} status=none; fi; chmod 600 /swapfile; mkswap /swapfile; grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab; swapon /swapfile || true'
+  - curtin in-target --target=/target -- bash -c 'set -e; if ! fallocate -l ${VM_SWAP_SIZE_GB}G /swapfile; then dd if=/dev/zero of=/swapfile bs=1M count=${disk_mb} status=none; fi; chmod 600 /swapfile; mkswap /swapfile; echo "/swapfile none swap sw 0 0" >> /etc/fstab; swapon /swapfile || true'
 EOF
             ;;
     esac
@@ -2803,6 +2847,8 @@ post_install_cleanup() {
 
 # --- 60. START INSTALLED VM AND DETECT IP ---
 start_installed_vm_and_detect_ip() {
+    section "INSTALL MONITORING"
+
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
         msg_info "Starting installed Ubuntu VM"
         run_cmd "starting installed Ubuntu VM" qm start "$TARGET_VMID"
@@ -2815,6 +2861,7 @@ start_installed_vm_and_detect_ip() {
         if [ -n "$ASSIGNED_IPV4" ]; then
             SSH_COMMAND="ssh ${TARGET_USERNAME}@${ASSIGNED_IPV4}"
             QEMU_IPV4_STATUS="QEMU Guest Agent reported IPv4 address: ${ASSIGNED_IPV4}"
+            msg_ok "VM IPv4 detected: ${ASSIGNED_IPV4}"
         else
             QEMU_IPV4_STATUS="QEMU Guest Agent did not report an IPv4 address within ${SSH_IP_DETECT_TIMEOUT_SECONDS}s"
             msg_warn "${QEMU_IPV4_STATUS}"
@@ -2829,18 +2876,13 @@ start_installed_vm_and_detect_ip() {
 verify_vm_swap_via_ssh() {
     local swap_result=""
 
-    if [ "${VM_SWAP_MODE:-none}" == "none" ]; then
-        VM_SWAP_STATUS="disabled"
-        return 0
-    fi
-
     if [ -z "${ASSIGNED_IPV4:-}" ]; then
         VM_SWAP_STATUS="unknown"
         msg_warn "VM swap verification skipped; no assigned IPv4 detected."
         return 0
     fi
 
-    if ! wait_for_vm_ssh_ready; then
+    if ! ensure_post_install_ssh_ready; then
         VM_SWAP_STATUS="unknown"
         msg_warn "VM swap verification skipped; SSH not ready."
         return 0
@@ -2856,28 +2898,50 @@ verify_vm_swap_via_ssh() {
         "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
         "sudo -n bash -s" <<EOF 2>/dev/null || true
 mode="${VM_SWAP_MODE}"
-disk_ok="no"
-zram_ok="no"
+disk_active="no"
+disk_fstab="no"
+disk_mode_ok="no"
+swapimg_active="no"
+swapimg_fstab="no"
+zram_active="no"
 
-if swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab; then
-    disk_ok="yes"
-fi
-
-if swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+"; then
-    zram_ok="yes"
-fi
+swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && disk_active="yes"
+grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && disk_fstab="yes"
+[ "\$(stat -c '%a' /swapfile 2>/dev/null || true)" = "600" ] && disk_mode_ok="yes"
+swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swap.img" && swapimg_active="yes"
+grep -qE "^[[:space:]]*/swap\.img[[:space:]]+" /etc/fstab && swapimg_fstab="yes"
+swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+" && zram_active="yes"
 
 case "\$mode" in
+    none)
+        if [ "\$disk_active" = "no" ] && [ "\$swapimg_active" = "no" ] && [ "\$zram_active" = "no" ]; then
+            echo disabled
+        else
+            echo failed
+        fi
+        ;;
     disk)
-        [ "\$disk_ok" = "yes" ] && echo enabled || echo failed
+        if [ "\$disk_active" = "yes" ] && [ "\$disk_fstab" = "yes" ] && [ "\$disk_mode_ok" = "yes" ] && [ "\$swapimg_active" = "no" ] && [ "\$swapimg_fstab" = "no" ]; then
+            echo enabled
+        elif [ "\$disk_active" = "yes" ] || [ "\$swapimg_active" = "yes" ] || [ "\$swapimg_fstab" = "yes" ]; then
+            echo partial
+        else
+            echo failed
+        fi
         ;;
     zram)
-        [ "\$zram_ok" = "yes" ] && echo enabled || echo failed
+        if [ "\$zram_active" = "yes" ] && [ "\$disk_active" = "no" ] && [ "\$swapimg_active" = "no" ]; then
+            echo enabled
+        elif [ "\$zram_active" = "yes" ] || [ "\$disk_active" = "yes" ] || [ "\$swapimg_active" = "yes" ]; then
+            echo partial
+        else
+            echo failed
+        fi
         ;;
     disk+zram)
-        if [ "\$disk_ok" = "yes" ] && [ "\$zram_ok" = "yes" ]; then
+        if [ "\$disk_active" = "yes" ] && [ "\$disk_fstab" = "yes" ] && [ "\$disk_mode_ok" = "yes" ] && [ "\$zram_active" = "yes" ] && [ "\$swapimg_active" = "no" ] && [ "\$swapimg_fstab" = "no" ]; then
             echo enabled
-        elif [ "\$disk_ok" = "yes" ] || [ "\$zram_ok" = "yes" ]; then
+        elif [ "\$disk_active" = "yes" ] || [ "\$zram_active" = "yes" ] || [ "\$swapimg_active" = "yes" ] || [ "\$swapimg_fstab" = "yes" ]; then
             echo partial
         else
             echo failed
@@ -2891,11 +2955,11 @@ EOF
 )"
 
     case "$swap_result" in
-        enabled|partial|failed|unknown) VM_SWAP_STATUS="$swap_result" ;;
+        enabled|disabled|partial|failed|unknown) VM_SWAP_STATUS="$swap_result" ;;
         *) VM_SWAP_STATUS="unknown" ;;
     esac
 
-    if [ "$VM_SWAP_STATUS" == "enabled" ]; then
+    if [ "$VM_SWAP_STATUS" == "enabled" ] || [ "$VM_SWAP_STATUS" == "disabled" ]; then
         msg_ok "VM swap verified: ${VM_SWAP_STATUS}."
     else
         msg_warn "VM swap verification status: ${VM_SWAP_STATUS}."
