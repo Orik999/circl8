@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.1-platformCoreBootstrap.sh"
-SCRIPT_VERSION="v1.0.4"
+SCRIPT_VERSION="v1.0.5"
 SCRIPT_UPDATED="2026-06-10"
-SCRIPT_BUILD="platform-owned-port-rerun-fix"
+SCRIPT_BUILD="rerun-mode-plan-polish"
 
 T=15
 LOG_FILE="/var/log/circl8-platform-core.log"
@@ -101,6 +101,9 @@ SCRIPT61_TRAEFIK_CONFIG_READY="no"
 SCRIPT61_TRAEFIK_ACME_READY="no"
 SCRIPT61_PORT_80="unknown"
 SCRIPT61_PORT_443="unknown"
+SETUP_MODE="fresh install"
+EXISTING_PLATFORM="not detected"
+PORT_OWNERSHIP="available/platform"
 SCRIPT61_READY_FOR_SCRIPT62="no"
 SCRIPT61_READY_FOR_SCRIPT63="no"
 SCRIPT61_READY_FOR_SCRIPT64="no"
@@ -149,8 +152,8 @@ function final_line() {
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        PASS|completed|active|running|healthy|yes|ready|listening|preserved|active/running|available/platform|platform-owned) printf '%s' "$GN" ;;
-        PASS_WITH_WARNINGS|skipped|unknown|not-listening) printf '%s' "$YW" ;;
+        PASS|completed|active|running|healthy|yes|ready|listening|preserved|active/running|available/platform) printf '%s' "$GN" ;;
+        PASS_WITH_WARNINGS|skipped|unknown|not-listening|platform-owned|rerun/update) printf '%s' "$YW" ;;
         FAIL|failed|missing|no|inactive|not-ready|blocked) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
     esac
@@ -413,6 +416,40 @@ function port_blocker_detail() {
     [ -n "$line" ] && printf '%s' "$line"
 }
 
+function platform_marker_completed() {
+    [ "$(marker_key_value SCRIPT61_STATUS "$COMPLETED_MARKER")" = "completed" ]
+}
+
+function platform_core_container_exists() {
+    local name=""
+    for name in socket-proxy traefik cf-ddns cf-companion; do
+        if docker inspect "$name" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    if docker ps -a --filter "label=com.docker.compose.project=${PROJECT_SOCKET_PROXY}" --format '{{.ID}}' 2>/dev/null | grep -q .; then return 0; fi
+    if docker ps -a --filter "label=com.docker.compose.project=${PROJECT_TRAEFIK}" --format '{{.ID}}' 2>/dev/null | grep -q .; then return 0; fi
+    if docker ps -a --filter "label=com.docker.compose.project=${PROJECT_CF_DDNS}" --format '{{.ID}}' 2>/dev/null | grep -q .; then return 0; fi
+    if docker ps -a --filter "label=com.docker.compose.project=${PROJECT_CF_COMPANION}" --format '{{.ID}}' 2>/dev/null | grep -q .; then return 0; fi
+    return 1
+}
+
+function refresh_setup_mode() {
+    PORT_OWNERSHIP="available/platform"
+    if [ "${SCRIPT61_PORT_80:-unknown}" = "blocked" ] || [ "${SCRIPT61_PORT_443:-unknown}" = "blocked" ]; then
+        PORT_OWNERSHIP="blocked"
+    elif [ "${SCRIPT61_PORT_80:-unknown}" = "platform-owned" ] || [ "${SCRIPT61_PORT_443:-unknown}" = "platform-owned" ]; then
+        PORT_OWNERSHIP="platform-owned"
+    fi
+
+    SETUP_MODE="fresh install"
+    EXISTING_PLATFORM="not detected"
+    if platform_marker_completed || platform_core_container_exists || [ "$PORT_OWNERSHIP" = "platform-owned" ]; then
+        SETUP_MODE="rerun/update"
+        EXISTING_PLATFORM="detected"
+    fi
+}
+
 function validate_preflight_runtime() {
     local failure="no" blocker=""
     section "RUNTIME PREFLIGHT"
@@ -455,6 +492,8 @@ function validate_preflight_runtime() {
         [ -n "$blocker" ] && echo -e "  ${YW}owner: ${blocker}${CL}"
         failure="yes"
     fi
+
+    refresh_setup_mode
 
     [ "$failure" = "no" ] || msg_error "Runtime preflight failed. Fix the checks above, then rerun Script 6.1."
     msg_ok "RUNTIME PREFLIGHT PASSED"
@@ -593,6 +632,18 @@ function show_setup_plan_and_confirm() {
     local apply_yn=""
     section "SETUP PLAN"
     echo -e "${YW}Script 6.1 will deploy only platform core services after confirmation.${CL}"
+    echo ""
+    echo -e "${YW}Setup mode:${CL}"
+    aligned_status_line "Mode" "$SETUP_MODE" "$(status_color_for_value "$SETUP_MODE")" 18
+    aligned_status_line "Existing platform" "$EXISTING_PLATFORM" "$(status_color_for_value "$EXISTING_PLATFORM")" 18
+    aligned_status_line "Port ownership" "$PORT_OWNERSHIP" "$(status_color_for_value "$PORT_OWNERSHIP")" 18
+    aligned_status_line "ACME storage" "$([ "$SETUP_MODE" = "rerun/update" ] && echo preserve || echo "preserve/create as needed")" "$GN" 18
+    if [ "$SETUP_MODE" = "rerun/update" ]; then
+        echo ""
+        echo -e "${YW}Existing platform core deployment detected.${CL}"
+        echo -e "${YW}This rerun will refresh compose files, verify/reuse Docker networks, and update existing platform containers.${CL}"
+        echo -e "${YW}Traefik ACME storage will be preserved.${CL}"
+    fi
     echo ""
     echo -e "${YW}Apply changes:${CL}"
     aligned_status_line "Compose files" "install into compose dir" "$GN" 24
@@ -771,6 +822,9 @@ function create_verification_report() {
         echo "Compose dir: ${COMPOSE_DIR}"
         echo "Secrets dir: ${SECRETS_DIR}"
         echo "Domain: ${DOMAIN_VALUE}"
+        echo "Setup Mode: ${SETUP_MODE}"
+        echo "Existing Platform: ${EXISTING_PLATFORM}"
+        echo "Port Ownership: ${PORT_OWNERSHIP}"
         echo "VERIFY_STATUS=${VERIFY_STATUS}"
         echo "VERIFY_PASS_COUNT=${VERIFY_PASS_COUNT}"
         echo "VERIFY_WARN_COUNT=${VERIFY_WARN_COUNT}"
@@ -838,6 +892,8 @@ function create_verification_and_marker() {
 function show_final_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
     echo -e "${YW}Platform core:${CL}"
+    final_line "Setup mode" "$SETUP_MODE" "$(status_color_for_value "$SETUP_MODE")"
+    final_line "Existing platform" "$EXISTING_PLATFORM" "$(status_color_for_value "$EXISTING_PLATFORM")"
     final_line "Socket proxy" "$SCRIPT61_SOCKET_PROXY" "$(status_color_for_value "$SCRIPT61_SOCKET_PROXY")"
     final_line "Traefik" "$SCRIPT61_TRAEFIK" "$(status_color_for_value "$SCRIPT61_TRAEFIK")"
     final_line "CF DDNS" "$SCRIPT61_CF_DDNS" "$(status_color_for_value "$SCRIPT61_CF_DDNS")"
