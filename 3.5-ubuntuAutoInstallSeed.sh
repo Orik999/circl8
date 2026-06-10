@@ -28,9 +28,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.2.26"
-SCRIPT_UPDATED="2026-06-07"
-SCRIPT_BUILD="setup-plan-iso-dedupe"
+SCRIPT_VERSION="v1.2.27"
+SCRIPT_UPDATED="2026-06-09"
+SCRIPT_BUILD="vm-swap-selection"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -49,6 +49,15 @@ DEFAULT_ISO_NAME="ubuntu-26.04-live-server-amd64.iso"
 
 DEFAULT_INSTALL_WAIT_MINUTES="30"
 INSTALL_WAIT_MINUTES="30"
+
+DEFAULT_VM_SWAP_MODE="disk"
+DEFAULT_VM_SWAP_SIZE_GB="4"
+DEFAULT_VM_ZRAM_SIZE_GB="2"
+
+VM_SWAP_MODE="disk"
+VM_SWAP_SIZE_GB="4"
+VM_ZRAM_SIZE_GB="0"
+VM_SWAP_STATUS="unknown"
 
 POST_INSTALL_START_VM="y"
 DELETE_GENERATED_ISO_AFTER_INSTALL="y"
@@ -880,6 +889,10 @@ SCRIPT35_VM_USERNAME=$(marker_kv_quote "$TARGET_USERNAME")
 SCRIPT35_VM_NETWORK_MODE=$(marker_kv_quote "$NETWORK_MODE")
 SCRIPT35_VM_ASSIGNED_IPV4=$(marker_kv_quote "$assigned_ipv4")
 SCRIPT35_VM_MAC=$(marker_kv_quote "$TARGET_VM_MAC")
+SCRIPT35_VM_SWAP_MODE=$(marker_kv_quote "$VM_SWAP_MODE")
+SCRIPT35_VM_SWAP_SIZE_GB=$(marker_kv_quote "$VM_SWAP_SIZE_GB")
+SCRIPT35_VM_ZRAM_SIZE_GB=$(marker_kv_quote "$VM_ZRAM_SIZE_GB")
+SCRIPT35_VM_SWAP_STATUS=$(marker_kv_quote "$VM_SWAP_STATUS")
 PROXMOX_HOSTNAME=$(marker_kv_quote "$PROXMOX_HOSTNAME")
 PROXMOX_FQDN=$(marker_kv_quote "$PROXMOX_FQDN")
 PROXMOX_DOMAIN=$(marker_kv_quote "$PROXMOX_DOMAIN")
@@ -1118,6 +1131,39 @@ display_iso_ref() {
     printf '%s' "$value"
 }
 
+swap_mode_display() {
+    case "${VM_SWAP_MODE:-none}" in
+        none) echo "none" ;;
+        disk) echo "disk" ;;
+        zram) echo "zram" ;;
+        disk+zram) echo "disk+zram" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+disk_swap_display() {
+    if [[ "${VM_SWAP_MODE:-none}" == "disk" || "${VM_SWAP_MODE:-none}" == "disk+zram" ]]; then
+        echo "${VM_SWAP_SIZE_GB:-0} GB"
+    else
+        echo "disabled"
+    fi
+}
+
+zram_swap_display() {
+    if [[ "${VM_SWAP_MODE:-none}" == "zram" || "${VM_SWAP_MODE:-none}" == "disk+zram" ]]; then
+        echo "${VM_ZRAM_SIZE_GB:-0} GB"
+    else
+        echo "disabled"
+    fi
+}
+
+swap_summary() {
+    group_heading "Swap"
+    group_answer_line "Mode" "$(swap_mode_display)"
+    group_answer_line "Disk swap" "$(disk_swap_display)"
+    group_answer_line "zram" "$(zram_swap_display)"
+}
+
 # Extracts the first IPv4 from possibly polluted multiline text.
 extract_first_ipv4() {
     printf '%s
@@ -1173,6 +1219,7 @@ show_previous_marker_summary() {
     local assigned_ipv4="" ssh_command="" raw_ssh=""
     local generated_deleted="" installed_started="" tools_cleanup_enabled=""
     local tools_cleanup_done="" temp_cleanup=""
+    local vm_swap_mode="" vm_disk_swap_size="" vm_zram_size="" vm_swap_status=""
 
     completed="$(marker_value_or_default "Ubuntu Auto Install completed on" "$marker" "unknown")"
     vmid="$(marker_value_or_default "VMID" "$marker" "unknown")"
@@ -1195,6 +1242,10 @@ show_previous_marker_summary() {
     tools_cleanup_enabled="$(marker_yn_value_or_unknown "ISO Generation Tools Cleanup Enabled" "$marker")"
     tools_cleanup_done="$(marker_yn_value_or_unknown "ISO Generation Tools Cleanup Done" "$marker")"
     temp_cleanup="$(marker_yn_value_or_unknown "Temporary Workspace Cleanup Done" "$marker")"
+    vm_swap_mode="$(marker_value_or_default "VM Swap Mode" "$marker" "unknown")"
+    vm_disk_swap_size="$(marker_value_or_default "VM Disk Swap Size" "$marker" "unknown")"
+    vm_zram_size="$(marker_value_or_default "VM zram Size" "$marker" "unknown")"
+    vm_swap_status="$(marker_value_or_default "VM Swap Status" "$marker" "unknown")"
 
     echo -e "${YW}Marker:${CL}"
     previous_marker_line "path" "$marker"
@@ -1212,6 +1263,13 @@ show_previous_marker_summary() {
     echo -e "${YW}Install:${CL}"
     previous_marker_line "Installed VM started" "$installed_started"
     previous_marker_line "Generated ISO deleted" "$generated_deleted"
+    echo ""
+
+    echo -e "${YW}Swap:${CL}"
+    previous_marker_line "Mode" "$vm_swap_mode"
+    previous_marker_line "Disk swap" "$vm_disk_swap_size"
+    previous_marker_line "zram" "$vm_zram_size"
+    previous_marker_line "Status" "$vm_swap_status"
     echo ""
 
     echo -e "${YW}Cleanup:${CL}"
@@ -1497,6 +1555,45 @@ if command -v ip >/dev/null 2>&1 && ip -4 addr show | grep -q "inet "; then PASS
 if apt-get check >/dev/null 2>&1; then PASS "APT database healthy"; else WARN "APT database check failed"; fi
 
 echo ""
+echo "Swap:"
+echo "Expected mode: ${VM_SWAP_MODE}"
+echo "Expected disk swap: $(disk_swap_display)"
+echo "Expected zram: $(zram_swap_display)"
+swapon --show 2>/dev/null || true
+case "${VM_SWAP_MODE}" in
+    none)
+        PASS "Swap not required by selected mode"
+        ;;
+    disk)
+        if swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab; then
+            PASS "Disk swapfile active and persistent"
+        else
+            FAIL "Disk swapfile is not active or missing fstab entry"
+        fi
+        ;;
+    zram)
+        if swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+"; then
+            PASS "zram swap active"
+        else
+            FAIL "zram swap is not active"
+        fi
+        ;;
+    disk+zram)
+        disk_ok="no"
+        zram_ok="no"
+        swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab && disk_ok="yes"
+        swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+" && zram_ok="yes"
+        if [ "\$disk_ok" = "yes" ] && [ "\$zram_ok" = "yes" ]; then
+            PASS "Disk swapfile and zram swap active"
+        elif [ "\$disk_ok" = "yes" ] || [ "\$zram_ok" = "yes" ]; then
+            WARN "Only part of disk+zram swap is active"
+        else
+            FAIL "Neither disk swapfile nor zram swap is active"
+        fi
+        ;;
+esac
+
+echo ""
 echo "Network:"
 ip -br addr 2>/dev/null || true
 echo ""
@@ -1513,7 +1610,30 @@ EOF
     base64 -w0 "$verifier_file"
 }
 
-# --- 31. AUTOINSTALL DIRECT CONFIG WRITER ---
+# --- 31. AUTOINSTALL SWAP LATE-COMMAND BUILDER ---
+build_swap_late_commands() {
+    local disk_mb=$(( VM_SWAP_SIZE_GB * 1024 ))
+    local zram_mb=$(( VM_ZRAM_SIZE_GB * 1024 ))
+
+    case "${VM_SWAP_MODE:-none}" in
+        disk|disk+zram)
+            cat <<EOF
+  - curtin in-target --target=/target -- bash -c 'set -e; rm -f /swapfile; if ! fallocate -l ${VM_SWAP_SIZE_GB}G /swapfile; then dd if=/dev/zero of=/swapfile bs=1M count=${disk_mb} status=none; fi; chmod 600 /swapfile; mkswap /swapfile; grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab; swapon /swapfile || true'
+EOF
+            ;;
+    esac
+
+    case "${VM_SWAP_MODE:-none}" in
+        zram|disk+zram)
+            cat <<EOF
+  - curtin in-target --target=/target -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-zram-generator || true'
+  - curtin in-target --target=/target -- bash -c 'printf "%s\n" "[zram0]" "zram-size = ${zram_mb}M" "compression-algorithm = zstd" "swap-priority = 100" > /etc/systemd/zram-generator.conf'
+EOF
+            ;;
+    esac
+}
+
+# --- 31A. AUTOINSTALL DIRECT CONFIG WRITER ---
 write_direct_autoinstall_yaml() {
     local file="$1"
 
@@ -1550,6 +1670,7 @@ late-commands:
   - curtin in-target --target=/target -- chmod 0440 /etc/sudoers.d/90-${TARGET_USERNAME}-nopasswd
   - curtin in-target --target=/target -- apt-get update
   - curtin in-target --target=/target -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent curl ca-certificates'
+$(build_swap_late_commands)
   - curtin in-target --target=/target -- systemctl enable qemu-guest-agent
   - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/" /etc/ssh/sshd_config'
   - curtin in-target --target=/target -- bash -c 'grep -q "^PasswordAuthentication" /etc/ssh/sshd_config || echo "PasswordAuthentication no" >> /etc/ssh/sshd_config'
@@ -2229,7 +2350,51 @@ collect_post_install_options() {
     clear_terminal_lines 3
 }
 
-# --- 45. UBUNTU ISO SELECTION ---
+# --- 45. VM SWAP OPTIONS ---
+collect_swap_options() {
+    local swap_choice=""
+
+    section "SWAP"
+    echo -e "${YW}Swap protects the Ubuntu guest from guest-side OOM kills.${CL}"
+    echo -e "${YW}Recommended for this Circl8 VM: disk swapfile, 4 GB.${CL}"
+
+    swap_choice="$(timed_menu_select "Swap" "2" \
+        "none" \
+        "disk swapfile, recommended 4 GB" \
+        "zram, recommended 2 GB" \
+        "disk swapfile + zram, advanced")"
+
+    case "$swap_choice" in
+        "none")
+            VM_SWAP_MODE="none"
+            VM_SWAP_SIZE_GB="0"
+            VM_ZRAM_SIZE_GB="0"
+            VM_SWAP_STATUS="disabled"
+            ;;
+        "disk swapfile, recommended 4 GB")
+            VM_SWAP_MODE="disk"
+            VM_SWAP_SIZE_GB="$(timed_number_input_quiet "Enter disk swapfile size in GB" "$DEFAULT_VM_SWAP_SIZE_GB" "1" "32")"
+            VM_ZRAM_SIZE_GB="0"
+            VM_SWAP_STATUS="unknown"
+            ;;
+        "zram, recommended 2 GB")
+            VM_SWAP_MODE="zram"
+            VM_SWAP_SIZE_GB="0"
+            VM_ZRAM_SIZE_GB="$(timed_number_input_quiet "Enter zram size in GB" "$DEFAULT_VM_ZRAM_SIZE_GB" "1" "8")"
+            VM_SWAP_STATUS="unknown"
+            ;;
+        *)
+            VM_SWAP_MODE="disk+zram"
+            VM_SWAP_SIZE_GB="$(timed_number_input_quiet "Enter disk swapfile size in GB" "$DEFAULT_VM_SWAP_SIZE_GB" "1" "32")"
+            VM_ZRAM_SIZE_GB="$(timed_number_input_quiet "Enter zram size in GB" "$DEFAULT_VM_ZRAM_SIZE_GB" "1" "8")"
+            VM_SWAP_STATUS="unknown"
+            ;;
+    esac
+
+    swap_summary
+}
+
+# --- 46. UBUNTU ISO SELECTION ---
 select_ubuntu_iso() {
     local default_iso_index="1"
     local iso_base=""
@@ -2550,6 +2715,8 @@ show_apply_summary() {
     group_answer_line "Network" "$NETWORK_MODE"
     echo ""
 
+    swap_summary
+    echo ""
 
     group_heading "Proxmox identity"
     group_status_line "Hostname" "$(proxmox_identity_value_or_not_detected "$PROXMOX_HOSTNAME")"
@@ -2651,7 +2818,84 @@ start_installed_vm_and_detect_ip() {
     fi
 }
 
-# --- 61. WRITE COMPLETION MARKER ---
+# --- 61. VM SWAP SSH VERIFICATION ---
+verify_vm_swap_via_ssh() {
+    local swap_result=""
+
+    if [ "${VM_SWAP_MODE:-none}" == "none" ]; then
+        VM_SWAP_STATUS="disabled"
+        return 0
+    fi
+
+    if [ -z "${ASSIGNED_IPV4:-}" ]; then
+        VM_SWAP_STATUS="unknown"
+        msg_warn "VM swap verification skipped; no assigned IPv4 detected."
+        return 0
+    fi
+
+    if ! wait_for_vm_ssh_ready; then
+        VM_SWAP_STATUS="unknown"
+        msg_warn "VM swap verification skipped; SSH not ready."
+        return 0
+    fi
+
+    msg_info "Verifying VM swap over SSH"
+
+    swap_result="$(ssh \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile=/root/.ssh/known_hosts \
+        "${TARGET_USERNAME}@${ASSIGNED_IPV4}" \
+        "sudo -n bash -s" <<EOF 2>/dev/null || true
+mode="${VM_SWAP_MODE}"
+disk_ok="no"
+zram_ok="no"
+
+if swapon --noheadings --show=NAME 2>/dev/null | grep -qx "/swapfile" && grep -qE "^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]+sw[[:space:]]+0[[:space:]]+0" /etc/fstab; then
+    disk_ok="yes"
+fi
+
+if swapon --noheadings --show=NAME 2>/dev/null | grep -Eq "/dev/zram[0-9]+"; then
+    zram_ok="yes"
+fi
+
+case "\$mode" in
+    disk)
+        [ "\$disk_ok" = "yes" ] && echo enabled || echo failed
+        ;;
+    zram)
+        [ "\$zram_ok" = "yes" ] && echo enabled || echo failed
+        ;;
+    disk+zram)
+        if [ "\$disk_ok" = "yes" ] && [ "\$zram_ok" = "yes" ]; then
+            echo enabled
+        elif [ "\$disk_ok" = "yes" ] || [ "\$zram_ok" = "yes" ]; then
+            echo partial
+        else
+            echo failed
+        fi
+        ;;
+    *)
+        echo unknown
+        ;;
+esac
+EOF
+)"
+
+    case "$swap_result" in
+        enabled|partial|failed|unknown) VM_SWAP_STATUS="$swap_result" ;;
+        *) VM_SWAP_STATUS="unknown" ;;
+    esac
+
+    if [ "$VM_SWAP_STATUS" == "enabled" ]; then
+        msg_ok "VM swap verified: ${VM_SWAP_STATUS}."
+    else
+        msg_warn "VM swap verification status: ${VM_SWAP_STATUS}."
+    fi
+}
+
+# --- 62. WRITE COMPLETION MARKER ---
 write_completion_marker() {
     cat > "$COMPLETED_MARKER" <<EOF
 Ubuntu Auto Install completed on: $(date)
@@ -2674,6 +2918,10 @@ Boot Order: scsi0
 Generated ISO Deleted: $(yn_word "$DELETE_GENERATED_ISO_AFTER_INSTALL")
 Installed VM Started: $(yn_word "$POST_INSTALL_START_VM")
 Use DHCP: $( [ "$NETWORK_MODE" == "dhcp" ] && echo yes || echo no )
+VM Swap Mode: $VM_SWAP_MODE
+VM Disk Swap Size: ${VM_SWAP_SIZE_GB} GB
+VM zram Size: ${VM_ZRAM_SIZE_GB} GB
+VM Swap Status: $VM_SWAP_STATUS
 Attach Generated ISO And Start VM: $(yn_word "$ATTACH_START_APPROVED")
 Start Installed VM After Cleanup: $(yn_word "$POST_INSTALL_START_VM")
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
@@ -2691,6 +2939,10 @@ SCRIPT35_VM_USERNAME="$TARGET_USERNAME"
 SCRIPT35_VM_NETWORK_MODE="$NETWORK_MODE"
 SCRIPT35_VM_ASSIGNED_IPV4="${ASSIGNED_IPV4:-not-detected}"
 SCRIPT35_VM_MAC="$TARGET_VM_MAC"
+SCRIPT35_VM_SWAP_MODE="$VM_SWAP_MODE"
+SCRIPT35_VM_SWAP_SIZE_GB="$VM_SWAP_SIZE_GB"
+SCRIPT35_VM_ZRAM_SIZE_GB="$VM_ZRAM_SIZE_GB"
+SCRIPT35_VM_SWAP_STATUS="$VM_SWAP_STATUS"
 PROXMOX_HOSTNAME="${PROXMOX_HOSTNAME}"
 PROXMOX_FQDN="${PROXMOX_FQDN}"
 PROXMOX_DOMAIN="${PROXMOX_DOMAIN}"
@@ -2723,6 +2975,10 @@ SSH Command: ${SSH_COMMAND:-not-generated}
 VM Side Marker: $VM_SIDE_MARKER_PATH
 VM Side Marker Updated: $VM_SIDE_MARKER_UPDATE_STATUS
 VM Marker Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
+VM Swap Mode: ${VM_SWAP_MODE}
+VM Disk Swap Size GB: ${VM_SWAP_SIZE_GB}
+VM zram Size GB: ${VM_ZRAM_SIZE_GB}
+VM Swap Status: ${VM_SWAP_STATUS}
 Proxmox Hostname: ${PROXMOX_HOSTNAME:-not-detected}
 Proxmox FQDN: ${PROXMOX_FQDN:-not-detected}
 Proxmox Domain: ${PROXMOX_DOMAIN:-not-detected}
@@ -2756,6 +3012,15 @@ EOF
         else
             WARN "Installed VM start skipped by user"
         fi
+
+        case "${VM_SWAP_MODE}" in
+            none)
+                if [ "$VM_SWAP_STATUS" == "disabled" ]; then PASS "VM swap disabled as selected"; else WARN "VM swap status: ${VM_SWAP_STATUS}"; fi
+                ;;
+            disk|zram|disk+zram)
+                if [ "$VM_SWAP_STATUS" == "enabled" ]; then PASS "VM swap verified enabled (${VM_SWAP_MODE})"; elif [ "$VM_SWAP_STATUS" == "partial" ]; then WARN "VM swap partially enabled (${VM_SWAP_MODE})"; else WARN "VM swap not verified enabled (${VM_SWAP_MODE}: ${VM_SWAP_STATUS})"; fi
+                ;;
+        esac
 
         if [ -f "$COMPLETED_MARKER" ]; then PASS "Completion marker exists"; else WARN "Completion marker missing at verification time"; fi
         if [ "$VM_SIDE_MARKER_UPDATE_STATUS" == "yes" ]; then PASS "VM-side marker assigned IPv4 updated: ${ASSIGNED_IPV4}"; else WARN "VM-side marker assigned IPv4 update status: ${VM_SIDE_MARKER_UPDATE_STATUS}"; fi
@@ -2821,6 +3086,10 @@ show_final_output() {
     status_line "VM powered off" "$(yn_word "$INSTALL_POWERED_OFF")" "$GN" 18
     status_line "Installed VM" "$installed_vm_status" "$GN" 18
     status_line "QEMU agent IP" "$qemu_agent_ip" "$GN" 18
+    status_line "Swap mode" "$(swap_mode_display)" "$GN" 18
+    status_line "Disk swap" "$(disk_swap_display)" "$GN" 18
+    status_line "zram" "$(zram_swap_display)" "$GN" 18
+    status_line "Swap status" "${VM_SWAP_STATUS:-unknown}" "$GN" 18
     if [ -n "${INSTALL_DURATION_TEXT:-}" ]; then
         status_line "Duration" "$INSTALL_DURATION_TEXT" "$GN" 18
     fi
@@ -2888,6 +3157,10 @@ setup_ui_demo_sample_data() {
     TARGET_KEYBOARD_LAYOUT="gb"
     TARGET_KEYBOARD_VARIANT=""
     NETWORK_MODE="dhcp"
+    VM_SWAP_MODE="disk"
+    VM_SWAP_SIZE_GB="4"
+    VM_ZRAM_SIZE_GB="0"
+    VM_SWAP_STATUS="enabled"
     INSTALL_ISO_REF="local:iso/ubuntu-26.04-live-server-amd64.iso"
     AUTOINSTALL_ISO_REF="local:iso/ubuntu-26.04-autoinstall-vm108.iso"
     GENERATED_ISO_ACTION="create"
@@ -3008,6 +3281,12 @@ demo_ready_to_apply() {
     echo -e "  mode: ${GN}${NETWORK_MODE}${CL}"
     echo ""
 
+    echo -e "${YW}SWAP:${CL}"
+    echo -e "  mode: ${GN}$(swap_mode_display)${CL}"
+    echo -e "  disk swap: ${GN}$(disk_swap_display)${CL}"
+    echo -e "  zram: ${GN}$(zram_swap_display)${CL}"
+    echo ""
+
     echo -e "${YW}ISO:${CL}"
     echo -e "  source: ${GN}$(display_iso_ref "$INSTALL_ISO_REF")${CL}"
     echo -e "  generated: ${GN}$(display_iso_ref "$AUTOINSTALL_ISO_REF")${CL}"
@@ -3113,6 +3392,7 @@ main() {
     collect_user_locale_inputs
     detect_ssh_keys
     collect_post_install_options
+    collect_swap_options
     select_ubuntu_iso
     show_ubuntu_pro_note
 
@@ -3142,6 +3422,7 @@ main() {
     attach_iso_and_start_install
     post_install_cleanup
     start_installed_vm_and_detect_ip
+    verify_vm_swap_via_ssh
     update_vm_side_marker_assigned_ipv4
     write_completion_marker
     create_host_verification_report
