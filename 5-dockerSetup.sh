@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="5-dockerSetup.sh"
-SCRIPT_VERSION="v1.2.8"
-SCRIPT_UPDATED="2026-06-09"
-SCRIPT_BUILD="crowdsec-runtime-verify-polish"
+SCRIPT_VERSION="v1.2.9"
+SCRIPT_UPDATED="2026-06-10"
+SCRIPT_BUILD="preserve-ubuntu-swap-default"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log paths, user choices, environment state and final status values.
@@ -54,6 +54,7 @@ VERIFY_FIRST_ISSUE_REASON=""
 VERIFY_FIRST_ISSUE_FIX=""
 COMPLETED_MARKER="/root/.docker-setup-completed"
 SCRIPT4_MARKER="/root/.ubuntu-vm-setup-completed"
+SCRIPT35_MARKER="/root/.ubuntu-autoinstall-seed-completed"
 
 DEFAULT_TARGET_USER=""
 TARGET_USER=""
@@ -85,7 +86,8 @@ DOCKER_MARKER_FOUND="no"
 DOCKER_SERVICE_ACTIVE="no"
 CONTAINERD_SERVICE_ACTIVE="no"
 
-DISABLE_SWAP="y"
+PRESERVE_UBUNTU_SWAP="y"
+DISABLE_SWAP="n"
 INSTALL_DOCKER_GC="y"
 CONFIGURE_UFW="y"
 DOCKER_FIREWALL_MODE="docker-iptables-enabled"
@@ -99,6 +101,15 @@ USER_ADDED_TO_DOCKER="no"
 DAEMON_CONFIG_VALID="no"
 UFW_ENABLED="no"
 SWAP_DISABLED="no"
+SCRIPT35_VM_SWAP_STATUS="unknown"
+SCRIPT35_VM_SWAP_FILE="unknown"
+SCRIPT35_VM_SWAP_SIZE="unknown"
+SCRIPT35_VM_SWAP_TYPE="unknown"
+SWAP_RESULT="unknown"
+SWAP_FILE="unknown"
+SWAP_SIZE="unknown"
+SWAP_ACTIVE_DETECTED="unknown"
+SWAP_FSTAB_DETECTED="unknown"
 DOCKER_GC_INSTALLED="no"
 DOCKER_GC_TIMER_INSTALLED="no"
 REDIS_OVERCOMMIT_CONFIGURED="no"
@@ -1076,15 +1087,18 @@ function detect_environment() {
 
     if [ "$IS_CONTAINER" == "yes" ]; then
         CONFIGURE_UFW="n"
+        PRESERVE_UBUNTU_SWAP="y"
         DISABLE_SWAP="n"
         msg_ok "ENVIRONMENT DETECTED (${VIRT_TYPE} container)"
     elif [ "$IS_VM" == "yes" ]; then
         CONFIGURE_UFW="y"
-        DISABLE_SWAP="y"
+        PRESERVE_UBUNTU_SWAP="y"
+        DISABLE_SWAP="n"
         msg_ok "ENVIRONMENT DETECTED (${VIRT_TYPE} VM)"
     else
         CONFIGURE_UFW="y"
-        DISABLE_SWAP="y"
+        PRESERVE_UBUNTU_SWAP="y"
+        DISABLE_SWAP="n"
         msg_warn "Environment is not clearly VM/LXC (${VIRT_TYPE}); continuing with VM-style defaults"
         IS_VM="yes"
     fi
@@ -1123,7 +1137,7 @@ function status_value_color() {
     local value="${1:-unknown}"
 
     case "$value" in
-        PASS|completed|active|running|yes|ready|installed|enabled|attached) echo "$GN" ;;
+        PASS|completed|active|running|yes|ready|installed|enabled|attached|preserved|disabled) echo "$GN" ;;
         PASS_WITH_WARNINGS|unknown|skipped|not-selected|not-found|not-run) echo "$YW" ;;
         FAIL|failed|no|inactive|installed-not-active|missing) echo "$RD" ;;
         *) echo "$GN" ;;
@@ -1155,6 +1169,110 @@ function script4_marker_value() {
 
     value="$(marker_key_value "$key" "$SCRIPT4_MARKER" 2>/dev/null || true)"
     printf '%s' "$value"
+}
+
+function script35_marker_value() {
+    local key="$1"
+    local value=""
+
+    value="$(marker_key_value "$key" "$SCRIPT35_MARKER" 2>/dev/null || true)"
+    printf '%s' "$value"
+}
+
+function format_swap_size_display() {
+    local raw="${1:-unknown}"
+
+    [ -n "$raw" ] || { printf 'unknown'; return 0; }
+
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        awk -v kib="$raw" 'BEGIN {
+            gb = kib / 1024 / 1024;
+            rounded = int(gb + 0.5);
+            if (rounded < 1 && gb > 0) rounded = 1;
+            if (gb > 0 && (gb - rounded < 0.08) && (rounded - gb < 0.08)) {
+                printf "%d GB", rounded;
+            } else if (gb >= 1) {
+                printf "%.1f GB", gb;
+            } else {
+                printf "%s KiB", kib;
+            }
+        }'
+        return 0
+    fi
+
+    printf '%s' "$raw"
+}
+
+function swap_value_or_unknown() {
+    local value="${1:-unknown}"
+
+    [ -n "$value" ] && printf '%s' "$value" || printf 'unknown'
+}
+
+function load_script35_swap_handoff() {
+    SCRIPT35_VM_SWAP_STATUS="$(script35_marker_value SCRIPT35_VM_SWAP_STATUS)"
+    SCRIPT35_VM_SWAP_FILE="$(script35_marker_value SCRIPT35_VM_SWAP_FILE)"
+    SCRIPT35_VM_SWAP_SIZE="$(script35_marker_value SCRIPT35_VM_SWAP_SIZE)"
+    SCRIPT35_VM_SWAP_TYPE="$(script35_marker_value SCRIPT35_VM_SWAP_TYPE)"
+
+    [ -n "$SCRIPT35_VM_SWAP_STATUS" ] || SCRIPT35_VM_SWAP_STATUS="unknown"
+    [ -n "$SCRIPT35_VM_SWAP_FILE" ] || SCRIPT35_VM_SWAP_FILE="unknown"
+    [ -n "$SCRIPT35_VM_SWAP_SIZE" ] || SCRIPT35_VM_SWAP_SIZE="unknown"
+    [ -n "$SCRIPT35_VM_SWAP_TYPE" ] || SCRIPT35_VM_SWAP_TYPE="unknown"
+}
+
+function current_swap_display() {
+    local file="${1:-unknown}"
+    local size="${2:-unknown}"
+
+    if [ "$file" != "unknown" ] && [ "$size" != "unknown" ]; then
+        printf '%s / %s' "$file" "$size"
+    elif [ "$file" != "unknown" ]; then
+        printf '%s / unknown' "$file"
+    else
+        printf 'unknown'
+    fi
+}
+
+function detect_current_swap_state() {
+    local active_line=""
+    local fstab_line=""
+    local file="unknown"
+    local type="unknown"
+    local size="unknown"
+
+    SWAP_ACTIVE_DETECTED="no"
+    SWAP_FSTAB_DETECTED="no"
+    SWAP_FILE="unknown"
+    SWAP_SIZE="unknown"
+
+    active_line="$(swapon --show --noheadings --raw --output=NAME,TYPE,SIZE 2>/dev/null | awk 'NF >= 3 {print; exit}' || true)"
+    if [ -n "$active_line" ]; then
+        set -- $active_line
+        file="$(swap_value_or_unknown "${1:-unknown}")"
+        type="$(swap_value_or_unknown "${2:-unknown}")"
+        size="$(format_swap_size_display "$(swap_value_or_unknown "${3:-unknown}")")"
+        SWAP_ACTIVE_DETECTED="yes"
+        SWAP_FILE="$file"
+        SWAP_SIZE="$size"
+    fi
+
+    fstab_line="$(grep -E '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab 2>/dev/null | head -n1 || true)"
+    if [ -n "$fstab_line" ]; then
+        SWAP_FSTAB_DETECTED="yes"
+        if [ "$SWAP_FILE" == "unknown" ]; then
+            set -- $fstab_line
+            SWAP_FILE="$(swap_value_or_unknown "${1:-unknown}")"
+        fi
+    fi
+
+    if [ "$SWAP_ACTIVE_DETECTED" == "yes" ] || [ "$SWAP_FSTAB_DETECTED" == "yes" ]; then
+        [ "$SWAP_SIZE" != "unknown" ] || SWAP_SIZE="$SCRIPT35_VM_SWAP_SIZE"
+        [ "$SWAP_SIZE" != "" ] || SWAP_SIZE="unknown"
+        return 0
+    fi
+
+    return 1
 }
 
 function valid_existing_non_root_user() {
@@ -1194,6 +1312,8 @@ function detect_target_user_fallback() {
 
 function load_script4_handoff() {
     local candidate=""
+
+    load_script35_swap_handoff
 
     SCRIPT4_STATUS="$(script4_marker_value SCRIPT4_STATUS)"
     SCRIPT4_VERSION="$(script4_marker_value SCRIPT4_VERSION)"
@@ -1282,6 +1402,11 @@ function show_script4_handoff_summary() {
     handoff_line "Ubuntu Pro  " "$SCRIPT4_UBUNTU_PRO_DISPLAY"
     handoff_line "CrowdSec    " "$crowdsec_status"
     handoff_line "Bouncer     " "$bouncer_status"
+    echo ""
+    echo -e "${YW}Script 3.5 swap:${CL}"
+    handoff_line "Ubuntu swap " "$SCRIPT35_VM_SWAP_STATUS"
+    handoff_line "Swap file   " "$SCRIPT35_VM_SWAP_FILE"
+    handoff_line "Swap size   " "$SCRIPT35_VM_SWAP_SIZE"
 }
 
 function validate_script4_handoff() {
@@ -1343,6 +1468,8 @@ function show_previous_marker_compact_summary() {
     echo -e "  ${BL}containerd service:${CL} ${GN}$(marker_display_value "containerd service enabled" "$marker_file")${CL}"
     echo -e "  ${BL}User in docker group:${CL} ${GN}$(marker_display_value "User added to docker group" "$marker_file")${CL}"
     echo -e "  ${BL}Docker GC timer:${CL} ${GN}$(marker_display_value "Docker GC timer" "$marker_file")${CL}"
+    echo -e "  ${BL}Ubuntu swap:${CL} ${GN}$(marker_display_value "Ubuntu swap result" "$marker_file")${CL}"
+    echo -e "  ${BL}Swap file:${CL} ${GN}$(marker_display_value "Ubuntu swap file" "$marker_file")${CL}"
     echo -e "  ${BL}Redis overcommit:${CL} ${GN}$(marker_display_value "Redis overcommit configured" "$marker_file")${CL}"
     echo -e "  ${BL}UFW firewall:${CL} ${GN}$(marker_display_value "UFW result" "$marker_file")${CL}"
     echo -e "  ${BL}Verify log:${CL} ${GN}$(marker_display_value "Verify log" "$marker_file")${CL}"
@@ -1521,15 +1648,13 @@ function collect_user_options() {
         msg_error "Target user ${TARGET_USER:-unknown} from Script 4 handoff is not a valid existing local user."
     fi
 
-    if [ "$IS_CONTAINER" == "yes" ]; then
-        swap_yn="$(timed_yes_no "Disable swap in /etc/fstab? LXC default is no" "n")"
-    else
-        swap_yn="$(timed_yes_no "Disable swap in /etc/fstab?" "y")"
-    fi
+    swap_yn="$(timed_yes_no "Preserve existing Ubuntu swap?" "y")"
     if [[ "$swap_yn" =~ ^[Nn] ]]; then
-        DISABLE_SWAP="n"
-    else
+        PRESERVE_UBUNTU_SWAP="n"
         DISABLE_SWAP="y"
+    else
+        PRESERVE_UBUNTU_SWAP="y"
+        DISABLE_SWAP="n"
     fi
 
     if [ "$IS_CONTAINER" == "yes" ]; then
@@ -1591,7 +1716,8 @@ function show_ready_to_apply() {
     plan_line "Docker firewall mode" "$DOCKER_FIREWALL_MODE" "$GN"
     echo ""
     echo -e "${YW}System:${CL}"
-    plan_line "Disable swap" "$(yes_no_label "$DISABLE_SWAP")" "$ANS"
+    plan_line "Ubuntu swap" "$([ "$PRESERVE_UBUNTU_SWAP" == "y" ] && echo preserve || echo disable)" "$ANS"
+    plan_line "Swap detected" "$(current_swap_display "$SCRIPT35_VM_SWAP_FILE" "$SCRIPT35_VM_SWAP_SIZE")" "$(status_value_color "$SCRIPT35_VM_SWAP_STATUS")"
     plan_line "Configure UFW" "$(yes_no_label "$CONFIGURE_UFW")" "$ANS"
     plan_line "Redis overcommit" "yes" "$GN"
     plan_line "Docker cleanup" "$(yes_no_label "$INSTALL_DOCKER_GC")" "$ANS"
@@ -1621,11 +1747,24 @@ function show_ready_to_apply() {
 function handle_swap() {
     apply_group_header "System"
 
-    if [ "$DISABLE_SWAP" != "y" ]; then
+    if [ "$PRESERVE_UBUNTU_SWAP" == "y" ]; then
+        DISABLE_SWAP="n"
         SWAP_DISABLED="no"
-        msg_skip "SWAP WAS NOT DISABLED BECAUSE USER CHOSE NO"
+
+        if detect_current_swap_state; then
+            SWAP_RESULT="preserved"
+            msg_ok "UBUNTU SWAP PRESERVED ($(current_swap_display "$SWAP_FILE" "$SWAP_SIZE"))"
+        else
+            SWAP_RESULT="not-found"
+            SWAP_FILE="unknown"
+            SWAP_SIZE="unknown"
+            msg_warn "Ubuntu swap was selected for preservation but no active/persistent swap was detected"
+        fi
+
         return 0
     fi
+
+    DISABLE_SWAP="y"
 
     if [ "$IS_CONTAINER" == "yes" ]; then
         msg_warn "Swap handling inside LXC/container may be controlled by the Proxmox host"
@@ -1644,8 +1783,11 @@ function handle_swap() {
     msg_ok "FSTAB SWAP ENTRIES DISABLED"
 
     SWAP_DISABLED="yes"
+    SWAP_RESULT="disabled"
+    SWAP_FILE="disabled"
+    SWAP_SIZE="disabled"
 
-    msg_ok "SWAP DISABLED"
+    msg_ok "UBUNTU SWAP DISABLED"
 }
 
 # --- 35. DOCKER REPOSITORY DEPENDENCIES ---
@@ -2202,10 +2344,20 @@ function create_verification_report() {
     if getent group docker >/dev/null 2>&1; then verify_pass "docker group exists"; else verify_fail "docker group exists" "docker group missing" "run sudo groupadd docker"; fi
     if id -nG "$TARGET_USER" 2>/dev/null | grep -qw docker; then verify_pass "target user is in docker group"; else verify_warn "target user docker group" "membership not confirmed" "run sudo usermod -aG docker ${TARGET_USER}, then re-login"; fi
 
-    if [ "$DISABLE_SWAP" == "y" ]; then
+    detect_current_swap_state || true
+    if [ "$PRESERVE_UBUNTU_SWAP" == "y" ]; then
+        if [ "$SWAP_ACTIVE_DETECTED" == "yes" ] || [ "$SWAP_FSTAB_DETECTED" == "yes" ]; then
+            verify_pass "Ubuntu swap preserved: $(current_swap_display "$SWAP_FILE" "$SWAP_SIZE")"
+        elif [ "$SCRIPT35_VM_SWAP_STATUS" == "detected" ]; then
+            verify_warn "Ubuntu swap preserved" "Script 3.5 detected swap but current swap is missing" "review swapon --show and /etc/fstab"
+        else
+            verify_info "Ubuntu swap preservation selected; no Script 3.5 swap marker/current swap detected"
+        fi
+    elif [ "$DISABLE_SWAP" == "y" ]; then
         if swapon --show 2>/dev/null | grep -q .; then verify_warn "no active swap detected" "active swap still detected" "review /etc/fstab and run sudo swapoff -a"; else verify_pass "no active swap detected"; fi
+        if grep -E '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab >/dev/null 2>&1; then verify_warn "no persistent swap entry" "uncommented swap entry still exists in /etc/fstab" "review /etc/fstab"; else verify_pass "no persistent swap entry"; fi
     else
-        verify_info "swap disable not selected"
+        verify_info "swap handling not selected"
     fi
 
     if [ "$CONFIGURE_UFW" == "y" ]; then
@@ -2318,6 +2470,10 @@ Virt Type: $VIRT_TYPE
 Container: $IS_CONTAINER
 LXC: $IS_LXC
 VM: $IS_VM
+Ubuntu swap preserve selected: $([ "$PRESERVE_UBUNTU_SWAP" == "y" ] && echo yes || echo no)
+Ubuntu swap result: $SWAP_RESULT
+Ubuntu swap file: $SWAP_FILE
+Ubuntu swap size: $SWAP_SIZE
 Swap disabled selected: $DISABLE_SWAP
 Swap disabled result: $SWAP_DISABLED
 Docker installed: $DOCKER_INSTALLED
@@ -2354,6 +2510,10 @@ SCRIPT5_SCRIPT4_VERIFY_STATUS=$SCRIPT4_VERIFY_STATUS
 SCRIPT5_SCRIPT4_USERNAME=$SCRIPT4_USERNAME
 SCRIPT5_SCRIPT4_CROWDSEC_SELECTED=$SCRIPT4_CROWDSEC_SELECTED
 SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER=$SCRIPT4_CROWDSEC_BOUNCER
+SCRIPT5_SWAP_PRESERVE_SELECTED=$([ "$PRESERVE_UBUNTU_SWAP" == "y" ] && echo yes || echo no)
+SCRIPT5_SWAP_RESULT=$SWAP_RESULT
+SCRIPT5_SWAP_FILE=$SWAP_FILE
+SCRIPT5_SWAP_SIZE=$SWAP_SIZE
 SCRIPT5_DOCKER_INSTALLED=$DOCKER_INSTALLED
 SCRIPT5_DOCKER_SERVICE_ENABLED=$DOCKER_SERVICE_ENABLED
 SCRIPT5_CONTAINERD_SERVICE_ENABLED=$CONTAINERD_SERVICE_ENABLED
@@ -2371,6 +2531,10 @@ Virt Type: $VIRT_TYPE
 Container: $IS_CONTAINER
 LXC: $IS_LXC
 VM: $IS_VM
+Ubuntu swap preserve selected: $([ "$PRESERVE_UBUNTU_SWAP" == "y" ] && echo yes || echo no)
+Ubuntu swap result: $SWAP_RESULT
+Ubuntu swap file: $SWAP_FILE
+Ubuntu swap size: $SWAP_SIZE
 Swap disabled selected: $DISABLE_SWAP
 Swap disabled result: $SWAP_DISABLED
 Docker installed: $DOCKER_INSTALLED
@@ -2407,6 +2571,10 @@ SCRIPT5_SCRIPT4_VERIFY_STATUS=$SCRIPT4_VERIFY_STATUS
 SCRIPT5_SCRIPT4_USERNAME=$SCRIPT4_USERNAME
 SCRIPT5_SCRIPT4_CROWDSEC_SELECTED=$SCRIPT4_CROWDSEC_SELECTED
 SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER=$SCRIPT4_CROWDSEC_BOUNCER
+SCRIPT5_SWAP_PRESERVE_SELECTED=$([ "$PRESERVE_UBUNTU_SWAP" == "y" ] && echo yes || echo no)
+SCRIPT5_SWAP_RESULT=$SWAP_RESULT
+SCRIPT5_SWAP_FILE=$SWAP_FILE
+SCRIPT5_SWAP_SIZE=$SWAP_SIZE
 SCRIPT5_DOCKER_INSTALLED=$DOCKER_INSTALLED
 SCRIPT5_DOCKER_SERVICE_ENABLED=$DOCKER_SERVICE_ENABLED
 SCRIPT5_CONTAINERD_SERVICE_ENABLED=$CONTAINERD_SERVICE_ENABLED
@@ -2450,8 +2618,8 @@ function write_verify_display_log() {
 
     docker_lines="$(printf '%s\n' "$result_lines" | grep -E 'Docker CLI exists|docker --version works|Docker Compose plugin works|Docker daemon reachable|Docker service active|containerd service active|daemon.json exists|daemon.json valid' || true)"
     user_lines="$(printf '%s\n' "$result_lines" | grep -E 'docker group exists|target user is in docker group' || true)"
-    system_lines="$(printf '%s\n' "$result_lines" | grep -E 'no active swap detected|vm.overcommit_memory=1 active|Redis overcommit sysctl file exists|UFW active|UFW SSH rule|UFW HTTP rule|UFW HTTPS rule|Completion marker exists|docker-gc-safe' || true)"
-    other_lines="$(printf '%s\n' "$result_lines" | grep -Ev 'Docker CLI exists|docker --version works|Docker Compose plugin works|Docker daemon reachable|Docker service active|containerd service active|daemon.json exists|daemon.json valid|docker group exists|target user is in docker group|no active swap detected|vm.overcommit_memory=1 active|Redis overcommit sysctl file exists|UFW active|UFW SSH rule|UFW HTTP rule|UFW HTTPS rule|Completion marker exists|docker-gc-safe' || true)"
+    system_lines="$(printf '%s\n' "$result_lines" | grep -E 'Ubuntu swap preserved|no active swap detected|no persistent swap entry|vm.overcommit_memory=1 active|Redis overcommit sysctl file exists|UFW active|UFW SSH rule|UFW HTTP rule|UFW HTTPS rule|Completion marker exists|docker-gc-safe' || true)"
+    other_lines="$(printf '%s\n' "$result_lines" | grep -Ev 'Docker CLI exists|docker --version works|Docker Compose plugin works|Docker daemon reachable|Docker service active|containerd service active|daemon.json exists|daemon.json valid|docker group exists|target user is in docker group|Ubuntu swap preserved|no active swap detected|no persistent swap entry|vm.overcommit_memory=1 active|Redis overcommit sysctl file exists|UFW active|UFW SSH rule|UFW HTTP rule|UFW HTTPS rule|Completion marker exists|docker-gc-safe' || true)"
 
     {
         echo -e "${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
@@ -2590,6 +2758,10 @@ function update_completion_marker_script5_fields() {
         echo "SCRIPT5_SCRIPT4_USERNAME=$SCRIPT4_USERNAME"
         echo "SCRIPT5_SCRIPT4_CROWDSEC_SELECTED=$SCRIPT4_CROWDSEC_SELECTED"
         echo "SCRIPT5_SCRIPT4_CROWDSEC_BOUNCER=$SCRIPT4_CROWDSEC_BOUNCER"
+        echo "SCRIPT5_SWAP_PRESERVE_SELECTED=$([ "$PRESERVE_UBUNTU_SWAP" == "y" ] && echo yes || echo no)"
+        echo "SCRIPT5_SWAP_RESULT=$SWAP_RESULT"
+        echo "SCRIPT5_SWAP_FILE=$SWAP_FILE"
+        echo "SCRIPT5_SWAP_SIZE=$SWAP_SIZE"
         echo "SCRIPT5_DOCKER_INSTALLED=$DOCKER_INSTALLED"
         echo "SCRIPT5_DOCKER_SERVICE_ENABLED=$DOCKER_SERVICE_ENABLED"
         echo "SCRIPT5_CONTAINERD_SERVICE_ENABLED=$CONTAINERD_SERVICE_ENABLED"
@@ -2620,6 +2792,16 @@ function load_state_from_completion_marker() {
     value="$(marker_display_value "Container" "$marker_file")"; [ "$value" != "unknown" ] && IS_CONTAINER="$value"
     value="$(marker_display_value "LXC" "$marker_file")"; [ "$value" != "unknown" ] && IS_LXC="$value"
     value="$(marker_display_value "VM" "$marker_file")"; [ "$value" != "unknown" ] && IS_VM="$value"
+    value="$(marker_display_value "Ubuntu swap preserve selected" "$marker_file")"
+    if [ "$value" != "unknown" ]; then
+        case "$value" in
+            y|Y|yes|YES|true|TRUE|1) PRESERVE_UBUNTU_SWAP="y"; DISABLE_SWAP="n" ;;
+            n|N|no|NO|false|FALSE|0) PRESERVE_UBUNTU_SWAP="n"; DISABLE_SWAP="y" ;;
+        esac
+    fi
+    value="$(marker_display_value "Ubuntu swap result" "$marker_file")"; [ "$value" != "unknown" ] && SWAP_RESULT="$value"
+    value="$(marker_display_value "Ubuntu swap file" "$marker_file")"; [ "$value" != "unknown" ] && SWAP_FILE="$value"
+    value="$(marker_display_value "Ubuntu swap size" "$marker_file")"; [ "$value" != "unknown" ] && SWAP_SIZE="$value"
     value="$(marker_display_value "Swap disabled selected" "$marker_file")"; [ "$value" != "unknown" ] && DISABLE_SWAP="$value"
     value="$(marker_display_value "Docker installed" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_INSTALLED="$value"
     value="$(marker_display_value "Docker service enabled" "$marker_file")"; [ "$value" != "unknown" ] && DOCKER_SERVICE_ENABLED="$value"
@@ -2708,7 +2890,9 @@ function show_final_summary() {
     echo ""
     echo -e "${YW}System:${CL}"
     final_line "Environment" "$environment_value" "$GN"
-    final_line "Swap disabled" "$SWAP_DISABLED" "$(choice_result_color "$SWAP_DISABLED")"
+    final_line "Ubuntu swap" "$SWAP_RESULT" "$(status_value_color "$SWAP_RESULT")"
+    final_line "Swap file" "$SWAP_FILE" "$(status_value_color "$SWAP_RESULT")"
+    final_line "Swap size" "$SWAP_SIZE" "$(status_value_color "$SWAP_RESULT")"
     final_line "Redis overcommit" "${REDIS_OVERCOMMIT_CONFIGURED} (${REDIS_OVERCOMMIT_VALUE})" "$(status_value_color "$REDIS_OVERCOMMIT_CONFIGURED")"
     final_line "UFW firewall" "$UFW_ENABLED" "$(choice_result_color "$UFW_ENABLED")"
     final_line "Docker GC helper" "$DOCKER_GC_INSTALLED" "$(choice_result_color "$DOCKER_GC_INSTALLED")"
