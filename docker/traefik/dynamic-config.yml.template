@@ -8,6 +8,24 @@
 # Notes: Public GitHub-safe template. Future middleware definitions must not block Traefik startup
 
 http:
+  # -------------------------------------------------------
+  # FILE-PROVIDER ROUTERS
+  # -------------------------------------------------------
+  routers:
+    traefik-dashboard:
+      entryPoints:
+        - https
+      rule: Host(`{{TRAEFIK_DASHBOARD_HOST}}`)
+      middlewares:
+        - chain-authentik@file
+      tls:
+        certResolver: cloudflare
+        domains:
+          - main: "{{DOMAIN}}"
+            sans:
+              - "*.{{DOMAIN}}"
+      service: api@internal
+
 {{PROXMOX_ROUTE_BLOCK}}
 
   middlewares:

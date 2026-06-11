@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.7.2"
+SCRIPT_VERSION="v1.7.3"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="compose-owned-image-defaults"
+SCRIPT_BUILD="traefik-dashboard-template-router"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -1788,35 +1788,18 @@ function render_traefik_template() {
 }
 
 # --- 39C. TRAEFIK DYNAMIC ROUTER BLOCK HELPER ---
-# Builds dynamic file-provider routers/services for Traefik itself and optional Proxmox routing.
-# The Traefik dashboard router is always generated.
+# Builds only the optional Proxmox file-provider router/service/transport block.
+# The Traefik dashboard router is defined directly in dynamic-config.yml.template.
 # Proxmox routing is disabled by default and only generated when explicitly selected.
 function build_proxmox_route_block() {
-    cat <<EOF
-  # -------------------------------------------------------
-  # FILE-PROVIDER ROUTERS
-  # -------------------------------------------------------
-  routers:
-    traefik-dashboard:
-      entryPoints:
-        - https
-      rule: Host(\`${TRAEFIK_DASHBOARD_HOST}\`)
-      middlewares:
-        - chain-authentik@file
-      tls: {}
-      service: api@internal
-EOF
-
     if [ "$PROXMOX_ROUTE_ENABLED" != "y" ]; then
         cat <<'EOF'
-
   # Proxmox routing was disabled during setup.
 EOF
         return 0
     fi
 
     cat <<EOF
-
     proxmox:
       entryPoints:
         - https
@@ -3561,8 +3544,32 @@ function verify_traefik_config_files_created() {
         msg_error "Traefik static config does not contain the wildcard SAN for *.${DOMAIN_VALUE}."
     fi
 
-    if grep -q 'certResolver: cloudflare' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
-        msg_error "Traefik dynamic config still contains per-router certResolver entries. Keep wildcard issuance centralized in traefik.yml."
+    if ! grep -q 'traefik-dashboard:' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config does not contain the Traefik dashboard router."
+    fi
+
+    if ! grep -q "Host(\`${TRAEFIK_DASHBOARD_HOST}\`)" "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config dashboard router does not contain the expected dashboard host."
+    fi
+
+    if ! grep -q 'certResolver: cloudflare' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config dashboard router does not contain the Cloudflare certResolver."
+    fi
+
+    if ! grep -q "main: \"${DOMAIN_VALUE}\"" "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null && ! grep -q "main: ${DOMAIN_VALUE}" "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config dashboard router does not contain the base wildcard certificate domain."
+    fi
+
+    if ! grep -q "\*.${DOMAIN_VALUE}" "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config dashboard router does not contain the wildcard SAN for *.${DOMAIN_VALUE}."
+    fi
+
+    if ! grep -q 'encoded-characters-safe:' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config does not contain encoded-characters-safe middleware."
+    fi
+
+    if ! grep -q 'allowEncodedSlash: true' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config does not allow encoded slashes in the reusable middleware."
     fi
 
     msg_ok "Config files verified"
