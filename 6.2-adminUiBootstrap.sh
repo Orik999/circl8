@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="admin-ui-bootstrap"
+SCRIPT_BUILD="selected-admin-ui-migration-flow"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -77,6 +77,15 @@ OVERRIDE_KOMODO="04-[3]-komodo-bootstrap-override.yml"
 COMPOSE_PORTAINER="04-[4]-portainer-compose.yml"
 OVERRIDE_PORTAINER="04-[4]-portainer-bootstrap-override.yml"
 ADMIN_UI_FILES=("$OVERRIDE_DOCKGE" "$COMPOSE_DOCKGE" "$OVERRIDE_DOCKHAND" "$COMPOSE_DOCKHAND" "$OVERRIDE_KOMODO" "$COMPOSE_KOMODO" "$OVERRIDE_PORTAINER" "$COMPOSE_PORTAINER")
+SELECTED_ADMIN_UI=""
+SELECTED_ADMIN_UI_DISPLAY=""
+SELECTED_COMPOSE_FILE=""
+SELECTED_OVERRIDE_FILE=""
+SELECTED_PROJECT=""
+SELECTED_CONTAINER=""
+SELECTED_BOOTSTRAP_PORT=""
+SELECTED_BOOTSTRAP_SCHEME="http"
+SELECTED_FILES=()
 
 PROJECT_DOCKGE="circl8-admin-dockge"
 PROJECT_DOCKHAND="circl8-admin-dockhand"
@@ -94,8 +103,17 @@ SCRIPT62_READY_FOR_SCRIPT64="no"
 SCRIPT62_READY_FOR_SCRIPT65="no"
 SCRIPT62_READY_FOR_SCRIPT66="no"
 
-SETUP_MODE="fresh install"
-EXISTING_ADMIN_UI="not detected"
+SETUP_MODE="fresh-install"
+EXISTING_ADMIN_UI="none"
+PREVIOUS_ADMIN_UI="none"
+ACTION_MODE="fresh-install"
+SECRET_MODE="not-required"
+BOOTSTRAP_MODE="enabled"
+BOOTSTRAP_KEEP_AFTER_MIGRATION="yes"
+BOOTSTRAP_CURRENT="not detected"
+BOOTSTRAP_ACTION="enable"
+MIGRATION_STOP_OLD="not-applicable"
+BUSINESS_MODE="no"
 COMPOSE_FILES_STATE="will install"
 NETWORK_T2_PROXY="unknown"
 NETWORK_SOCKET_PROXY="unknown"
@@ -112,7 +130,7 @@ cat <<'BANNER'
   ╚██████╔╝  ╚██████╔╝      ██║  ██║██████╔╝██║ ╚═╝ ██║██║██║ ╚████║
    ╚═════╝    ╚═════╝       ╚═╝  ╚═╝╚═════╝ ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝
 
-                         6.2-ADMIN-UI
+                         6.2 ADMIN UI
 BANNER
 }
 
@@ -131,8 +149,8 @@ function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        PASS|completed|active|running|healthy|yes|ready|present|configured|deployed|validated|available/platform) printf '%s' "$GN" ;;
-        PASS_WITH_WARNINGS|skipped|unknown|pending-script-6.3|configured*|rerun/update|will*|not\ detected) printf '%s' "$YW" ;;
+        PASS|completed|active|running|healthy|yes|ready|present|configured|deployed|validated|available/platform|fresh-install|enabled|generated|reused|manual|not-required) printf '%s' "$GN" ;;
+        PASS_WITH_WARNINGS|skipped|unknown|pending-script-6.3|configured*|rerun/update|rerun-update|migration|will*|not\ detected|none|not-selected|preserved-enabled|preserved-disabled|temporary-for-migration|user-enabled|user-disabled|temporary-closed|stopped-old|disabled) printf '%s' "$YW" ;;
         FAIL|failed|missing|no|inactive|not-ready|blocked) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
     esac
@@ -345,35 +363,267 @@ function port_busy_status() {
     if [ -n "$(port_owner_line "$port")" ]; then printf 'listening'; else printf 'available'; fi
 }
 
-function any_admin_container_exists() {
-    local name=""
-    for name in dockge dockhand komodo-core komodo-postgres komodo-ferretdb komodo-periphery portainer; do
+function admin_display_name() {
+    case "${1:-}" in
+        dockge) printf 'Dockge' ;;
+        dockhand) printf 'Dockhand' ;;
+        komodo) printf 'Komodo' ;;
+        portainer) printf 'Portainer' ;;
+        none|"") printf 'none' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+function admin_compose_file() {
+    case "${1:-}" in
+        dockge) printf '%s' "$COMPOSE_DOCKGE" ;;
+        dockhand) printf '%s' "$COMPOSE_DOCKHAND" ;;
+        komodo) printf '%s' "$COMPOSE_KOMODO" ;;
+        portainer) printf '%s' "$COMPOSE_PORTAINER" ;;
+        *) printf '' ;;
+    esac
+}
+
+function admin_override_file() {
+    case "${1:-}" in
+        dockge) printf '%s' "$OVERRIDE_DOCKGE" ;;
+        dockhand) printf '%s' "$OVERRIDE_DOCKHAND" ;;
+        komodo) printf '%s' "$OVERRIDE_KOMODO" ;;
+        portainer) printf '%s' "$OVERRIDE_PORTAINER" ;;
+        *) printf '' ;;
+    esac
+}
+
+function admin_project_name() {
+    case "${1:-}" in
+        dockge) printf '%s' "$PROJECT_DOCKGE" ;;
+        dockhand) printf '%s' "$PROJECT_DOCKHAND" ;;
+        komodo) printf '%s' "$PROJECT_KOMODO" ;;
+        portainer) printf '%s' "$PROJECT_PORTAINER" ;;
+        *) printf '' ;;
+    esac
+}
+
+function admin_primary_container() {
+    case "${1:-}" in
+        dockge) printf 'dockge' ;;
+        dockhand) printf 'dockhand' ;;
+        komodo) printf 'komodo-core' ;;
+        portainer) printf 'portainer' ;;
+        *) printf '' ;;
+    esac
+}
+
+function admin_bootstrap_port() {
+    case "${1:-}" in
+        dockge) printf '5001' ;;
+        dockhand) printf '3000' ;;
+        komodo) printf '9120' ;;
+        portainer) printf '9443' ;;
+        *) printf '' ;;
+    esac
+}
+
+function admin_bootstrap_scheme() {
+    case "${1:-}" in
+        portainer) printf 'https' ;;
+        *) printf 'http' ;;
+    esac
+}
+
+function admin_container_names() {
+    case "${1:-}" in
+        dockge) printf 'dockge\n' ;;
+        dockhand) printf 'dockhand\n' ;;
+        komodo) printf 'komodo-core\nkomodo-postgres\nkomodo-ferretdb\nkomodo-periphery\n' ;;
+        portainer) printf 'portainer\n' ;;
+    esac
+}
+
+function admin_container_exists() {
+    local admin="${1:-}" name=""
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
         docker inspect "$name" >/dev/null 2>&1 && return 0
+    done < <(admin_container_names "$admin")
+    return 1
+}
+
+function admin_container_running() {
+    local admin="${1:-}" name="" state=""
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        state="$(container_state "$name")"
+        [ "$state" = "running" ] || [ "$state" = "healthy" ] || return 1
+    done < <(admin_container_names "$admin")
+    return 0
+}
+
+function admin_compose_exists() {
+    local admin="${1:-}" compose="" override=""
+    compose="$(admin_compose_file "$admin")"
+    override="$(admin_override_file "$admin")"
+    [ -n "$compose" ] && root_path_exists "${COMPOSE_DIR}/${compose}" && return 0
+    [ -n "$override" ] && root_path_exists "${COMPOSE_DIR}/${override}" && return 0
+    return 1
+}
+
+function admin_bootstrap_listening() {
+    local admin="${1:-}" port=""
+    port="$(admin_bootstrap_port "$admin")"
+    [ -n "$port" ] || return 1
+    [ "$(port_busy_status "$port")" = "listening" ]
+}
+
+function detected_admin_ui() {
+    local marker_admin="" admin=""
+    marker_admin="$(marker_key_value SCRIPT62_SELECTED_ADMIN_UI "$COMPLETED_MARKER")"
+    case "$marker_admin" in dockge|dockhand|komodo|portainer) printf '%s' "$marker_admin"; return 0 ;; esac
+    for admin in dockge dockhand komodo portainer; do
+        if admin_container_exists "$admin" || admin_compose_exists "$admin" || admin_bootstrap_listening "$admin"; then
+            printf '%s' "$admin"
+            return 0
+        fi
+    done
+    printf 'none'
+}
+
+function future_business_marker_exists() {
+    local marker=""
+    for marker in /root/.circl8-authentik-completed /root/.final-hardening-sso-completed /root/.circl8-post-core-setup-completed /root/.circl8-postiz-completed /root/.circl8-n8n-completed /root/.circl8-landing-completed; do
+        root_path_exists "$marker" && return 0
     done
     return 1
 }
 
-function any_admin_bootstrap_port_listening() {
-    local port=""
-    for port in 5001 3000 9120 9443; do [ "$(port_busy_status "$port")" = "listening" ] && return 0; done
-    return 1
+function refresh_business_mode() {
+    if future_business_marker_exists; then BUSINESS_MODE="yes"; else BUSINESS_MODE="no"; fi
 }
 
-function any_admin_compose_file_exists() {
-    local f=""
-    for f in "${ADMIN_UI_FILES[@]}"; do root_path_exists "${COMPOSE_DIR}/${f}" && return 0; done
-    return 1
+function refresh_selected_admin_context() {
+    [ -n "$SELECTED_ADMIN_UI" ] || return 0
+    SELECTED_ADMIN_UI_DISPLAY="$(admin_display_name "$SELECTED_ADMIN_UI")"
+    SELECTED_COMPOSE_FILE="$(admin_compose_file "$SELECTED_ADMIN_UI")"
+    SELECTED_OVERRIDE_FILE="$(admin_override_file "$SELECTED_ADMIN_UI")"
+    SELECTED_PROJECT="$(admin_project_name "$SELECTED_ADMIN_UI")"
+    SELECTED_CONTAINER="$(admin_primary_container "$SELECTED_ADMIN_UI")"
+    SELECTED_BOOTSTRAP_PORT="$(admin_bootstrap_port "$SELECTED_ADMIN_UI")"
+    SELECTED_BOOTSTRAP_SCHEME="$(admin_bootstrap_scheme "$SELECTED_ADMIN_UI")"
+    SELECTED_FILES=("$SELECTED_OVERRIDE_FILE" "$SELECTED_COMPOSE_FILE")
 }
 
 function refresh_setup_mode() {
-    SETUP_MODE="fresh install"
-    EXISTING_ADMIN_UI="not detected"
-    if [ "$(marker_key_value SCRIPT62_STATUS "$COMPLETED_MARKER")" = "completed" ] || any_admin_container_exists || any_admin_bootstrap_port_listening || any_admin_compose_file_exists; then
-        SETUP_MODE="rerun/update"
-        EXISTING_ADMIN_UI="detected"
+    refresh_business_mode
+    PREVIOUS_ADMIN_UI="$(detected_admin_ui)"
+    EXISTING_ADMIN_UI="$PREVIOUS_ADMIN_UI"
+    [ -n "$EXISTING_ADMIN_UI" ] || EXISTING_ADMIN_UI="none"
+    [ "$EXISTING_ADMIN_UI" = "none" ] && EXISTING_ADMIN_UI="none"
+
+    if [ -z "$SELECTED_ADMIN_UI" ]; then
+        SETUP_MODE="fresh-install"
+        ACTION_MODE="fresh-install"
+        [ "$PREVIOUS_ADMIN_UI" != "none" ] && { SETUP_MODE="rerun-update"; ACTION_MODE="rerun-update"; }
+        return 0
+    fi
+
+    if admin_bootstrap_listening "$SELECTED_ADMIN_UI"; then
+        BOOTSTRAP_CURRENT="detected/running"
+    else
+        BOOTSTRAP_CURRENT="not detected"
+    fi
+
+    if [ "$PREVIOUS_ADMIN_UI" = "none" ]; then
+        SETUP_MODE="fresh-install"
+        ACTION_MODE="fresh-install"
+        BOOTSTRAP_MODE="enabled"
+        BOOTSTRAP_ACTION="enable"
+        MIGRATION_STOP_OLD="not-applicable"
+    elif [ "$PREVIOUS_ADMIN_UI" = "$SELECTED_ADMIN_UI" ]; then
+        SETUP_MODE="rerun-update"
+        ACTION_MODE="rerun-update"
+        if admin_bootstrap_listening "$SELECTED_ADMIN_UI"; then
+            BOOTSTRAP_MODE="preserved-enabled"
+            BOOTSTRAP_ACTION="preserve enabled"
+        else
+            BOOTSTRAP_MODE="preserved-disabled"
+            BOOTSTRAP_ACTION="preserve disabled"
+        fi
+        MIGRATION_STOP_OLD="not-applicable"
+    else
+        SETUP_MODE="migration"
+        ACTION_MODE="migration"
+        BOOTSTRAP_MODE="temporary-for-migration"
+        BOOTSTRAP_ACTION="temporary for migration"
+        MIGRATION_STOP_OLD="after-new-verified"
     fi
 }
 
+function read_yes_no() {
+    local prompt="$1" default="${2:-y}" answer=""
+    local label="Y/n"
+    [[ "$default" =~ ^[Nn]$ ]] && label="y/N"
+    if [ -r /dev/tty ]; then read -r -p "${prompt} [${label}]: " answer </dev/tty || answer=""; else read -r -p "${prompt} [${label}]: " answer || answer=""; fi
+    [ -z "$answer" ] && answer="$default"
+    printf '%s' "$answer"
+}
+
+function collect_admin_ui_selection() {
+    local choice="" keep=""
+    section "ADMIN UI SELECTION"
+    echo -e "${YW}Choose exactly one Admin UI to deploy/manage:${CL}"
+    echo -e "  ${YW}1:${CL} ${GN}Dockge${CL}"
+    echo -e "  ${YW}2:${CL} ${GN}Dockhand${CL}"
+    echo -e "  ${YW}3:${CL} ${GN}Komodo${CL}"
+    echo -e "  ${YW}4:${CL} ${GN}Portainer${CL}"
+    echo ""
+    while true; do
+        if [ -r /dev/tty ]; then read -r -p "Select Admin UI option number [default: 1]: " choice </dev/tty || choice=""; else read -r -p "Select Admin UI option number [default: 1]: " choice || choice=""; fi
+        [ -z "$choice" ] && choice="1"
+        case "$choice" in
+            1) SELECTED_ADMIN_UI="dockge"; break ;;
+            2) SELECTED_ADMIN_UI="dockhand"; break ;;
+            3) SELECTED_ADMIN_UI="komodo"; break ;;
+            4) SELECTED_ADMIN_UI="portainer"; break ;;
+            *) echo -e "${YW}Enter 1, 2, 3, or 4.${CL}" ;;
+        esac
+    done
+    refresh_selected_admin_context
+    refresh_setup_mode
+    msg_ok "Selected Admin UI: ${SELECTED_ADMIN_UI_DISPLAY}"
+}
+
+function collect_bootstrap_decision() {
+    local keep=""
+    section "SELECTED STACK PREFLIGHT"
+    refresh_setup_mode
+    aligned_status_line "Selected Admin UI" "$SELECTED_ADMIN_UI_DISPLAY" "$ANS"
+    aligned_status_line "Current Admin UI" "$(admin_display_name "$PREVIOUS_ADMIN_UI")" "$(status_color_for_value "$PREVIOUS_ADMIN_UI")"
+    aligned_status_line "Action" "$ACTION_MODE" "$(status_color_for_value "$ACTION_MODE")"
+    aligned_status_line "Bootstrap current" "$BOOTSTRAP_CURRENT" "$(status_color_for_value "$BOOTSTRAP_CURRENT")"
+    aligned_status_line "Business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
+
+    if [ "$ACTION_MODE" = "rerun-update" ]; then
+        if admin_bootstrap_listening "$SELECTED_ADMIN_UI"; then
+            keep="$(read_yes_no "Keep bootstrap access enabled for ${SELECTED_ADMIN_UI_DISPLAY}?" "y")"
+        else
+            keep="$(read_yes_no "Enable bootstrap access for ${SELECTED_ADMIN_UI_DISPLAY}?" "n")"
+        fi
+        if [[ "$keep" =~ ^[Yy]$ ]]; then BOOTSTRAP_MODE="user-enabled"; BOOTSTRAP_ACTION="enable"; else BOOTSTRAP_MODE="user-disabled"; BOOTSTRAP_ACTION="disable"; fi
+    elif [ "$ACTION_MODE" = "migration" ]; then
+        if [ "$BUSINESS_MODE" = "yes" ]; then
+            keep="$(read_yes_no "Keep new bootstrap access after successful migration?" "n")"
+        else
+            keep="$(read_yes_no "Keep new bootstrap access after successful migration?" "y")"
+        fi
+        if [[ "$keep" =~ ^[Yy]$ ]]; then BOOTSTRAP_KEEP_AFTER_MIGRATION="yes"; BOOTSTRAP_MODE="user-enabled"; BOOTSTRAP_ACTION="temporary test, then keep enabled"; else BOOTSTRAP_KEEP_AFTER_MIGRATION="no"; BOOTSTRAP_MODE="temporary-for-migration"; BOOTSTRAP_ACTION="temporary test, then close"; fi
+    else
+        BOOTSTRAP_MODE="enabled"
+        BOOTSTRAP_ACTION="enable"
+    fi
+
+    aligned_status_line "Bootstrap action" "$BOOTSTRAP_ACTION" "$GN"
+    aligned_status_line "Public Auth routes" "$SCRIPT62_PUBLIC_AUTH_ROUTES" "$YW"
+}
 function validate_preflight_runtime() {
     local failure="no"
     section "RUNTIME PREFLIGHT"
@@ -405,33 +655,41 @@ function validate_preflight_runtime() {
 function show_setup_plan_and_confirm() {
     local apply_yn=""
     section "SETUP PLAN"
-    echo -e "${YW}Script 6.2 will deploy only the Admin UI bootstrap layer after confirmation.${CL}"
+    echo -e "${YW}Script 6.2 will deploy/manage only the selected Admin UI after confirmation.${CL}"
     echo ""
     echo -e "${YW}Setup mode:${CL}"
-    aligned_status_line "Mode" "$SETUP_MODE" "$(status_color_for_value "$SETUP_MODE")"
-    aligned_status_line "Existing Admin UI" "$EXISTING_ADMIN_UI" "$(status_color_for_value "$EXISTING_ADMIN_UI")"
-    aligned_status_line "Bootstrap access" "will install/refresh" "$GN"
+    aligned_status_line "Mode" "$ACTION_MODE" "$(status_color_for_value "$ACTION_MODE")"
+    aligned_status_line "Selected Admin UI" "$SELECTED_ADMIN_UI_DISPLAY" "$ANS"
+    aligned_status_line "Existing Admin UI" "$(admin_display_name "$PREVIOUS_ADMIN_UI")" "$(status_color_for_value "$PREVIOUS_ADMIN_UI")"
+    aligned_status_line "Bootstrap current" "$BOOTSTRAP_CURRENT" "$(status_color_for_value "$BOOTSTRAP_CURRENT")"
+    aligned_status_line "Bootstrap action" "$BOOTSTRAP_ACTION" "$GN"
     aligned_status_line "Public Auth routes" "configured / pending Script 6.3" "$YW"
-    if [ "$SETUP_MODE" = "rerun/update" ]; then
+    if [ "$ACTION_MODE" = "migration" ]; then
         echo ""
-        echo -e "${YW}Existing Admin UI bootstrap deployment detected.${CL}"
-        echo -e "${YW}This rerun will refresh compose files, verify/reuse Docker networks, and update existing Admin UI containers.${CL}"
-        echo -e "${YW}Persistent data, existing secrets, and bootstrap access will be preserved.${CL}"
+        echo -e "${YW}Migration safety:${CL}"
+        echo -e "${YW}The existing Admin UI will stay running until the new selected stack verifies through bootstrap access.${CL}"
+        echo -e "${YW}Old data, secrets, and compose files will be preserved. Only the old stack is stopped after new verification succeeds.${CL}"
+    elif [ "$ACTION_MODE" = "rerun-update" ]; then
+        echo ""
+        echo -e "${YW}Existing selected Admin UI detected. This rerun updates only ${SELECTED_ADMIN_UI_DISPLAY}.${CL}"
+        echo -e "${YW}Persistent data and existing secrets are preserved.${CL}"
     fi
     echo ""
     echo -e "${YW}Apply changes:${CL}"
-    aligned_status_line "Compose files" "install into compose dir" "$GN"
-    aligned_status_line "Bootstrap overrides" "install into compose dir" "$GN"
+    aligned_status_line "Compose file" "$SELECTED_COMPOSE_FILE" "$GN"
+    aligned_status_line "Bootstrap override" "$SELECTED_OVERRIDE_FILE" "$GN"
+    aligned_status_line "Secrets/passwords" "selected only" "$GN"
     aligned_status_line "Docker networks" "verify/reuse" "$GN"
-    aligned_status_line "Compose configs" "validate before deploy" "$GN"
-    aligned_status_line "Deployment" "deploy Admin UI only" "$GN"
-    aligned_status_line "Verification" "write report and marker" "$GN"
+    aligned_status_line "Compose config" "validate selected stack only" "$GN"
+    aligned_status_line "Deployment" "deploy selected stack only" "$GN"
+    if [ "$ACTION_MODE" = "migration" ]; then
+        aligned_status_line "Migration" "stop old only after new verified" "$YW"
+    else
+        aligned_status_line "Migration" "not applicable" "$YW"
+    fi
     echo ""
     echo -e "${YW}Deployment order:${CL}"
-    aligned_status_line "1" "Dockge" "$GN" 4
-    aligned_status_line "2" "Dockhand" "$GN" 4
-    aligned_status_line "3" "Komodo" "$GN" 4
-    aligned_status_line "4" "Portainer" "$GN" 4
+    aligned_status_line "1" "$SELECTED_ADMIN_UI_DISPLAY" "$GN" 4
     echo ""
     echo -e "${YW}Prepared by Script 6.1:${CL}"
     aligned_status_line "Docker dir" "$DOCKER_DIR" "$GN"
@@ -487,8 +745,8 @@ function install_admin_ui_files() {
     section "COMPOSE FILES"
     local file=""
     run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
-    for file in "${ADMIN_UI_FILES[@]}"; do install_admin_ui_file "$file"; done
-    msg_ok "ADMIN UI COMPOSE FILES VERIFIED"
+    for file in "${SELECTED_FILES[@]}"; do install_admin_ui_file "$file"; done
+    msg_ok "SELECTED ADMIN UI COMPOSE FILES VERIFIED"
 }
 
 function verify_networks() {
@@ -506,62 +764,79 @@ function append_env_key_secret() {
     local key="$1" value=""
     if env_has_key "$key"; then return 0; fi
     value="$(generate_secret)"
-    if [ -n "$SUDO_CMD" ]; then
-        printf '%s="%s"\n' "$key" "$value" | "$SUDO_CMD" tee -a "$ENV_FILE" >/dev/null
-    else
-        printf '%s="%s"\n' "$key" "$value" >> "$ENV_FILE"
+    if [ -n "$SUDO_CMD" ]; then printf '%s="%s"\n' "$key" "$value" | "$SUDO_CMD" tee -a "$ENV_FILE" >/dev/null; else printf '%s="%s"\n' "$key" "$value" >> "$ENV_FILE"; fi
+}
+
+function prompt_secret_mode_for_komodo() {
+    local existing="no" choice=""
+    if env_has_key "KOMODO_DB_PASSWORD" && env_has_key "KOMODO_PASSKEY" && env_has_key "KOMODO_JWT_SECRET" && env_has_key "KOMODO_WEBHOOK_SECRET"; then existing="yes"; fi
+    section "SECRETS / PASSWORDS"
+    if [ "$SELECTED_ADMIN_UI" != "komodo" ]; then
+        SECRET_MODE="not-required"
+        aligned_status_line "Secrets/passwords" "not-required" "$GN"
+        return 0
     fi
+    if [ "$existing" = "yes" ]; then
+        echo -e "${YW}Existing Komodo local secrets were detected. Values will never be printed.${CL}"
+        echo -e "  ${YW}1:${CL} ${GN}Reuse existing secrets${CL}"
+        echo -e "  ${YW}2:${CL} ${YW}Regenerate missing/selected secrets${CL}"
+        echo ""
+        if [ -r /dev/tty ]; then read -r -p "Select Komodo secret option [default: 1]: " choice </dev/tty || choice=""; else read -r -p "Select Komodo secret option [default: 1]: " choice || choice=""; fi
+        [ -z "$choice" ] && choice="1"
+        case "$choice" in
+            2) SECRET_MODE="generated" ;;
+            *) SECRET_MODE="reused" ;;
+        esac
+    else
+        echo -e "${YW}Komodo requires local app secrets. Autogeneration is recommended.${CL}"
+        echo -e "  ${YW}1:${CL} ${GN}Autogenerate secrets${CL}"
+        echo -e "  ${YW}2:${CL} ${YW}Enter values manually later and cancel now${CL}"
+        echo ""
+        if [ -r /dev/tty ]; then read -r -p "Select Komodo secret option [default: 1]: " choice </dev/tty || choice=""; else read -r -p "Select Komodo secret option [default: 1]: " choice || choice=""; fi
+        [ -z "$choice" ] && choice="1"
+        if [ "$choice" = "2" ]; then
+            SECRET_MODE="manual"
+            msg_error "Manual Komodo secret entry is not printed/logged by this script. Add secrets to .env, then rerun."
+        fi
+        SECRET_MODE="generated"
+    fi
+    aligned_status_line "Komodo secrets" "$SECRET_MODE" "$(status_color_for_value "$SECRET_MODE")"
 }
 
 function ensure_admin_ui_secret_env() {
-    # Komodo needs local app secrets. Generate only if absent, never print values.
-    append_env_key_secret "KOMODO_DB_PASSWORD"
-    append_env_key_secret "KOMODO_PASSKEY"
-    append_env_key_secret "KOMODO_JWT_SECRET"
-    append_env_key_secret "KOMODO_WEBHOOK_SECRET"
+    prompt_secret_mode_for_komodo
+    if [ "$SELECTED_ADMIN_UI" != "komodo" ]; then return 0; fi
+    if [ "$SECRET_MODE" = "generated" ]; then
+        append_env_key_secret "KOMODO_DB_PASSWORD"
+        append_env_key_secret "KOMODO_PASSKEY"
+        append_env_key_secret "KOMODO_JWT_SECRET"
+        append_env_key_secret "KOMODO_WEBHOOK_SECRET"
+    fi
     run_cmd "setting .env mode" chmod 600 "$ENV_FILE"
 }
 
 function compose_path() { printf '%s/%s' "$COMPOSE_DIR" "$1"; }
-function compose_project_for_file() {
-    case "$1" in
-        "$COMPOSE_DOCKGE") printf '%s' "$PROJECT_DOCKGE" ;;
-        "$COMPOSE_DOCKHAND") printf '%s' "$PROJECT_DOCKHAND" ;;
-        "$COMPOSE_KOMODO") printf '%s' "$PROJECT_KOMODO" ;;
-        "$COMPOSE_PORTAINER") printf '%s' "$PROJECT_PORTAINER" ;;
-        *) printf 'circl8-admin-ui' ;;
-    esac
-}
-function override_for_file() {
-    case "$1" in
-        "$COMPOSE_DOCKGE") printf '%s' "$OVERRIDE_DOCKGE" ;;
-        "$COMPOSE_DOCKHAND") printf '%s' "$OVERRIDE_DOCKHAND" ;;
-        "$COMPOSE_KOMODO") printf '%s' "$OVERRIDE_KOMODO" ;;
-        "$COMPOSE_PORTAINER") printf '%s' "$OVERRIDE_PORTAINER" ;;
-        *) printf '' ;;
-    esac
-}
-function primary_container_for_file() {
-    case "$1" in
-        "$COMPOSE_DOCKGE") printf 'dockge' ;;
-        "$COMPOSE_DOCKHAND") printf 'dockhand' ;;
-        "$COMPOSE_KOMODO") printf 'komodo-core' ;;
-        "$COMPOSE_PORTAINER") printf 'portainer' ;;
-        *) printf '' ;;
-    esac
+function compose_project_for_file() { printf '%s' "$SELECTED_PROJECT"; }
+function override_for_file() { printf '%s' "$SELECTED_OVERRIDE_FILE"; }
+function primary_container_for_file() { printf '%s' "$SELECTED_CONTAINER"; }
+
+function selected_compose_args() {
+    local include_bootstrap="${1:-yes}"
+    printf '%s\n' "--env-file" "$ENV_FILE" "-p" "$SELECTED_PROJECT" "-f" "$(compose_path "$SELECTED_COMPOSE_FILE")"
+    if [ "$include_bootstrap" = "yes" ]; then
+        printf '%s\n' "-f" "$(compose_path "$SELECTED_OVERRIDE_FILE")"
+    fi
 }
 
 function validate_compose_files() {
     section "COMPOSE VALIDATION"
-    local file="" project="" override="" display_name=""
-    for file in "$COMPOSE_DOCKGE" "$COMPOSE_DOCKHAND" "$COMPOSE_KOMODO" "$COMPOSE_PORTAINER"; do
-        display_name="$(compose_display_name "$file")"
-        project="$(compose_project_for_file "$file")"
-        override="$(override_for_file "$file")"
-        msg_info "Validating ${display_name}"
-        docker compose --env-file "$ENV_FILE" -p "$project" -f "$(compose_path "$file")" -f "$(compose_path "$override")" config >/dev/null
-        msg_ok "${display_name}: config valid"
-    done
+    msg_info "Validating ${SELECTED_ADMIN_UI_DISPLAY}"
+    if [ "$BOOTSTRAP_ACTION" = "preserve disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then
+        docker compose --env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")" config >/dev/null
+    else
+        docker compose --env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")" -f "$(compose_path "$SELECTED_OVERRIDE_FILE")" config >/dev/null
+    fi
+    msg_ok "${SELECTED_ADMIN_UI_DISPLAY}: config valid"
 }
 
 function write_deployment_failure_log() {
@@ -576,6 +851,9 @@ function write_deployment_failure_log() {
         echo "Failed stack: ${display_name}"
         echo "Compose file: ${failed_file}"
         echo "Compose project: ${failed_project}"
+        echo "Action: ${ACTION_MODE}"
+        echo "Selected Admin UI: ${SELECTED_ADMIN_UI}"
+        echo "Previous Admin UI: ${PREVIOUS_ADMIN_UI}"
         echo "Docker dir: ${DOCKER_DIR}"
         echo "Compose dir: ${COMPOSE_DIR}"
         echo "Verify log: ${VERIFY_LOG}"
@@ -637,41 +915,73 @@ function wait_for_container_ready() {
     fail_with_deployment_log "$display_name" "n/a" "n/a" "${display_name} did not become ready before timeout"
 }
 
-function deploy_compose_file() {
-    local file="${1:-}" project="" display_name="" override="" compose_file="" override_file="" attempt="" max_attempts=3 retry_delay=4
-    [ -n "$file" ] || msg_error "Compose filename was not provided to deploy_compose_file."
-    project="$(compose_project_for_file "$file")"
-    display_name="$(compose_display_name "$file")"
-    override="$(override_for_file "$file")"
-    compose_file="$(compose_path "$file")"
-    override_file="$(compose_path "$override")"
-    msg_info "Deploying ${display_name}"
+function deploy_selected_stack() {
+    local include_bootstrap="${1:-yes}" attempt="" max_attempts=3 retry_delay=4 args=()
+    args=(--env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")")
+    if [ "$include_bootstrap" = "yes" ]; then args+=(-f "$(compose_path "$SELECTED_OVERRIDE_FILE")"); fi
+    msg_info "Deploying ${SELECTED_ADMIN_UI_DISPLAY}"
     for ((attempt=1; attempt<=max_attempts; attempt++)); do
-        { echo ""; echo "--- Deploying ${display_name} (${file}) attempt ${attempt}/${max_attempts} ---"; echo "Date: $(date)"; echo "Project: ${project}"; echo "Compose file: ${compose_file}"; echo "Override file: ${override_file}"; } >> "$DEPLOY_OUTPUT_FILE"
-        if docker compose --env-file "$ENV_FILE" -p "$project" -f "$compose_file" -f "$override_file" up -d --remove-orphans >> "$DEPLOY_OUTPUT_FILE" 2>&1; then
-            msg_ok "${display_name}: deployed"
+        { echo ""; echo "--- Deploying ${SELECTED_ADMIN_UI_DISPLAY} attempt ${attempt}/${max_attempts} ---"; echo "Date: $(date)"; echo "Project: ${SELECTED_PROJECT}"; echo "Compose file: $(compose_path "$SELECTED_COMPOSE_FILE")"; echo "Bootstrap: ${include_bootstrap}"; } >> "$DEPLOY_OUTPUT_FILE"
+        if docker compose "${args[@]}" up -d --remove-orphans >> "$DEPLOY_OUTPUT_FILE" 2>&1; then
+            msg_ok "${SELECTED_ADMIN_UI_DISPLAY}: deployed"
             return 0
         fi
-        { echo "Deploy attempt ${attempt}/${max_attempts} failed for ${display_name}."; echo "Retry delay: ${retry_delay}s"; } >> "$DEPLOY_OUTPUT_FILE"
+        { echo "Deploy attempt ${attempt}/${max_attempts} failed for ${SELECTED_ADMIN_UI_DISPLAY}."; echo "Retry delay: ${retry_delay}s"; } >> "$DEPLOY_OUTPUT_FILE"
         [ "$attempt" -lt "$max_attempts" ] && sleep "$retry_delay"
     done
-    fail_with_deployment_log "$display_name" "$file" "$project" "${display_name} deployment failed"
+    fail_with_deployment_log "$SELECTED_ADMIN_UI_DISPLAY" "$SELECTED_COMPOSE_FILE" "$SELECTED_PROJECT" "${SELECTED_ADMIN_UI_DISPLAY} deployment failed"
+}
+
+function stop_admin_stack() {
+    local admin="${1:-}" project="" compose="" override="" display=""
+    case "$admin" in dockge|dockhand|komodo|portainer) ;; *) return 0 ;; esac
+    project="$(admin_project_name "$admin")"
+    compose="$(admin_compose_file "$admin")"
+    override="$(admin_override_file "$admin")"
+    display="$(admin_display_name "$admin")"
+    if [ -f "$(compose_path "$compose")" ]; then
+        { echo ""; echo "--- Stopping old Admin UI stack ${display} ---"; echo "Date: $(date)"; } >> "$DEPLOY_OUTPUT_FILE"
+        if [ -f "$(compose_path "$override")" ]; then
+            docker compose --env-file "$ENV_FILE" -p "$project" -f "$(compose_path "$compose")" -f "$(compose_path "$override")" down >> "$DEPLOY_OUTPUT_FILE" 2>&1 || true
+        else
+            docker compose --env-file "$ENV_FILE" -p "$project" -f "$(compose_path "$compose")" down >> "$DEPLOY_OUTPUT_FILE" 2>&1 || true
+        fi
+    else
+        while IFS= read -r name; do [ -n "$name" ] && docker rm -f "$name" >> "$DEPLOY_OUTPUT_FILE" 2>&1 || true; done < <(admin_container_names "$admin")
+    fi
+    msg_ok "${display}: stopped old stack"
+}
+
+function update_admin_statuses_after_deploy() {
+    local admin=""
+    SCRIPT62_DOCKGE="not-selected"; SCRIPT62_DOCKHAND="not-selected"; SCRIPT62_KOMODO="not-selected"; SCRIPT62_PORTAINER="not-selected"
+    for admin in dockge dockhand komodo portainer; do
+        if [ "$admin" = "$SELECTED_ADMIN_UI" ]; then
+            case "$admin" in dockge) SCRIPT62_DOCKGE="running" ;; dockhand) SCRIPT62_DOCKHAND="running" ;; komodo) SCRIPT62_KOMODO="running" ;; portainer) SCRIPT62_PORTAINER="running" ;; esac
+        elif [ "$ACTION_MODE" = "migration" ] && [ "$admin" = "$PREVIOUS_ADMIN_UI" ]; then
+            case "$admin" in dockge) SCRIPT62_DOCKGE="stopped-old" ;; dockhand) SCRIPT62_DOCKHAND="stopped-old" ;; komodo) SCRIPT62_KOMODO="stopped-old" ;; portainer) SCRIPT62_PORTAINER="stopped-old" ;; esac
+        fi
+    done
 }
 
 function deploy_admin_ui() {
+    local include_bootstrap="yes"
     section "DEPLOYMENT"
-    deploy_compose_file "$COMPOSE_DOCKGE"
-    wait_for_container_ready "dockge" "Dockge" 90 3
-    SCRIPT62_DOCKGE="deployed"
-    deploy_compose_file "$COMPOSE_DOCKHAND"
-    wait_for_container_ready "dockhand" "Dockhand" 90 3
-    SCRIPT62_DOCKHAND="deployed"
-    deploy_compose_file "$COMPOSE_KOMODO"
-    wait_for_container_ready "komodo-core" "Komodo" 120 4
-    SCRIPT62_KOMODO="deployed"
-    deploy_compose_file "$COMPOSE_PORTAINER"
-    wait_for_container_ready "portainer" "Portainer" 90 3
-    SCRIPT62_PORTAINER="deployed"
+    if [ "$BOOTSTRAP_ACTION" = "preserve disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then include_bootstrap="no"; fi
+    if [ "$ACTION_MODE" = "migration" ]; then include_bootstrap="yes"; fi
+    deploy_selected_stack "$include_bootstrap"
+    wait_for_container_ready "$SELECTED_CONTAINER" "$SELECTED_ADMIN_UI_DISPLAY" 120 4
+    if [ "$ACTION_MODE" = "migration" ]; then
+        stop_admin_stack "$PREVIOUS_ADMIN_UI"
+        if [ "$BOOTSTRAP_KEEP_AFTER_MIGRATION" = "no" ]; then
+            msg_info "Closing temporary ${SELECTED_ADMIN_UI_DISPLAY} bootstrap access"
+            deploy_selected_stack "no"
+            SCRIPT62_BOOTSTRAP_ACCESS="temporary-closed"
+            BOOTSTRAP_MODE="temporary-for-migration"
+            msg_ok "${SELECTED_ADMIN_UI_DISPLAY}: temporary bootstrap closed"
+        fi
+    fi
+    update_admin_statuses_after_deploy
 }
 
 function verify_record_first_issue() {
@@ -681,7 +991,7 @@ function verify_record_first_issue() {
 
 function create_verification_report() {
     msg_info "Creating Admin UI verification report"
-    local report_body="" mode=""
+    local report_body="" selected_state="" port=""
     report_body="$(mktemp)"; TEMP_FILES+=("$report_body")
     VERIFY_STATUS="PASS"; VERIFY_PASS_COUNT="0"; VERIFY_WARN_COUNT="0"; VERIFY_FAIL_COUNT="0"; VERIFY_FIRST_ISSUE_TYPE=""; VERIFY_FIRST_ISSUE_CHECK=""; VERIFY_FIRST_ISSUE_REASON=""; VERIFY_FIRST_ISSUE_FIX=""
     verify_pass() { VERIFY_PASS_COUNT="$((VERIFY_PASS_COUNT + 1))"; echo "✓ PASS - $1" >> "$report_body"; }
@@ -693,26 +1003,31 @@ function create_verification_report() {
     [ "$SCRIPT61_VERIFY_STATUS" = "PASS" ] && verify_pass "Script 6.1 verification PASS" || verify_fail "Script 6.1 verification" "status is ${SCRIPT61_VERIFY_STATUS}" "complete/fix Script 6.1"
     docker network inspect t2_proxy >/dev/null 2>&1 && verify_pass "t2_proxy network exists" || verify_fail "t2_proxy network" "missing" "rerun Script 6.1"
     docker network inspect socket_proxy >/dev/null 2>&1 && verify_pass "socket_proxy network exists" || verify_fail "socket_proxy network" "missing" "rerun Script 6.1"
-    for f in "${ADMIN_UI_FILES[@]}"; do root_file_not_empty "${COMPOSE_DIR}/${f}" && verify_pass "${f} exists" || verify_fail "${f}" "missing or empty" "rerun Script 6.2"; done
+    root_file_not_empty "${COMPOSE_DIR}/${SELECTED_COMPOSE_FILE}" && verify_pass "selected compose file exists" || verify_fail "selected compose file" "missing or empty" "rerun Script 6.2"
+    root_file_not_empty "${COMPOSE_DIR}/${SELECTED_OVERRIDE_FILE}" && verify_pass "selected bootstrap override exists" || verify_fail "selected bootstrap override" "missing or empty" "rerun Script 6.2"
 
-    [ "$(container_state dockge)" = "running" ] || [ "$(container_state dockge)" = "healthy" ] && verify_pass "Dockge running" || verify_fail "Dockge running" "state is $(container_state dockge)" "inspect docker logs dockge"
-    [ "$(container_state dockhand)" = "running" ] || [ "$(container_state dockhand)" = "healthy" ] && verify_pass "Dockhand running" || verify_fail "Dockhand running" "state is $(container_state dockhand)" "inspect docker logs dockhand"
-    [ "$(container_state komodo-core)" = "running" ] || [ "$(container_state komodo-core)" = "healthy" ] && verify_pass "Komodo running" || verify_fail "Komodo running" "state is $(container_state komodo-core)" "inspect docker logs komodo-core"
-    [ "$(container_state portainer)" = "running" ] || [ "$(container_state portainer)" = "healthy" ] && verify_pass "Portainer running" || verify_fail "Portainer running" "state is $(container_state portainer)" "inspect docker logs portainer"
+    selected_state="$(container_state "$SELECTED_CONTAINER")"
+    if [ "$selected_state" = "running" ] || [ "$selected_state" = "healthy" ]; then verify_pass "${SELECTED_ADMIN_UI_DISPLAY} running"; else verify_fail "${SELECTED_ADMIN_UI_DISPLAY} running" "state is ${selected_state}" "inspect docker logs ${SELECTED_CONTAINER}"; fi
 
-    if [ "$(port_busy_status 5001)" = "listening" ] || [ "$(port_busy_status 3000)" = "listening" ] || [ "$(port_busy_status 9120)" = "listening" ] || [ "$(port_busy_status 9443)" = "listening" ]; then
+    port="$SELECTED_BOOTSTRAP_PORT"
+    if [ "$BOOTSTRAP_ACTION" = "preserve disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ] || [ "$SCRIPT62_BOOTSTRAP_ACCESS" = "temporary-closed" ]; then
+        [ "$SCRIPT62_BOOTSTRAP_ACCESS" = "temporary-closed" ] || SCRIPT62_BOOTSTRAP_ACCESS="disabled"
+        verify_info "Bootstrap access disabled by selected mode"
+    elif [ -n "$port" ] && [ "$(port_busy_status "$port")" = "listening" ]; then
         SCRIPT62_BOOTSTRAP_ACCESS="ready"
-        verify_pass "Admin UI bootstrap ports listening"
+        verify_pass "${SELECTED_ADMIN_UI_DISPLAY} bootstrap port ${port} listening"
     else
-        SCRIPT62_BOOTSTRAP_ACCESS="pending"
-        verify_warn "Admin UI bootstrap ports" "no bootstrap port listener detected yet" "check container startup and compose overrides"
+        SCRIPT62_BOOTSTRAP_ACCESS="failed"
+        verify_fail "${SELECTED_ADMIN_UI_DISPLAY} bootstrap access" "port ${port:-unknown} is not listening" "check compose override and container logs"
+    fi
+
+    if [ "$ACTION_MODE" = "migration" ] && [ "$PREVIOUS_ADMIN_UI" != "none" ]; then
+        if admin_container_running "$PREVIOUS_ADMIN_UI"; then verify_fail "old Admin UI stopped" "${PREVIOUS_ADMIN_UI} still running" "stop old stack after verifying selected Admin UI"; else verify_pass "old Admin UI stopped after migration"; fi
     fi
 
     verify_info "Public Auth routes are configured/pending Script 6.3 Authentik"
     if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then VERIFY_STATUS="FAIL"; elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then VERIFY_STATUS="PASS_WITH_WARNINGS"; else VERIFY_STATUS="PASS"; fi
-    if [ "$VERIFY_STATUS" = "PASS" ] || [ "$VERIFY_STATUS" = "PASS_WITH_WARNINGS" ]; then
-        SCRIPT62_READY_FOR_SCRIPT63="yes"; SCRIPT62_READY_FOR_SCRIPT64="yes"; SCRIPT62_READY_FOR_SCRIPT65="yes"; SCRIPT62_READY_FOR_SCRIPT66="yes"
-    fi
+    if [ "$VERIFY_STATUS" = "PASS" ] || [ "$VERIFY_STATUS" = "PASS_WITH_WARNINGS" ]; then SCRIPT62_READY_FOR_SCRIPT63="yes"; SCRIPT62_READY_FOR_SCRIPT64="yes"; SCRIPT62_READY_FOR_SCRIPT65="yes"; SCRIPT62_READY_FOR_SCRIPT66="yes"; fi
 
     {
         echo "--- CIRCL8 ADMIN UI VERIFICATION REPORT ---"
@@ -720,7 +1035,11 @@ function create_verification_report() {
         echo "Docker dir: ${DOCKER_DIR}"
         echo "Compose dir: ${COMPOSE_DIR}"
         echo "Secrets dir: ${SECRETS_DIR}"
-        echo "Setup mode: ${SETUP_MODE}"
+        echo "Selected Admin UI: ${SELECTED_ADMIN_UI}"
+        echo "Previous Admin UI: ${PREVIOUS_ADMIN_UI}"
+        echo "Action: ${ACTION_MODE}"
+        echo "Secret mode: ${SECRET_MODE}"
+        echo "Bootstrap mode: ${BOOTSTRAP_MODE}"
         echo "Public Auth routes: ${SCRIPT62_PUBLIC_AUTH_ROUTES}"
         echo "VERIFY_STATUS=${VERIFY_STATUS}"
         echo "VERIFY_PASS_COUNT=${VERIFY_PASS_COUNT}"
@@ -753,6 +1072,12 @@ function write_completion_marker() {
         echo "SCRIPT62_DOCKER_DIR=${DOCKER_DIR}"
         echo "SCRIPT62_COMPOSE_DIR=${COMPOSE_DIR}"
         echo "SCRIPT62_SECRETS_DIR=${SECRETS_DIR}"
+        echo "SCRIPT62_SELECTED_ADMIN_UI=${SELECTED_ADMIN_UI}"
+        echo "SCRIPT62_PREVIOUS_ADMIN_UI=${PREVIOUS_ADMIN_UI}"
+        echo "SCRIPT62_ACTION=${ACTION_MODE}"
+        echo "SCRIPT62_SECRET_MODE=${SECRET_MODE}"
+        echo "SCRIPT62_BOOTSTRAP_MODE=${BOOTSTRAP_MODE}"
+        echo "SCRIPT62_MIGRATION_STOP_OLD=${MIGRATION_STOP_OLD}"
         echo "SCRIPT62_DOCKGE=${SCRIPT62_DOCKGE}"
         echo "SCRIPT62_DOCKHAND=${SCRIPT62_DOCKHAND}"
         echo "SCRIPT62_KOMODO=${SCRIPT62_KOMODO}"
@@ -771,11 +1096,16 @@ function write_completion_marker() {
 function show_finished_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
     echo -e "${YW}Admin UI:${CL}"
+    final_line "Selected" "$SELECTED_ADMIN_UI_DISPLAY" "$ANS"
+    final_line "Previous" "$(admin_display_name "$PREVIOUS_ADMIN_UI")" "$(status_color_for_value "$PREVIOUS_ADMIN_UI")"
+    final_line "Action" "$ACTION_MODE" "$(status_color_for_value "$ACTION_MODE")"
+    final_line "Secret mode" "$SECRET_MODE" "$(status_color_for_value "$SECRET_MODE")"
+    final_line "Bootstrap mode" "$BOOTSTRAP_MODE" "$(status_color_for_value "$BOOTSTRAP_MODE")"
+    final_line "Bootstrap access" "$SCRIPT62_BOOTSTRAP_ACCESS" "$(status_color_for_value "$SCRIPT62_BOOTSTRAP_ACCESS")"
     final_line "Dockge" "$SCRIPT62_DOCKGE" "$(status_color_for_value "$SCRIPT62_DOCKGE")"
     final_line "Dockhand" "$SCRIPT62_DOCKHAND" "$(status_color_for_value "$SCRIPT62_DOCKHAND")"
     final_line "Komodo" "$SCRIPT62_KOMODO" "$(status_color_for_value "$SCRIPT62_KOMODO")"
     final_line "Portainer" "$SCRIPT62_PORTAINER" "$(status_color_for_value "$SCRIPT62_PORTAINER")"
-    final_line "Bootstrap access" "$SCRIPT62_BOOTSTRAP_ACCESS" "$(status_color_for_value "$SCRIPT62_BOOTSTRAP_ACCESS")"
     final_line "Public Auth routes" "$SCRIPT62_PUBLIC_AUTH_ROUTES" "$YW"
     echo ""
     echo -e "${YW}Verification:${CL}"
@@ -793,6 +1123,12 @@ function main() {
     init_script
     validate_script61_handoff
     validate_preflight_runtime
+    section "ADMIN UI DETECTION"
+    refresh_setup_mode
+    aligned_status_line "Existing Admin UI" "$(admin_display_name "$PREVIOUS_ADMIN_UI")" "$(status_color_for_value "$PREVIOUS_ADMIN_UI")"
+    aligned_status_line "Business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
+    collect_admin_ui_selection
+    collect_bootstrap_decision
     show_setup_plan_and_confirm
     section "APPLY CHANGES"
     install_admin_ui_files
