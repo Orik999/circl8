@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.4"
+SCRIPT_VERSION="v1.0.5"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="selected-deploy-output-polish"
+SCRIPT_BUILD="selected-ui-output-cleanup"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -118,7 +118,7 @@ COMPOSE_FILES_STATE="will install"
 NETWORK_T2_PROXY="unknown"
 NETWORK_SOCKET_PROXY="unknown"
 BOOTSTRAP_PORTS_STATE="unknown"
-UI_LABEL_WIDTH="28"
+UI_LABEL_WIDTH="20"
 
 function header_info() {
 cat <<'BANNER'
@@ -149,24 +149,40 @@ function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        PASS|completed|active|running|healthy|yes|ready|present|configured|deployed|validated|available/platform|available|fresh-install|enabled|generated|reused|manual|not-required) printf '%s' "$GN" ;;
-        PASS_WITH_WARNINGS|skipped|unknown|pending-script-6.3|configured*|rerun/update|rerun-update|migration|will*|selection\ pending|not\ detected|none|not-selected|preserved-enabled|preserved-disabled|temporary-for-migration|user-enabled|user-disabled|temporary-closed|stopped-old|disabled|platform-owned) printf '%s' "$YW" ;;
+        PASS|completed|active|running|healthy|yes|ready|present|configured|deployed|validated|available/platform|available|fresh-install|enabled|generated|reused|manual|not-required|not\ required) printf '%s' "$GN" ;;
+        PASS_WITH_WARNINGS|skipped|unknown|pending-script-6.3|pending\ Script\ 6.3|configured*|rerun/update|rerun-update|migration|will*|selection\ pending|not\ detected|none|not-selected|preserved-enabled|preserved-disabled|temporary-for-migration|user-enabled|user-disabled|temporary-closed|stopped-old|disabled|platform-owned) printf '%s' "$YW" ;;
         FAIL|failed|missing|no|inactive|not-ready|blocked) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
     esac
 }
 
+function ui_display_value() {
+    local value="${1:-unknown}"
+    case "$value" in
+        not-required) printf 'not required' ;;
+        pending-script-6.3) printf 'pending Script 6.3' ;;
+        preserve\ enabled|preserved-enabled|user-enabled) printf 'keep enabled' ;;
+        preserve\ disabled|preserved-disabled|user-disabled) printf 'keep disabled' ;;
+        detected/running) printf 'running' ;;
+        temporary-closed) printf 'closed after migration' ;;
+        temporary-for-migration) printf 'temporary for migration' ;;
+        *) printf '%s' "$value" ;;
+    esac
+}
+
 function aligned_status_line() {
-    local label="$1" value="${2:-unknown}" color="${3:-}" width="${4:-$UI_LABEL_WIDTH}"
+    local label="$1" value="${2:-unknown}" color="${3:-}" width="${4:-$UI_LABEL_WIDTH}" display_value=""
     [ -n "$value" ] || value="unknown"
     [ -n "$color" ] || color="$(status_color_for_value "$value")"
-    printf '  %b%-*s%b %b%s%b\n' "$BL" "$width" "${label}:" "$CL" "$color" "$value" "$CL"
+    display_value="$(ui_display_value "$value")"
+    printf '  %b%-*s%b %b%s%b\n' "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function final_line() {
-    local label="$1" value="${2:-not configured}" color="${3:-$GN}"
+    local label="$1" value="${2:-not configured}" color="${3:-$GN}" display_value=""
     [ -n "$value" ] || value="not configured"
-    printf '  %b%-24s%b %b%s%b\n' "$BL" "${label}:" "$CL" "$color" "$value" "$CL"
+    display_value="$(ui_display_value "$value")"
+    printf '  %b%-*s%b %b%s%b\n' "$BL" "$UI_LABEL_WIDTH" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function mini_header() {
@@ -175,14 +191,15 @@ function mini_header() {
 }
 
 function progress_line() {
-    echo -e "  ${HOLD} ${YW}$1...${CL}"
+    [ -n "${DEPLOY_OUTPUT_FILE:-}" ] && echo "$1" >> "$DEPLOY_OUTPUT_FILE"
 }
 
 function deploy_status_line() {
-    local label="$1" value="${2:-unknown}" color="${3:-}" width="${4:-24}"
+    local label="$1" value="${2:-unknown}" color="${3:-}" width="${4:-$UI_LABEL_WIDTH}" display_value=""
     [ -n "$value" ] || value="unknown"
     [ -n "$color" ] || color="$(status_color_for_value "$value")"
-    printf '  %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$value" "$CL"
+    display_value="$(ui_display_value "$value")"
+    printf '  %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function trim_value() {
@@ -541,11 +558,16 @@ function selected_bootstrap_port_status() {
 function selected_bootstrap_port_display() {
     local status=""
     status="$(selected_bootstrap_port_status)"
-    if [ -n "${SELECTED_BOOTSTRAP_PORT:-}" ]; then
-        printf '%s %s' "$SELECTED_BOOTSTRAP_PORT" "$status"
-    else
+    if [ -z "${SELECTED_BOOTSTRAP_PORT:-}" ]; then
         printf 'unknown'
+        return 0
     fi
+    case "$status" in
+        available) printf '%s available' "$SELECTED_BOOTSTRAP_PORT" ;;
+        platform-owned) printf '%s in use by %s' "$SELECTED_BOOTSTRAP_PORT" "$SELECTED_ADMIN_UI_DISPLAY" ;;
+        blocked) printf '%s blocked' "$SELECTED_BOOTSTRAP_PORT" ;;
+        *) printf '%s %s' "$SELECTED_BOOTSTRAP_PORT" "$status" ;;
+    esac
 }
 
 function runtime_access_host() {
@@ -641,7 +663,7 @@ function refresh_setup_mode() {
     fi
 
     if admin_bootstrap_listening "$SELECTED_ADMIN_UI"; then
-        BOOTSTRAP_CURRENT="detected/running"
+        BOOTSTRAP_CURRENT="running"
     else
         BOOTSTRAP_CURRENT="not detected"
     fi
@@ -657,10 +679,10 @@ function refresh_setup_mode() {
         ACTION_MODE="rerun-update"
         if admin_bootstrap_listening "$SELECTED_ADMIN_UI"; then
             BOOTSTRAP_MODE="preserved-enabled"
-            BOOTSTRAP_ACTION="preserve enabled"
+            BOOTSTRAP_ACTION="keep enabled"
         else
             BOOTSTRAP_MODE="preserved-disabled"
-            BOOTSTRAP_ACTION="preserve disabled"
+            BOOTSTRAP_ACTION="keep disabled"
         fi
         MIGRATION_STOP_OLD="not-applicable"
     else
@@ -723,15 +745,26 @@ function collect_bootstrap_decision() {
     if [ "$ACTION_MODE" = "rerun-update" ]; then
         if admin_bootstrap_listening "$SELECTED_ADMIN_UI"; then
             keep="$(read_yes_no "Keep bootstrap access enabled for ${SELECTED_ADMIN_UI_DISPLAY}?" "y")"
+            if [[ "$keep" =~ ^[Yy]$ ]]; then
+                BOOTSTRAP_MODE="user-enabled"
+                BOOTSTRAP_ACTION="keep enabled"
+                msg_ok "Bootstrap access will be kept enabled"
+            else
+                BOOTSTRAP_MODE="user-disabled"
+                BOOTSTRAP_ACTION="keep disabled"
+                msg_ok "Bootstrap access will be kept disabled"
+            fi
         else
             keep="$(read_yes_no "Enable bootstrap access for ${SELECTED_ADMIN_UI_DISPLAY}?" "n")"
-        fi
-        if [[ "$keep" =~ ^[Yy]$ ]]; then
-            BOOTSTRAP_MODE="user-enabled"
-            BOOTSTRAP_ACTION="enable"
-        else
-            BOOTSTRAP_MODE="user-disabled"
-            BOOTSTRAP_ACTION="disable"
+            if [[ "$keep" =~ ^[Yy]$ ]]; then
+                BOOTSTRAP_MODE="user-enabled"
+                BOOTSTRAP_ACTION="enable"
+                msg_ok "Bootstrap access will be enabled"
+            else
+                BOOTSTRAP_MODE="user-disabled"
+                BOOTSTRAP_ACTION="keep disabled"
+                msg_ok "Bootstrap access will be kept disabled"
+            fi
         fi
     elif [ "$ACTION_MODE" = "migration" ]; then
         if [ "$BUSINESS_MODE" = "yes" ]; then
@@ -743,10 +776,12 @@ function collect_bootstrap_decision() {
             BOOTSTRAP_KEEP_AFTER_MIGRATION="yes"
             BOOTSTRAP_MODE="user-enabled"
             BOOTSTRAP_ACTION="temporary test, then keep enabled"
+            msg_ok "Bootstrap access will be kept enabled after migration"
         else
             BOOTSTRAP_KEEP_AFTER_MIGRATION="no"
             BOOTSTRAP_MODE="temporary-for-migration"
             BOOTSTRAP_ACTION="temporary test, then close"
+            msg_ok "Bootstrap access will be closed after migration"
         fi
     else
         BOOTSTRAP_MODE="enabled"
@@ -760,7 +795,7 @@ function collect_bootstrap_decision() {
     fi
     aligned_status_line "Public Auth routes" "$SCRIPT62_PUBLIC_AUTH_ROUTES" "$YW"
 
-    if [ "$port_status" = "blocked" ] && { [ "$BOOTSTRAP_ACTION" != "disable" ] && [ "$BOOTSTRAP_ACTION" != "preserve disabled" ]; }; then
+    if [ "$port_status" = "blocked" ] && { [ "$BOOTSTRAP_ACTION" != "keep disabled" ] && [ "$BOOTSTRAP_ACTION" != "disable" ]; }; then
         msg_warn "Selected bootstrap port ${SELECTED_BOOTSTRAP_PORT} is already in use by something other than the selected Admin UI. Deployment may fail unless that listener is expected."
     fi
 }
@@ -782,9 +817,6 @@ function validate_preflight_runtime() {
     root_path_exists "$ENV_FILE" && aligned_status_line ".env file" "present" "$GN" || { aligned_status_line ".env file" "missing" "$RD"; failure="yes"; }
     docker network inspect t2_proxy >/dev/null 2>&1 && { NETWORK_T2_PROXY="yes"; aligned_status_line "t2_proxy network" "ready" "$GN"; } || { NETWORK_T2_PROXY="no"; aligned_status_line "t2_proxy network" "missing" "$RD"; failure="yes"; }
     docker network inspect socket_proxy >/dev/null 2>&1 && { NETWORK_SOCKET_PROXY="yes"; aligned_status_line "socket_proxy network" "ready" "$GN"; } || { NETWORK_SOCKET_PROXY="no"; aligned_status_line "socket_proxy network" "missing" "$RD"; failure="yes"; }
-    aligned_status_line "Compose files" "selection pending" "$YW"
-    aligned_status_line "Bootstrap ports" "selection pending" "$YW"
-
     refresh_setup_mode
     [ "$failure" = "no" ] || msg_error "Runtime preflight failed. Fix the checks above, then rerun Script 6.2."
     msg_ok "RUNTIME PREFLIGHT PASSED"
@@ -806,12 +838,12 @@ function show_setup_plan_and_confirm() {
     aligned_status_line "Live/business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
     aligned_status_line "Bootstrap current" "$BOOTSTRAP_CURRENT" "$(status_color_for_value "$BOOTSTRAP_CURRENT")"
     aligned_status_line "Bootstrap action" "$BOOTSTRAP_ACTION" "$GN"
-    aligned_status_line "Bootstrap port" "$SELECTED_BOOTSTRAP_PORT" "$GN"
+    aligned_status_line "Bootstrap port" "$(selected_bootstrap_port_display)" "$(status_color_for_value "$(selected_bootstrap_port_status)")"
     if [ "$ACTION_MODE" = "migration" ]; then
         aligned_status_line "Stop old stack" "after new verified" "$YW"
         aligned_status_line "Keep new bootstrap" "$BOOTSTRAP_KEEP_AFTER_MIGRATION" "$(status_color_for_value "$BOOTSTRAP_KEEP_AFTER_MIGRATION")"
     fi
-    aligned_status_line "Public Auth routes" "configured / pending Script 6.3" "$YW"
+    aligned_status_line "Public Auth routes" "pending Script 6.3" "$YW"
 
     if [ "$ACTION_MODE" = "migration" ]; then
         echo ""
@@ -836,9 +868,6 @@ function show_setup_plan_and_confirm() {
     else
         aligned_status_line "Migration" "not applicable" "$YW"
     fi
-    echo ""
-    echo -e "${YW}Deployment order:${CL}"
-    aligned_status_line "1" "$SELECTED_ADMIN_UI_DISPLAY" "$GN" 4
     echo ""
     echo -e "${YW}Prepared by Script 6.1:${CL}"
     aligned_status_line "Docker dir" "$DOCKER_DIR" "$GN"
@@ -1004,18 +1033,18 @@ function validate_compose_files() {
     mini_header "Compose validation"
     if docker compose --env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")" config >/dev/null; then
         base_ok="yes"
-        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} config" "valid" "$GN"
+        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} compose" "valid" "$GN"
     fi
     [ "$base_ok" = "yes" ] || fail_with_deployment_log "$SELECTED_ADMIN_UI_DISPLAY" "$SELECTED_COMPOSE_FILE" "$SELECTED_PROJECT" "${SELECTED_ADMIN_UI_DISPLAY} compose config validation failed"
 
-    if [ "$BOOTSTRAP_ACTION" = "preserve disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then
-        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} bootstrap config" "skipped" "$YW"
+    if [ "$BOOTSTRAP_ACTION" = "keep disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then
+        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} bootstrap" "skipped" "$YW"
         return 0
     fi
 
     if docker compose --env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")" -f "$(compose_path "$SELECTED_OVERRIDE_FILE")" config >/dev/null; then
         bootstrap_ok="yes"
-        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} bootstrap config" "valid" "$GN"
+        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} bootstrap" "valid" "$GN"
     fi
     [ "$bootstrap_ok" = "yes" ] || fail_with_deployment_log "$SELECTED_ADMIN_UI_DISPLAY" "$SELECTED_OVERRIDE_FILE" "$SELECTED_PROJECT" "${SELECTED_ADMIN_UI_DISPLAY} bootstrap config validation failed"
 }
@@ -1148,7 +1177,7 @@ function update_admin_statuses_after_deploy() {
 function deploy_admin_ui() {
     local include_bootstrap="yes"
     mini_header "Admin UI deployment"
-    if [ "$BOOTSTRAP_ACTION" = "preserve disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then include_bootstrap="no"; fi
+    if [ "$BOOTSTRAP_ACTION" = "keep disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then include_bootstrap="no"; fi
     if [ "$ACTION_MODE" = "migration" ]; then include_bootstrap="yes"; fi
     deploy_selected_stack "$include_bootstrap"
     wait_for_container_ready "$SELECTED_CONTAINER" "$SELECTED_ADMIN_UI_DISPLAY" 120 4
@@ -1191,7 +1220,7 @@ function create_verification_report() {
     if [ "$selected_state" = "running" ] || [ "$selected_state" = "healthy" ]; then verify_pass "${SELECTED_ADMIN_UI_DISPLAY} running"; else verify_fail "${SELECTED_ADMIN_UI_DISPLAY} running" "state is ${selected_state}" "inspect docker logs ${SELECTED_CONTAINER}"; fi
 
     port="$SELECTED_BOOTSTRAP_PORT"
-    if [ "$BOOTSTRAP_ACTION" = "preserve disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ] || [ "$SCRIPT62_BOOTSTRAP_ACCESS" = "temporary-closed" ]; then
+    if [ "$BOOTSTRAP_ACTION" = "keep disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ] || [ "$SCRIPT62_BOOTSTRAP_ACCESS" = "temporary-closed" ]; then
         [ "$SCRIPT62_BOOTSTRAP_ACCESS" = "temporary-closed" ] || SCRIPT62_BOOTSTRAP_ACCESS="disabled"
         verify_info "Bootstrap access disabled by selected mode"
     elif [ -n "$port" ] && [ "$(port_busy_status "$port")" = "listening" ]; then
@@ -1206,7 +1235,7 @@ function create_verification_report() {
         if admin_container_running "$PREVIOUS_ADMIN_UI"; then verify_fail "old Admin UI stopped" "${PREVIOUS_ADMIN_UI} still running" "stop old stack after verifying selected Admin UI"; else verify_pass "old Admin UI stopped after migration"; fi
     fi
 
-    verify_info "Public Auth routes are configured/pending Script 6.3 Authentik"
+    verify_info "Public Auth route is pending Script 6.3 Authentik"
     if [ "$VERIFY_FAIL_COUNT" -gt 0 ]; then VERIFY_STATUS="FAIL"; elif [ "$VERIFY_WARN_COUNT" -gt 0 ]; then VERIFY_STATUS="PASS_WITH_WARNINGS"; else VERIFY_STATUS="PASS"; fi
     if [ "$VERIFY_STATUS" = "PASS" ] || [ "$VERIFY_STATUS" = "PASS_WITH_WARNINGS" ]; then SCRIPT62_READY_FOR_SCRIPT63="yes"; SCRIPT62_READY_FOR_SCRIPT64="yes"; SCRIPT62_READY_FOR_SCRIPT65="yes"; SCRIPT62_READY_FOR_SCRIPT66="yes"; fi
 
