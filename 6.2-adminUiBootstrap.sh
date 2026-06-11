@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.2"
+SCRIPT_VERSION="v1.0.3"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="selected-ui-preflight-polish"
+SCRIPT_BUILD="selected-file-url-encoding-fix"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -837,6 +837,13 @@ function show_setup_plan_and_confirm() {
     fi
 }
 
+function raw_url_path_encode() {
+    local value="${1:-}"
+    # GitHub raw URLs require literal square brackets in filenames to be percent-encoded.
+    # Keep local destination filenames unchanged; encode only the URL path component.
+    printf '%s' "$value" | sed 's/\[/%5B/g; s/\]/%5D/g'
+}
+
 function download_file() {
     local url="$1" dest="$2"
     if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" -o "$dest"; else wget -qO "$dest" "$url"; fi
@@ -853,11 +860,12 @@ function compose_display_name() {
 }
 
 function install_admin_ui_file() {
-    local filename="${1:-}" local_source="" url="" dest="" tmp="" display_name=""
+    local filename="${1:-}" encoded_filename="" local_source="" url="" dest="" tmp="" display_name=""
     [ -n "$filename" ] || msg_error "Admin UI filename was not provided."
     display_name="$(compose_display_name "$filename")"
+    encoded_filename="$(raw_url_path_encode "$filename")"
     local_source="${SCRIPT_DIR}/docker/${filename}"
-    url="${RAW_BASE}/docker/${filename}"
+    url="${RAW_BASE}/docker/${encoded_filename}"
     dest="${COMPOSE_DIR}/${filename}"
     if [ -f "$local_source" ]; then
         msg_info "Installing ${display_name} file"
@@ -865,7 +873,10 @@ function install_admin_ui_file() {
     else
         msg_info "Downloading ${display_name} file"
         tmp="$(mktemp)"; TEMP_FILES+=("$tmp")
-        download_file "$url" "$tmp" || msg_error "Failed to download ${url}"
+        if ! download_file "$url" "$tmp" >> "$DEPLOY_OUTPUT_FILE" 2>&1; then
+            { echo "Download failed for selected Admin UI file: ${filename}"; echo "URL: ${url}"; } >> "$DEPLOY_OUTPUT_FILE"
+            fail_with_deployment_log "$display_name" "$filename" "${SELECTED_PROJECT:-n/a}" "Failed to download selected Admin UI file: ${filename}"
+        fi
         if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" cp "$tmp" "$dest"; else cp "$tmp" "$dest"; fi
     fi
     root_file_not_empty "$dest" || msg_error "Admin UI file install failed or produced an empty file: ${dest}"
@@ -1264,6 +1275,7 @@ function main() {
     collect_bootstrap_decision
     show_setup_plan_and_confirm
     section "APPLY CHANGES"
+    echo -e "${YW}Applying confirmed Admin UI bootstrap setup plan.${CL}"
     install_admin_ui_files
     ensure_admin_ui_secret_env
     verify_networks
