@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.1-platformCoreBootstrap.sh"
-SCRIPT_VERSION="v1.0.6"
+SCRIPT_VERSION="v1.0.7"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="core-warning-cleanup"
+SCRIPT_BUILD="ui-alignment-polish"
 
 T=15
 LOG_FILE="/var/log/circl8-platform-core.log"
@@ -109,6 +109,9 @@ SCRIPT61_READY_FOR_SCRIPT63="no"
 SCRIPT61_READY_FOR_SCRIPT64="no"
 SCRIPT61_READY_FOR_SCRIPT65="no"
 SCRIPT61_READY_FOR_SCRIPT66="no"
+
+UI_STATUS_LABEL_WIDTH="24"
+UI_PLAN_LABEL_WIDTH="24"
 
 function header_info() {
 cat <<'EOF'
@@ -335,22 +338,22 @@ function validate_script6_handoff() {
     refresh_env_paths
 
     echo -e "${YW}Script 6:${CL}"
-    aligned_status_line "Status" "$SCRIPT6_STATUS" "$(status_color_for_value "$SCRIPT6_STATUS")" 26
-    aligned_status_line "Version" "$SCRIPT6_VERSION" "$GN" 26
-    aligned_status_line "Verification" "$SCRIPT6_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT6_VERIFY_STATUS")" 26
-    aligned_status_line "Ready for Script 6.1" "$SCRIPT6_READY_FOR_SCRIPT61" "$(status_color_for_value "$SCRIPT6_READY_FOR_SCRIPT61")" 26
+    aligned_status_line "Status" "$SCRIPT6_STATUS" "$(status_color_for_value "$SCRIPT6_STATUS")" "$UI_STATUS_LABEL_WIDTH"
+    aligned_status_line "Version" "$SCRIPT6_VERSION" "$GN" "$UI_STATUS_LABEL_WIDTH"
+    aligned_status_line "Verification" "$SCRIPT6_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT6_VERIFY_STATUS")" "$UI_STATUS_LABEL_WIDTH"
+    aligned_status_line "Ready for Script 6.1" "$SCRIPT6_READY_FOR_SCRIPT61" "$(status_color_for_value "$SCRIPT6_READY_FOR_SCRIPT61")" "$UI_STATUS_LABEL_WIDTH"
     echo ""
     echo -e "${YW}Prepared environment:${CL}"
-    aligned_status_line "Docker user" "${DOCKER_USER:-missing}" "$(status_color_for_value "${DOCKER_USER:-missing}")" 26
-    aligned_status_line "Docker dir" "${DOCKER_DIR:-missing}" "$GN" 26
-    aligned_status_line "Compose dir" "${COMPOSE_DIR:-missing}" "$GN" 26
-    aligned_status_line "Secrets dir" "${SECRETS_DIR:-missing}" "$GN" 26
-    aligned_status_line "Domain" "${DOMAIN_VALUE:-missing}" "$GN" 26
+    aligned_status_line "Docker user" "${DOCKER_USER:-missing}" "$(status_color_for_value "${DOCKER_USER:-missing}")" "$UI_STATUS_LABEL_WIDTH"
+    aligned_status_line "Docker dir" "${DOCKER_DIR:-missing}" "$GN" "$UI_STATUS_LABEL_WIDTH"
+    aligned_status_line "Compose dir" "${COMPOSE_DIR:-missing}" "$GN" "$UI_STATUS_LABEL_WIDTH"
+    aligned_status_line "Secrets dir" "${SECRETS_DIR:-missing}" "$GN" "$UI_STATUS_LABEL_WIDTH"
+    aligned_status_line "Domain" "${DOMAIN_VALUE:-missing}" "$GN" "$UI_STATUS_LABEL_WIDTH"
     echo ""
     echo -e "${YW}Runtime handoff:${CL}"
-    aligned_status_line "Traefik config" "$SCRIPT6_TRAEFIK_CONFIG_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_CONFIG_READY")" 26
-    aligned_status_line "Traefik ACME" "$SCRIPT6_TRAEFIK_ACME_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_ACME_READY")" 26
-    aligned_status_line "Cloudflare token file" "$SCRIPT6_CF_TOKEN_FILE_READY" "$(status_color_for_value "$SCRIPT6_CF_TOKEN_FILE_READY")" 26
+    aligned_status_line "Traefik config" "$SCRIPT6_TRAEFIK_CONFIG_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_CONFIG_READY")" "$UI_STATUS_LABEL_WIDTH"
+    aligned_status_line "Traefik ACME" "$SCRIPT6_TRAEFIK_ACME_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_ACME_READY")" "$UI_STATUS_LABEL_WIDTH"
+    aligned_status_line "Cloudflare token file" "$SCRIPT6_CF_TOKEN_FILE_READY" "$(status_color_for_value "$SCRIPT6_CF_TOKEN_FILE_READY")" "$UI_STATUS_LABEL_WIDTH"
 
     root_path_exists "$SCRIPT6_MARKER" || { msg_warn "Script 6 marker missing: ${SCRIPT6_MARKER}"; failure="yes"; }
     [ "$SCRIPT6_STATUS" = "completed" ] || { msg_warn "Script 6 marker is not completed"; failure="yes"; }
@@ -634,10 +637,10 @@ function show_setup_plan_and_confirm() {
     echo -e "${YW}Script 6.1 will deploy only platform core services after confirmation.${CL}"
     echo ""
     echo -e "${YW}Setup mode:${CL}"
-    aligned_status_line "Mode" "$SETUP_MODE" "$(status_color_for_value "$SETUP_MODE")" 18
-    aligned_status_line "Existing platform" "$EXISTING_PLATFORM" "$(status_color_for_value "$EXISTING_PLATFORM")" 18
-    aligned_status_line "Port ownership" "$PORT_OWNERSHIP" "$(status_color_for_value "$PORT_OWNERSHIP")" 18
-    aligned_status_line "ACME storage" "$([ "$SETUP_MODE" = "rerun/update" ] && echo preserve || echo "preserve/create as needed")" "$GN" 18
+    aligned_status_line "Mode" "$SETUP_MODE" "$(status_color_for_value "$SETUP_MODE")" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Existing platform" "$EXISTING_PLATFORM" "$(status_color_for_value "$EXISTING_PLATFORM")" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Port ownership" "$PORT_OWNERSHIP" "$(status_color_for_value "$PORT_OWNERSHIP")" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "ACME storage" "$([ "$SETUP_MODE" = "rerun/update" ] && echo preserve || echo "preserve/create as needed")" "$GN" "$UI_PLAN_LABEL_WIDTH"
     if [ "$SETUP_MODE" = "rerun/update" ]; then
         echo ""
         echo -e "${YW}Existing platform core deployment detected.${CL}"
@@ -646,11 +649,11 @@ function show_setup_plan_and_confirm() {
     fi
     echo ""
     echo -e "${YW}Apply changes:${CL}"
-    aligned_status_line "Compose files" "install into compose dir" "$GN" 24
-    aligned_status_line "Docker networks" "create/verify" "$GN" 24
-    aligned_status_line "Compose configs" "validate before deploy" "$GN" 24
-    aligned_status_line "Image defaults" "compose-owned" "$GN" 24
-    aligned_status_line "Verification" "write report and marker" "$GN" 24
+    aligned_status_line "Compose files" "install into compose dir" "$GN" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Docker networks" "create/verify" "$GN" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Compose configs" "validate before deploy" "$GN" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Image defaults" "compose-owned" "$GN" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Verification" "write report and marker" "$GN" "$UI_PLAN_LABEL_WIDTH"
     echo ""
     echo -e "${YW}Deployment order:${CL}"
     aligned_status_line "1" "$(compose_display_name "$COMPOSE_SOCKET_PROXY")" "$GN" 4
@@ -659,13 +662,13 @@ function show_setup_plan_and_confirm() {
     aligned_status_line "4" "$([ "$CF_SERVICES_ENABLED" = "yes" ] && compose_display_name "$COMPOSE_CF_COMPANION" || echo "$(compose_display_name "$COMPOSE_CF_COMPANION") (skipped)")" "$GN" 4
     echo ""
     echo -e "${YW}Prepared by Script 6:${CL}"
-    aligned_status_line "Domain" "$DOMAIN_VALUE" "$GN" 18
-    aligned_status_line "Docker dir" "$DOCKER_DIR" "$GN" 18
-    aligned_status_line "Compose dir" "$COMPOSE_DIR" "$GN" 18
-    aligned_status_line "Secrets dir" "$SECRETS_DIR" "$GN" 18
-    aligned_status_line "Traefik config" "$SCRIPT6_TRAEFIK_CONFIG_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_CONFIG_READY")" 18
-    aligned_status_line "ACME storage" "$SCRIPT6_TRAEFIK_ACME_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_ACME_READY")" 18
-    aligned_status_line "Cloudflare DNS" "$([ "$CF_SERVICES_ENABLED" = "yes" ] && echo enabled || echo skipped)" "$GN" 18
+    aligned_status_line "Domain" "$DOMAIN_VALUE" "$GN" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Docker dir" "$DOCKER_DIR" "$GN" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Compose dir" "$COMPOSE_DIR" "$GN" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Secrets dir" "$SECRETS_DIR" "$GN" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Traefik config" "$SCRIPT6_TRAEFIK_CONFIG_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_CONFIG_READY")" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "ACME storage" "$SCRIPT6_TRAEFIK_ACME_READY" "$(status_color_for_value "$SCRIPT6_TRAEFIK_ACME_READY")" "$UI_PLAN_LABEL_WIDTH"
+    aligned_status_line "Cloudflare DNS" "$([ "$CF_SERVICES_ENABLED" = "yes" ] && echo enabled || echo skipped)" "$GN" "$UI_PLAN_LABEL_WIDTH"
     echo ""
     read -r -p "Apply this platform core setup plan? [Y/n]: " apply_yn </dev/tty || apply_yn=""
     if [[ "$apply_yn" =~ ^[Nn]$ ]]; then
