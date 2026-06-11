@@ -1,0 +1,132 @@
+# Project Circl8
+# Stack: 05 Authentik
+# Purpose: Identity provider, SSO control plane, and Traefik ForwardAuth source
+# Managed by: Script 6.3
+# Requires: Script 6.2 marker, .env from Script 6, t2_proxy from Script 6.1
+# Secrets/env: Authentik secret key, PostgreSQL password, bootstrap token/password via .env
+# SMTP: Reuses Script 6 SMTP env values if present; SMTP is not required for compose validity
+# Networks: t2_proxy external, authentik internal
+# Notes: PostgreSQL 17, no Redis, no external outpost, no docker.sock, no host ports
+
+services:
+  authentik-postgresql:
+    image: ${AUTHENTIK_POSTGRES_IMAGE:-docker.io/library/postgres:17-alpine}
+    container_name: authentik-postgresql
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-UTC}
+      POSTGRES_DB: ${AUTHENTIK_POSTGRES_DB:-authentik}
+      POSTGRES_USER: ${AUTHENTIK_POSTGRES_USER:-authentik}
+      POSTGRES_PASSWORD: ${AUTHENTIK_POSTGRES_PASSWORD:?AUTHENTIK_POSTGRES_PASSWORD is required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d \"$${POSTGRES_DB}\" -U \"$${POSTGRES_USER}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - ${DOCKER_DIR:?DOCKER_DIR is required}/appdata/authentik/postgresql:/var/lib/postgresql/data
+    networks:
+      - authentik
+
+  authentik-server:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:latest}
+    container_name: authentik-server
+    restart: unless-stopped
+    command: server
+    depends_on:
+      authentik-postgresql:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-UTC}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?AUTHENTIK_SECRET_KEY is required}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_POSTGRES_PASSWORD:?AUTHENTIK_POSTGRES_PASSWORD is required}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:?AUTHENTIK_BOOTSTRAP_EMAIL is required}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:?AUTHENTIK_BOOTSTRAP_PASSWORD is required}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:?AUTHENTIK_BOOTSTRAP_TOKEN is required}
+      AUTHENTIK_EXTERNAL_URL: ${AUTHENTIK_EXTERNAL_URL:?AUTHENTIK_EXTERNAL_URL is required}
+      AUTHENTIK_HOST_BROWSER: ${AUTHENTIK_HOST_BROWSER:?AUTHENTIK_HOST_BROWSER is required}
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL__PORT:-}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL__USERNAME:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL__PASSWORD:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL__USE_TLS:-}
+      AUTHENTIK_EMAIL__USE_SSL: ${AUTHENTIK_EMAIL__USE_SSL:-}
+      AUTHENTIK_EMAIL__TIMEOUT: ${AUTHENTIK_EMAIL__TIMEOUT:-}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL__FROM:-}
+    healthcheck:
+      test: ["CMD-SHELL", "ak healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    volumes:
+      - ${DOCKER_DIR:?DOCKER_DIR is required}/appdata/authentik/media:/media
+      - ${DOCKER_DIR:?DOCKER_DIR is required}/appdata/authentik/custom-templates:/templates
+      - ${DOCKER_DIR:?DOCKER_DIR is required}/appdata/authentik/certs:/certs
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=t2_proxy
+      - traefik.http.routers.authentik.rule=Host(`${AUTHENTIK_ROUTE_HOST:?AUTHENTIK_ROUTE_HOST is required}`)
+      - traefik.http.routers.authentik.entrypoints=https
+      - traefik.http.routers.authentik.tls=true
+      - traefik.http.routers.authentik.middlewares=chain-secure@file
+      - traefik.http.routers.authentik.service=authentik
+      - traefik.http.services.authentik.loadbalancer.server.port=9000
+    networks:
+      - t2_proxy
+      - authentik
+
+  authentik-worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:latest}
+    container_name: authentik-worker
+    restart: unless-stopped
+    command: worker
+    depends_on:
+      authentik-postgresql:
+        condition: service_healthy
+      authentik-server:
+        condition: service_started
+    environment:
+      TZ: ${TZ:-UTC}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?AUTHENTIK_SECRET_KEY is required}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_POSTGRES_PASSWORD:?AUTHENTIK_POSTGRES_PASSWORD is required}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:?AUTHENTIK_BOOTSTRAP_EMAIL is required}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:?AUTHENTIK_BOOTSTRAP_PASSWORD is required}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:?AUTHENTIK_BOOTSTRAP_TOKEN is required}
+      AUTHENTIK_EXTERNAL_URL: ${AUTHENTIK_EXTERNAL_URL:?AUTHENTIK_EXTERNAL_URL is required}
+      AUTHENTIK_HOST_BROWSER: ${AUTHENTIK_HOST_BROWSER:?AUTHENTIK_HOST_BROWSER is required}
+      AUTHENTIK_EMAIL__HOST: ${AUTHENTIK_EMAIL__HOST:-}
+      AUTHENTIK_EMAIL__PORT: ${AUTHENTIK_EMAIL__PORT:-}
+      AUTHENTIK_EMAIL__USERNAME: ${AUTHENTIK_EMAIL__USERNAME:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${AUTHENTIK_EMAIL__PASSWORD:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${AUTHENTIK_EMAIL__USE_TLS:-}
+      AUTHENTIK_EMAIL__USE_SSL: ${AUTHENTIK_EMAIL__USE_SSL:-}
+      AUTHENTIK_EMAIL__TIMEOUT: ${AUTHENTIK_EMAIL__TIMEOUT:-}
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL__FROM:-}
+    healthcheck:
+      test: ["CMD-SHELL", "ak healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    volumes:
+      - ${DOCKER_DIR:?DOCKER_DIR is required}/appdata/authentik/media:/media
+      - ${DOCKER_DIR:?DOCKER_DIR is required}/appdata/authentik/custom-templates:/templates
+      - ${DOCKER_DIR:?DOCKER_DIR is required}/appdata/authentik/certs:/certs
+    networks:
+      - authentik
+
+networks:
+  t2_proxy:
+    external: true
+  authentik:
+    name: circl8-authentik
+    driver: bridge
+    internal: true
