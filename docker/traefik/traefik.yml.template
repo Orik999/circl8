@@ -53,14 +53,6 @@ entryPoints:
         - 2c0f:f248::/32
     http:
       sanitizePath: true
-      encodedCharacters:
-        allowEncodedSlash: false
-        allowEncodedBackSlash: false
-        allowEncodedNullCharacter: false
-        allowEncodedSemicolon: false
-        allowEncodedPercent: false
-        allowEncodedQuestionMark: false
-        allowEncodedHash: false
       redirections:
         entryPoint:
           to: https
@@ -73,14 +65,6 @@ entryPoints:
       trustedIPs: *trustedIps
     http:
       sanitizePath: true
-      encodedCharacters:
-        allowEncodedSlash: false
-        allowEncodedBackSlash: false
-        allowEncodedNullCharacter: false
-        allowEncodedSemicolon: false
-        allowEncodedPercent: false
-        allowEncodedQuestionMark: false
-        allowEncodedHash: false
       tls:
         certResolver: cloudflare
         domains:

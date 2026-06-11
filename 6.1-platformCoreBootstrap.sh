@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.1-platformCoreBootstrap.sh"
-SCRIPT_VERSION="v1.0.5"
-SCRIPT_UPDATED="2026-06-10"
-SCRIPT_BUILD="rerun-mode-plan-polish"
+SCRIPT_VERSION="v1.0.6"
+SCRIPT_UPDATED="2026-06-11"
+SCRIPT_BUILD="core-warning-cleanup"
 
 T=15
 LOG_FILE="/var/log/circl8-platform-core.log"
@@ -649,6 +649,7 @@ function show_setup_plan_and_confirm() {
     aligned_status_line "Compose files" "install into compose dir" "$GN" 24
     aligned_status_line "Docker networks" "create/verify" "$GN" 24
     aligned_status_line "Compose configs" "validate before deploy" "$GN" 24
+    aligned_status_line "Image defaults" "compose-owned" "$GN" 24
     aligned_status_line "Verification" "write report and marker" "$GN" 24
     echo ""
     echo -e "${YW}Deployment order:${CL}"
@@ -825,6 +826,7 @@ function create_verification_report() {
         echo "Setup Mode: ${SETUP_MODE}"
         echo "Existing Platform: ${EXISTING_PLATFORM}"
         echo "Port Ownership: ${PORT_OWNERSHIP}"
+        echo "Image Defaults: compose-owned"
         echo "VERIFY_STATUS=${VERIFY_STATUS}"
         echo "VERIFY_PASS_COUNT=${VERIFY_PASS_COUNT}"
         echo "VERIFY_WARN_COUNT=${VERIFY_WARN_COUNT}"

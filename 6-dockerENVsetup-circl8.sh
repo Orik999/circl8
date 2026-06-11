@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.7.1"
-SCRIPT_UPDATED="2026-06-10"
-SCRIPT_BUILD="crowdsec-bouncer-handoff-display"
+SCRIPT_VERSION="v1.7.2"
+SCRIPT_UPDATED="2026-06-11"
+SCRIPT_BUILD="compose-owned-image-defaults"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -3722,17 +3722,8 @@ N8N_ENCRYPTION_KEY="${N8N_ENCRYPTION_KEY}"
 N8N_DB_MODE="sqlite"
 N8N_WEBHOOK_URL="https://${N8N_HOST}/"
 
-# --- Image defaults / development mode ---
-SOCKET_PROXY_IMAGE="tecnativa/docker-socket-proxy:latest"
-DOCKGE_IMAGE="louislam/dockge:latest"
-DOCKHAND_IMAGE="fnsys/dockhand:latest"
-PORTAINER_IMAGE="portainer/portainer-ce:latest"
-TRAEFIK_IMAGE="traefik:latest"
-AUTHENTIK_IMAGE="ghcr.io/goauthentik/server:latest"
-POSTIZ_IMAGE="ghcr.io/gitroomhq/postiz-app:latest"
-CF_DDNS_IMAGE="oznu/cloudflare-ddns:latest"
-CF_COMPANION_IMAGE="tiredofit/traefik-cloudflare-companion:latest"
-N8N_IMAGE="n8nio/n8n:latest"
+# --- Images ---
+# Image defaults are compose-owned. Script 7 can later record or pin verified running image digests.
 EOF
 
     tty_print "${BFR}"

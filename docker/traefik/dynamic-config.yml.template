@@ -11,6 +11,10 @@ http:
 {{PROXMOX_ROUTE_BLOCK}}
 
   middlewares:
+    encoded-characters-safe:
+      encodedCharacters:
+        allowEncodedSlash: true
+
     chain-secure:
       chain:
         middlewares:
