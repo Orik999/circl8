@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.7"
+SCRIPT_VERSION="v1.0.8"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="selected-ui-final-polish"
+SCRIPT_BUILD="selected-ui-section-merge"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -178,14 +178,14 @@ function aligned_status_line() {
     [ -n "$value" ] || value="unknown"
     [ -n "$color" ] || color="$(status_color_for_value "$value")"
     display_value="$(ui_display_value "$value")"
-    printf '  %b%-*s%b %b%s%b\n' "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    printf '    %b%-*s%b %b%s%b\n' "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function final_line() {
     local label="$1" value="${2:-not configured}" color="${3:-$GN}" display_value=""
     [ -n "$value" ] || value="not configured"
     display_value="$(ui_display_value "$value")"
-    printf '  %b%-*s%b %b%s%b\n' "$BL" "$UI_LABEL_WIDTH" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    printf '    %b%-*s%b %b%s%b\n' "$BL" "$UI_LABEL_WIDTH" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function mini_header() {
@@ -202,7 +202,7 @@ function deploy_status_line() {
     [ -n "$value" ] || value="unknown"
     [ -n "$color" ] || color="$(status_color_for_value "$value")"
     display_value="$(ui_display_value "$value")"
-    printf '  %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    printf '    %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function trim_value() {
@@ -616,28 +616,6 @@ function refresh_business_mode() {
 }
 
 
-function show_admin_ui_detection() {
-    local count="" detected_display=""
-    section "ADMIN UI DETECTION"
-    refresh_setup_mode
-    count="$(active_admin_count)"
-    if [ "$count" -gt 1 ]; then
-        aligned_status_line "Existing active Admin UI" "multiple detected" "$RD"
-        aligned_status_line "Detected stacks" "$(active_admin_display_csv)" "$YW"
-        aligned_status_line "Live/business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
-        aligned_status_line "Status" "cleanup required before migration" "$RD"
-        msg_error "Multiple active Admin UI stacks were detected. Stop the extra Admin UI stack(s) before running Script 6.2 migration."
-    fi
-
-    if [ "$count" -eq 1 ]; then
-        detected_display="$(active_admin_display_csv)"
-    else
-        detected_display="none"
-    fi
-
-    aligned_status_line "Existing active Admin UI" "$detected_display" "$(status_color_for_value "$detected_display")"
-    aligned_status_line "Live/business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
-}
 
 function refresh_selected_admin_context() {
     [ -n "$SELECTED_ADMIN_UI" ] || return 0
@@ -707,8 +685,27 @@ function read_yes_no() {
 }
 
 function collect_admin_ui_selection() {
-    local choice="" keep=""
+    local choice="" count="" detected_display=""
     section "ADMIN UI SELECTION"
+    refresh_setup_mode
+    count="$(active_admin_count)"
+    if [ "$count" -gt 1 ]; then
+        aligned_status_line "Existing active Admin UI" "multiple detected" "$RD"
+        aligned_status_line "Detected stacks" "$(active_admin_display_csv)" "$YW"
+        aligned_status_line "Live/business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
+        aligned_status_line "Status" "cleanup required before migration" "$RD"
+        msg_error "Multiple active Admin UI stacks were detected. Stop the extra Admin UI stack(s) before running Script 6.2 migration."
+    fi
+
+    if [ "$count" -eq 1 ]; then
+        detected_display="$(active_admin_display_csv)"
+    else
+        detected_display="none"
+    fi
+
+    aligned_status_line "Existing active Admin UI" "$detected_display" "$(status_color_for_value "$detected_display")"
+    aligned_status_line "Live/business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
+    echo ""
     echo -e "${YW}Choose exactly one Admin UI to deploy/manage:${CL}"
     echo -e "  ${YW}1:${CL} ${GN}Dockge${CL}"
     echo -e "  ${YW}2:${CL} ${GN}Dockhand${CL}"
@@ -730,6 +727,7 @@ function collect_admin_ui_selection() {
     refresh_setup_mode
     msg_ok "Selected Admin UI: ${SELECTED_ADMIN_UI_DISPLAY}"
 }
+
 
 function collect_bootstrap_decision() {
     local keep=""
@@ -1351,7 +1349,6 @@ function main() {
     init_script
     validate_script61_handoff
     validate_preflight_runtime
-    show_admin_ui_detection
     collect_admin_ui_selection
     collect_bootstrap_decision
     show_selected_stack_preflight
