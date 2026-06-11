@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-circl8.sh"
-SCRIPT_VERSION="v1.7.3"
+SCRIPT_VERSION="v1.7.4"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="traefik-dashboard-template-router"
+SCRIPT_BUILD="htpasswd-secret-and-dashboard-label-cleanup"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -1431,6 +1431,17 @@ function validate_cf_zone_id() {
 
 # --- 35. HTPASSWD LINE VALIDATION HELPER ---
 # Validates that provided htpasswd line looks like username:hash.
+function normalize_htpasswd_line() {
+    local line="${1:-}"
+
+    line="$(printf '%s' "$line" | tr -d '\r\n')"
+    # htpasswd files mounted into Traefik must contain literal dollar signs.
+    # Docker Compose label escaping ($$) is not valid inside usersFile content.
+    line="${line//\$\$/\$}"
+
+    printf '%s' "$line"
+}
+
 function validate_htpasswd_line() {
     local line="$1"
 
@@ -1439,6 +1450,58 @@ function validate_htpasswd_line() {
     fi
 
     return 1
+}
+
+function htpasswd_hash_prefix_status() {
+    local line="${1:-}"
+    local hash=""
+
+    validate_htpasswd_line "$line" || { printf 'invalid'; return 0; }
+    hash="${line#*:}"
+
+    case "$hash" in
+        \$\$apr1*|\$\$2a*|\$\$2b*|\$\$2y*) printf 'escaped-dollar';;
+        \$apr1\$*|\$2a\$*|\$2b\$*|\$2y\$*|\$6\$*) printf 'known';;
+        *) printf 'unknown';;
+    esac
+}
+
+function validate_htpasswd_secret_file_shape() {
+    local path="${DOCKER_SECRETS_DIR}/htpasswd"
+    local raw_line=""
+    local line=""
+    local prefix_status=""
+
+    root_path_exists "$path" || msg_error "htpasswd secret file was not created."
+
+    if ! root_file_not_empty "$path"; then
+        msg_warn "htpasswd secret file is empty; Basic Auth fallback remains disabled until a valid htpasswd entry is added."
+        return 0
+    fi
+
+    raw_line="$(root_read_file "$path" 2>/dev/null | head -n1 || true)"
+    prefix_status="$(htpasswd_hash_prefix_status "$raw_line")"
+    if [ "$prefix_status" = "escaped-dollar" ]; then
+        msg_error "htpasswd secret still contains escaped-dollar hash prefix. Use literal-dollar htpasswd file content."
+    fi
+    line="$(normalize_htpasswd_line "$raw_line")"
+
+    if ! validate_htpasswd_line "$line"; then
+        msg_error "htpasswd secret shape is invalid. Expected username:hash. The hash was not displayed."
+    fi
+
+    prefix_status="$(htpasswd_hash_prefix_status "$line")"
+    case "$prefix_status" in
+        escaped-dollar)
+            msg_error "htpasswd secret still contains escaped-dollar hash prefix. Use literal-dollar htpasswd file content."
+            ;;
+        known)
+            msg_ok "htpasswd secret shape verified"
+            ;;
+        *)
+            msg_warn "htpasswd secret uses an unknown hash prefix; shape is username:hash and content was not displayed."
+            ;;
+    esac
 }
 
 # --- 36. DEPENDENCY VALIDATION ---
@@ -3054,7 +3117,7 @@ function collect_htpasswd_inputs() {
     if [[ "$has_htpasswd_yn" =~ ^[Yy] ]]; then
         HTPASSWD_LINE_VALUE="$(sensitive_visible_line_input "Paste full htpasswd line username:hash")"
 
-        HTPASSWD_LINE_VALUE="$(printf '%s' "$HTPASSWD_LINE_VALUE" | tr -d '\r\n')"
+        HTPASSWD_LINE_VALUE="$(normalize_htpasswd_line "$HTPASSWD_LINE_VALUE")"
 
         if [ -n "$HTPASSWD_LINE_VALUE" ]; then
             if validate_htpasswd_line "$HTPASSWD_LINE_VALUE"; then
@@ -3078,7 +3141,7 @@ function collect_htpasswd_inputs() {
             HTPASSWD_PASSWORD_VALUE="$(sensitive_visible_line_input "Enter htpasswd password" "htpasswd password captured")"
 
             if [ -n "$HTPASSWD_PASSWORD_VALUE" ]; then
-                HTPASSWD_HASH_VALUE="$(openssl passwd -6 "$HTPASSWD_PASSWORD_VALUE")"
+                HTPASSWD_HASH_VALUE="$(openssl passwd -apr1 "$HTPASSWD_PASSWORD_VALUE")"
                 HTPASSWD_LINE_VALUE="${HTPASSWD_USER_VALUE}:${HTPASSWD_HASH_VALUE}"
                 HTPASSWD_PASSWORD_VALUE=""
                 HTPASSWD_MODE="generated"
@@ -3552,6 +3615,22 @@ function verify_traefik_config_files_created() {
         msg_error "Traefik dynamic config dashboard router does not contain the expected dashboard host."
     fi
 
+    if ! grep -q 'chain-authentik@file' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config dashboard router is not Authentik-protected."
+    fi
+
+    if ! grep -q 'chain-basic-auth' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config does not contain the Basic Auth middleware chain."
+    fi
+
+    if ! grep -q 'middlewares-basic-auth' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config does not contain the Basic Auth middleware."
+    fi
+
+    if ! grep -q 'usersFile: /run/secrets/htpasswd' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config does not use the htpasswd usersFile secret."
+    fi
+
     if ! grep -q 'certResolver: cloudflare' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
         msg_error "Traefik dynamic config dashboard router does not contain the Cloudflare certResolver."
     fi
@@ -3600,12 +3679,19 @@ function write_secret_files() {
     fi
 
     if [ -n "$HTPASSWD_LINE_VALUE" ]; then
+        HTPASSWD_LINE_VALUE="$(normalize_htpasswd_line "$HTPASSWD_LINE_VALUE")"
         write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/htpasswd" "$HTPASSWD_LINE_VALUE"
     elif root_file_not_empty "${DOCKER_SECRETS_DIR}/htpasswd"; then
+        HTPASSWD_LINE_VALUE="$(normalize_htpasswd_line "$(root_read_file "${DOCKER_SECRETS_DIR}/htpasswd" 2>/dev/null | head -n1 || true)")"
+        if [ -n "$HTPASSWD_LINE_VALUE" ]; then
+            write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/htpasswd" "$HTPASSWD_LINE_VALUE"
+        fi
         msg_ok "EXISTING HTPASSWD FILE PRESERVED"
     else
         run_cmd "creating empty htpasswd placeholder" touch "${DOCKER_SECRETS_DIR}/htpasswd"
     fi
+
+    validate_htpasswd_secret_file_shape
 
     tty_print "${BFR}"
     apply_status_line "written"
@@ -3940,7 +4026,30 @@ function create_verification_report() {
     done
 
     if root_path_exists "$CF_API_TOKEN_FILE"; then verify_pass "Cloudflare token file exists"; else verify_warn "Cloudflare token file exists" "token file missing" "create token file or rerun Script 6 if Cloudflare DNS automation is required"; fi
-    if root_path_exists "${DOCKER_SECRETS_DIR}/htpasswd"; then verify_pass "htpasswd file exists"; else verify_info "htpasswd file missing; acceptable when SSO/auth gateway is used"; fi
+    if root_path_exists "${DOCKER_SECRETS_DIR}/htpasswd"; then
+        verify_pass "htpasswd file exists"
+        if root_file_not_empty "${DOCKER_SECRETS_DIR}/htpasswd"; then
+            local htpasswd_raw_line=""
+            local htpasswd_line=""
+            local htpasswd_prefix_status=""
+            htpasswd_raw_line="$(root_read_file "${DOCKER_SECRETS_DIR}/htpasswd" 2>/dev/null | head -n1 || true)"
+            htpasswd_prefix_status="$(htpasswd_hash_prefix_status "$htpasswd_raw_line")"
+            if [ "$htpasswd_prefix_status" != "escaped-dollar" ]; then
+                htpasswd_line="$(normalize_htpasswd_line "$htpasswd_raw_line")"
+                htpasswd_prefix_status="$(htpasswd_hash_prefix_status "$htpasswd_line")"
+            fi
+            case "$htpasswd_prefix_status" in
+                escaped-dollar) verify_fail "htpasswd hash prefix" "escaped dollar prefix detected" "rewrite htpasswd secret with literal dollar signs" ;;
+                known) verify_pass "htpasswd hash prefix is literal-dollar supported shape" ;;
+                unknown) verify_warn "htpasswd hash prefix" "unknown hash prefix; hash not displayed" "confirm htpasswd file uses a Traefik-supported hash" ;;
+                *) verify_fail "htpasswd shape" "expected username:hash" "replace htpasswd secret with a valid htpasswd line" ;;
+            esac
+        else
+            verify_info "htpasswd file is empty; Basic Auth fallback is disabled until populated"
+        fi
+    else
+        verify_info "htpasswd file missing; acceptable when SSO/auth gateway is used"
+    fi
     if root_path_exists "$TRAEFIK_STATIC_CONFIG_FILE"; then verify_pass "Traefik static config exists"; else verify_fail "Traefik static config" "missing" "rerun Script 6 template render step"; fi
     if root_path_exists "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then verify_pass "Traefik dynamic config exists"; else verify_fail "Traefik dynamic config" "missing" "rerun Script 6 template render step"; fi
     if root_path_exists "${TRAEFIK_ACME_DIR}/acme.json"; then verify_pass "Traefik acme.json exists"; else verify_fail "Traefik acme.json" "missing" "rerun Script 6 setup"; fi

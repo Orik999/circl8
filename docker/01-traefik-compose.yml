@@ -51,11 +51,6 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: "t2_proxy"
-      traefik.http.routers.traefik.rule: "Host(`${TRAEFIK_HOST}`)"
-      traefik.http.routers.traefik.entrypoints: "https"
-      traefik.http.routers.traefik.tls: "true"
-      traefik.http.routers.traefik.middlewares: "chain-local-only@file"
-      traefik.http.routers.traefik.service: "api@internal"
 
 networks:
   t2_proxy:
