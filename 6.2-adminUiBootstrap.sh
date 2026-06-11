@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.6"
+SCRIPT_VERSION="v1.0.7"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="selected-ui-layout-cleanup"
+SCRIPT_BUILD="selected-ui-final-polish"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -759,7 +759,7 @@ function collect_bootstrap_decision() {
             else
                 BOOTSTRAP_MODE="user-disabled"
                 BOOTSTRAP_ACTION="keep disabled"
-                msg_ok "Bootstrap access will remain disabled."
+                msg_ok "Bootstrap access will be kept disabled."
             fi
         fi
     elif [ "$ACTION_MODE" = "migration" ]; then
@@ -805,7 +805,7 @@ function show_selected_stack_preflight() {
     if [ "$ACTION_MODE" = "migration" ]; then
         aligned_status_line "Migration safety" "stop old after new verified" "$YW"
     fi
-    aligned_status_line "Public Auth routes" "$SCRIPT62_PUBLIC_AUTH_ROUTES" "$YW"
+    aligned_status_line "Public Auth route" "$SCRIPT62_PUBLIC_AUTH_ROUTES" "$YW"
 
     port_status="$(selected_bootstrap_port_status)"
     if [ "$port_status" = "blocked" ] && { [ "$BOOTSTRAP_ACTION" != "keep disabled" ] && [ "$BOOTSTRAP_ACTION" != "disable" ]; }; then
@@ -858,7 +858,7 @@ function show_setup_plan_and_confirm() {
         aligned_status_line "Stop old stack" "after new verified" "$YW"
         aligned_status_line "Keep new bootstrap" "$BOOTSTRAP_KEEP_AFTER_MIGRATION" "$(status_color_for_value "$BOOTSTRAP_KEEP_AFTER_MIGRATION")"
     fi
-    aligned_status_line "Public Auth routes" "pending Script 6.3" "$YW"
+    aligned_status_line "Public Auth route" "pending Script 6.3" "$YW"
 
     if [ "$ACTION_MODE" = "migration" ]; then
         echo ""
