@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.9"
+SCRIPT_VERSION="v1.0.10"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="selected-ui-alignment-fix"
+SCRIPT_BUILD="selected-ui-value-column-align"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -118,7 +118,7 @@ COMPOSE_FILES_STATE="will install"
 NETWORK_T2_PROXY="unknown"
 NETWORK_SOCKET_PROXY="unknown"
 BOOTSTRAP_PORTS_STATE="unknown"
-UI_LABEL_WIDTH="24"
+UI_LABEL_WIDTH="25"
 
 function header_info() {
 cat <<'BANNER'
@@ -178,14 +178,14 @@ function aligned_status_line() {
     [ -n "$value" ] || value="unknown"
     [ -n "$color" ] || color="$(status_color_for_value "$value")"
     display_value="$(ui_display_value "$value")"
-    printf '  %b%-*s%b %b%s%b\n' "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    printf '%b%-*s%b %b%s%b\n' "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function final_line() {
     local label="$1" value="${2:-not configured}" color="${3:-$GN}" display_value=""
     [ -n "$value" ] || value="not configured"
     display_value="$(ui_display_value "$value")"
-    printf '  %b%-*s%b %b%s%b\n' "$BL" "$UI_LABEL_WIDTH" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    printf '%b%-*s%b %b%s%b\n' "$BL" "$UI_LABEL_WIDTH" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function mini_header() {
@@ -202,7 +202,7 @@ function deploy_status_line() {
     [ -n "$value" ] || value="unknown"
     [ -n "$color" ] || color="$(status_color_for_value "$value")"
     display_value="$(ui_display_value "$value")"
-    printf '  %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    printf '%b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function trim_value() {
@@ -977,7 +977,7 @@ function prompt_secret_mode_for_komodo() {
     mini_header "Secrets / passwords"
     if [ "$SELECTED_ADMIN_UI" != "komodo" ]; then
         SECRET_MODE="not-required"
-        deploy_status_line "Secrets/passwords" "not-required" "$GN"
+        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} secrets" "not-required" "$GN"
         return 0
     fi
     if [ "$existing" = "yes" ]; then
