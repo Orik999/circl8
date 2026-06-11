@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-skeleton"
+SCRIPT_BUILD="authentik-skeleton-marker-align"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -829,8 +829,8 @@ function run_skeleton_checks() {
 function show_verification_marker_scaffold() {
     section "VERIFICATION / MARKER"
     write_verify_report
-    deploy_status_line "Authentik skeleton report" "created" "$GN"
-    deploy_status_line "Completion marker" "not written" "$GN"
+    deploy_status_line "Authentik skeleton report" "created" "$GN" 24
+    deploy_status_line "Completion marker" "not written" "$GN" 24
 }
 
 function show_skeleton_finished() {
