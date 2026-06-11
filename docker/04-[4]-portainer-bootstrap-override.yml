@@ -1,0 +1,8 @@
+# 04-[4]-portainer-bootstrap-override.yml
+# Temporary bootstrap override used before Traefik/AuthentiK access is ready.
+# Remove or stop using this override in script 7 final hardening.
+
+services:
+  portainer:
+    ports:
+      - "${ADMIN_UI_BOOTSTRAP_BIND:-0.0.0.0}:${PORTAINER_BOOTSTRAP_PORT:-9443}:9443"

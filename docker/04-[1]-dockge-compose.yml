@@ -1,0 +1,61 @@
+# 04-[1]-dockge-compose.yml
+# Project: Dockge
+# Purpose: Lightweight Docker Compose stack manager.
+#
+# Public-GitHub-safe:
+# - No secrets are stored in this file.
+# - Protected externally by Traefik + Authentik.
+# - No direct host port is published in this base compose.
+# - Docker API access is routed through socket-proxy instead of a raw Docker socket bind mount.
+#
+# Notes:
+# - Dockge officially uses louislam/dockge:1.
+# - DOCKGE_STACKS_DIR points to where compose stacks live.
+# - Temporary direct access is added only by 04-[1]-dockge-bootstrap-override.yml.
+
+name: dockge
+
+services:
+  dockge:
+    env_file:
+      - ${DOCKER_DIR}/.env
+    image: ${DOCKGE_IMAGE:-louislam/dockge:latest}
+    container_name: dockge
+    restart: unless-stopped
+
+    security_opt:
+      - no-new-privileges:true
+
+    environment:
+      DOCKER_HOST: tcp://socket-proxy:2375
+      TZ: ${TZ}
+      DOCKGE_STACKS_DIR: ${DOCKER_DIR}/compose
+      DOCKGE_ENABLE_CONSOLE: "false"
+
+    networks:
+      - t2_proxy
+      - socket_proxy
+
+    volumes:
+      - ${DOCKER_DIR}/appdata/dockge:/app/data
+      - ${DOCKER_DIR}/compose:${DOCKER_DIR}/compose
+      - ${DOCKER_DIR}/.env:${DOCKER_DIR}/.env:ro
+    labels:
+      traefik.enable: "true"
+
+      traefik.http.routers.dockge.rule: Host(`${ADMIN_UI_HOST}`)
+      traefik.http.routers.dockge.entrypoints: https
+      traefik.http.routers.dockge.tls: "true"
+      traefik.http.routers.dockge.middlewares: chain-authentik@file
+      traefik.http.routers.dockge.service: dockge
+
+      traefik.http.services.dockge.loadbalancer.server.port: 5001
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true
+
+  socket_proxy:
+    name: socket_proxy
+    external: true
