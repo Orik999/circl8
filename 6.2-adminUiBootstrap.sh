@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.10"
+SCRIPT_VERSION="v1.0.11"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="selected-ui-value-column-align"
+SCRIPT_BUILD="selected-deploy-row-align"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -199,10 +199,13 @@ function progress_line() {
 
 function deploy_status_line() {
     local label="$1" value="${2:-unknown}" color="${3:-}" width="${4:-$UI_LABEL_WIDTH}" display_value=""
+    local tick_prefix_width=2 effective_width=""
     [ -n "$value" ] || value="unknown"
     [ -n "$color" ] || color="$(status_color_for_value "$value")"
     display_value="$(ui_display_value "$value")"
-    printf '%b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    effective_width=$((width - tick_prefix_width))
+    [ "$effective_width" -gt 0 ] || effective_width="$width"
+    printf '%b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$effective_width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function trim_value() {
