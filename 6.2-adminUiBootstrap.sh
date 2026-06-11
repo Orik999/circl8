@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.3"
+SCRIPT_VERSION="v1.0.4"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="selected-file-url-encoding-fix"
+SCRIPT_BUILD="selected-deploy-output-polish"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -167,6 +167,22 @@ function final_line() {
     local label="$1" value="${2:-not configured}" color="${3:-$GN}"
     [ -n "$value" ] || value="not configured"
     printf '  %b%-24s%b %b%s%b\n' "$BL" "${label}:" "$CL" "$color" "$value" "$CL"
+}
+
+function mini_header() {
+    echo ""
+    echo -e "${YW}$1:${CL}"
+}
+
+function progress_line() {
+    echo -e "  ${HOLD} ${YW}$1...${CL}"
+}
+
+function deploy_status_line() {
+    local label="$1" value="${2:-unknown}" color="${3:-}" width="${4:-24}"
+    [ -n "$value" ] || value="unknown"
+    [ -n "$color" ] || color="$(status_color_for_value "$value")"
+    printf '  %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$value" "$CL"
 }
 
 function trim_value() {
@@ -835,6 +851,7 @@ function show_setup_plan_and_confirm() {
         echo -e "${YW}Admin UI bootstrap setup cancelled. No compose files or stacks were changed.${CL}"
         exit 0
     fi
+    echo -e " ${CM} ${GN}Applying confirmed Admin UI bootstrap setup plan.${CL}"
 }
 
 function raw_url_path_encode() {
@@ -859,19 +876,30 @@ function compose_display_name() {
     esac
 }
 
+function admin_file_role() {
+    case "${1:-}" in
+        *bootstrap-override.yml) printf 'bootstrap' ;;
+        *compose.yml) printf 'compose' ;;
+        *) printf 'file' ;;
+    esac
+}
+
 function install_admin_ui_file() {
-    local filename="${1:-}" encoded_filename="" local_source="" url="" dest="" tmp="" display_name=""
+    local filename="${1:-}" encoded_filename="" local_source="" url="" dest="" tmp="" display_name="" file_role="" action_word=""
     [ -n "$filename" ] || msg_error "Admin UI filename was not provided."
     display_name="$(compose_display_name "$filename")"
+    file_role="$(admin_file_role "$filename")"
     encoded_filename="$(raw_url_path_encode "$filename")"
     local_source="${SCRIPT_DIR}/docker/${filename}"
     url="${RAW_BASE}/docker/${encoded_filename}"
     dest="${COMPOSE_DIR}/${filename}"
     if [ -f "$local_source" ]; then
-        msg_info "Installing ${display_name} file"
+        action_word="Installing"
+        progress_line "${action_word} ${display_name} ${file_role}"
         run_cmd "installing local ${filename}" cp "$local_source" "$dest"
     else
-        msg_info "Downloading ${display_name} file"
+        action_word="Downloading"
+        progress_line "${action_word} ${display_name} ${file_role}"
         tmp="$(mktemp)"; TEMP_FILES+=("$tmp")
         if ! download_file "$url" "$tmp" >> "$DEPLOY_OUTPUT_FILE" 2>&1; then
             { echo "Download failed for selected Admin UI file: ${filename}"; echo "URL: ${url}"; } >> "$DEPLOY_OUTPUT_FILE"
@@ -882,23 +910,22 @@ function install_admin_ui_file() {
     root_file_not_empty "$dest" || msg_error "Admin UI file install failed or produced an empty file: ${dest}"
     run_cmd "setting ${filename} ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$dest"
     run_cmd "setting ${filename} mode" chmod 640 "$dest"
-    msg_ok "${display_name}: installed"
+    deploy_status_line "${display_name} ${file_role}" "installed" "$GN"
 }
 
 function install_admin_ui_files() {
-    section "COMPOSE FILES"
+    mini_header "Compose files"
     local file=""
     run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
     for file in "${SELECTED_FILES[@]}"; do install_admin_ui_file "$file"; done
-    msg_ok "SELECTED ADMIN UI COMPOSE FILES VERIFIED"
 }
 
 function verify_networks() {
-    section "NETWORKS"
+    mini_header "Docker networks"
     docker network inspect t2_proxy >/dev/null 2>&1 && NETWORK_T2_PROXY="yes" || NETWORK_T2_PROXY="no"
     docker network inspect socket_proxy >/dev/null 2>&1 && NETWORK_SOCKET_PROXY="yes" || NETWORK_SOCKET_PROXY="no"
-    aligned_status_line "t2_proxy" "$NETWORK_T2_PROXY" "$(status_color_for_value "$NETWORK_T2_PROXY")" 18
-    aligned_status_line "socket_proxy" "$NETWORK_SOCKET_PROXY" "$(status_color_for_value "$NETWORK_SOCKET_PROXY")" 18
+    deploy_status_line "t2_proxy" "$NETWORK_T2_PROXY" "$(status_color_for_value "$NETWORK_T2_PROXY")"
+    deploy_status_line "socket_proxy" "$NETWORK_SOCKET_PROXY" "$(status_color_for_value "$NETWORK_SOCKET_PROXY")"
     [ "$NETWORK_T2_PROXY" = "yes" ] && [ "$NETWORK_SOCKET_PROXY" = "yes" ] || msg_error "Required Script 6.1 Docker networks are missing."
 }
 
@@ -914,10 +941,10 @@ function append_env_key_secret() {
 function prompt_secret_mode_for_komodo() {
     local existing="no" choice=""
     if env_has_key "KOMODO_DB_PASSWORD" && env_has_key "KOMODO_PASSKEY" && env_has_key "KOMODO_JWT_SECRET" && env_has_key "KOMODO_WEBHOOK_SECRET"; then existing="yes"; fi
-    section "SECRETS / PASSWORDS"
+    mini_header "Secrets / passwords"
     if [ "$SELECTED_ADMIN_UI" != "komodo" ]; then
         SECRET_MODE="not-required"
-        aligned_status_line "Secrets/passwords" "not-required" "$GN"
+        deploy_status_line "Secrets/passwords" "not-required" "$GN"
         return 0
     fi
     if [ "$existing" = "yes" ]; then
@@ -944,7 +971,7 @@ function prompt_secret_mode_for_komodo() {
         fi
         SECRET_MODE="generated"
     fi
-    aligned_status_line "Komodo secrets" "$SECRET_MODE" "$(status_color_for_value "$SECRET_MODE")"
+    deploy_status_line "Komodo secrets" "$SECRET_MODE" "$(status_color_for_value "$SECRET_MODE")"
 }
 
 function ensure_admin_ui_secret_env() {
@@ -973,14 +1000,24 @@ function selected_compose_args() {
 }
 
 function validate_compose_files() {
-    section "COMPOSE VALIDATION"
-    msg_info "Validating ${SELECTED_ADMIN_UI_DISPLAY}"
-    if [ "$BOOTSTRAP_ACTION" = "preserve disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then
-        docker compose --env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")" config >/dev/null
-    else
-        docker compose --env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")" -f "$(compose_path "$SELECTED_OVERRIDE_FILE")" config >/dev/null
+    local base_ok="no" bootstrap_ok="no"
+    mini_header "Compose validation"
+    if docker compose --env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")" config >/dev/null; then
+        base_ok="yes"
+        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} config" "valid" "$GN"
     fi
-    msg_ok "${SELECTED_ADMIN_UI_DISPLAY}: config valid"
+    [ "$base_ok" = "yes" ] || fail_with_deployment_log "$SELECTED_ADMIN_UI_DISPLAY" "$SELECTED_COMPOSE_FILE" "$SELECTED_PROJECT" "${SELECTED_ADMIN_UI_DISPLAY} compose config validation failed"
+
+    if [ "$BOOTSTRAP_ACTION" = "preserve disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then
+        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} bootstrap config" "skipped" "$YW"
+        return 0
+    fi
+
+    if docker compose --env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")" -f "$(compose_path "$SELECTED_OVERRIDE_FILE")" config >/dev/null; then
+        bootstrap_ok="yes"
+        deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} bootstrap config" "valid" "$GN"
+    fi
+    [ "$bootstrap_ok" = "yes" ] || fail_with_deployment_log "$SELECTED_ADMIN_UI_DISPLAY" "$SELECTED_OVERRIDE_FILE" "$SELECTED_PROJECT" "${SELECTED_ADMIN_UI_DISPLAY} bootstrap config validation failed"
 }
 
 function write_deployment_failure_log() {
@@ -1019,7 +1056,7 @@ function fail_with_deployment_log() {
 
 function wait_for_docker_readiness() {
     local attempts=10 delay=2 i="" docker_ready="no" compose_ready="no" api_ready="no" networks_ready="no"
-    section "DOCKER READINESS"
+    mini_header "Docker readiness"
     for ((i=1; i<=attempts; i++)); do
         docker_ready="no"; compose_ready="no"; api_ready="no"; networks_ready="no"
         command -v docker >/dev/null 2>&1 && docker --version >/dev/null 2>&1 && docker_ready="yes"
@@ -1028,10 +1065,10 @@ function wait_for_docker_readiness() {
         docker network inspect socket_proxy >/dev/null 2>&1 && docker network inspect t2_proxy >/dev/null 2>&1 && networks_ready="yes"
         { echo ""; echo "--- Docker readiness attempt ${i}/${attempts} ---"; echo "Date: $(date)"; echo "Docker command: ${docker_ready}"; echo "Docker Compose: ${compose_ready}"; echo "Docker API: ${api_ready}"; echo "Docker networks: ${networks_ready}"; } >> "$DEPLOY_OUTPUT_FILE"
         if [ "$docker_ready" = "yes" ] && [ "$compose_ready" = "yes" ] && [ "$api_ready" = "yes" ] && [ "$networks_ready" = "yes" ]; then
-            aligned_status_line "Docker daemon" "ready" "$GN" 24
-            aligned_status_line "Docker Compose" "ready" "$GN" 24
-            aligned_status_line "Docker API" "responsive" "$GN" 24
-            aligned_status_line "Docker networks" "settled" "$GN" 24
+            deploy_status_line "Docker daemon" "ready" "$GN"
+            deploy_status_line "Docker Compose" "ready" "$GN"
+            deploy_status_line "Docker API" "responsive" "$GN"
+            deploy_status_line "Docker networks" "settled" "$GN"
             return 0
         fi
         sleep "$delay"
@@ -1052,7 +1089,7 @@ function wait_for_container_ready() {
     while [ "$elapsed" -le "$timeout_seconds" ]; do
         state="$(container_state "$name")"
         { echo ""; echo "--- Waiting for ${display_name} readiness ---"; echo "Date: $(date)"; echo "Container: ${name}"; echo "State: ${state}"; echo "Elapsed: ${elapsed}/${timeout_seconds}s"; } >> "$DEPLOY_OUTPUT_FILE"
-        case "$state" in running|healthy) msg_ok "${display_name}: ${state}"; return 0 ;; esac
+        case "$state" in running|healthy) deploy_status_line "$display_name" "$state" "$(status_color_for_value "$state")"; return 0 ;; esac
         sleep "$interval_seconds"
         elapsed=$((elapsed + interval_seconds))
     done
@@ -1063,11 +1100,11 @@ function deploy_selected_stack() {
     local include_bootstrap="${1:-yes}" attempt="" max_attempts=3 retry_delay=4 args=()
     args=(--env-file "$ENV_FILE" -p "$SELECTED_PROJECT" -f "$(compose_path "$SELECTED_COMPOSE_FILE")")
     if [ "$include_bootstrap" = "yes" ]; then args+=(-f "$(compose_path "$SELECTED_OVERRIDE_FILE")"); fi
-    msg_info "Deploying ${SELECTED_ADMIN_UI_DISPLAY}"
+    progress_line "Deploying ${SELECTED_ADMIN_UI_DISPLAY}"
     for ((attempt=1; attempt<=max_attempts; attempt++)); do
         { echo ""; echo "--- Deploying ${SELECTED_ADMIN_UI_DISPLAY} attempt ${attempt}/${max_attempts} ---"; echo "Date: $(date)"; echo "Project: ${SELECTED_PROJECT}"; echo "Compose file: $(compose_path "$SELECTED_COMPOSE_FILE")"; echo "Bootstrap: ${include_bootstrap}"; } >> "$DEPLOY_OUTPUT_FILE"
         if docker compose "${args[@]}" up -d --remove-orphans >> "$DEPLOY_OUTPUT_FILE" 2>&1; then
-            msg_ok "${SELECTED_ADMIN_UI_DISPLAY}: deployed"
+            deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY}" "deployed" "$GN"
             return 0
         fi
         { echo "Deploy attempt ${attempt}/${max_attempts} failed for ${SELECTED_ADMIN_UI_DISPLAY}."; echo "Retry delay: ${retry_delay}s"; } >> "$DEPLOY_OUTPUT_FILE"
@@ -1093,7 +1130,7 @@ function stop_admin_stack() {
     else
         while IFS= read -r name; do [ -n "$name" ] && docker rm -f "$name" >> "$DEPLOY_OUTPUT_FILE" 2>&1 || true; done < <(admin_container_names "$admin")
     fi
-    msg_ok "${display}: stopped old stack"
+    deploy_status_line "$display" "stopped old stack" "$YW"
 }
 
 function update_admin_statuses_after_deploy() {
@@ -1110,7 +1147,7 @@ function update_admin_statuses_after_deploy() {
 
 function deploy_admin_ui() {
     local include_bootstrap="yes"
-    section "DEPLOYMENT"
+    mini_header "Admin UI deployment"
     if [ "$BOOTSTRAP_ACTION" = "preserve disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then include_bootstrap="no"; fi
     if [ "$ACTION_MODE" = "migration" ]; then include_bootstrap="yes"; fi
     deploy_selected_stack "$include_bootstrap"
@@ -1118,11 +1155,11 @@ function deploy_admin_ui() {
     if [ "$ACTION_MODE" = "migration" ]; then
         stop_admin_stack "$PREVIOUS_ADMIN_UI"
         if [ "$BOOTSTRAP_KEEP_AFTER_MIGRATION" = "no" ]; then
-            msg_info "Closing temporary ${SELECTED_ADMIN_UI_DISPLAY} bootstrap access"
+            progress_line "Closing temporary ${SELECTED_ADMIN_UI_DISPLAY} bootstrap access"
             deploy_selected_stack "no"
             SCRIPT62_BOOTSTRAP_ACCESS="temporary-closed"
             BOOTSTRAP_MODE="temporary-for-migration"
-            msg_ok "${SELECTED_ADMIN_UI_DISPLAY}: temporary bootstrap closed"
+            deploy_status_line "${SELECTED_ADMIN_UI_DISPLAY} bootstrap" "temporary closed" "$YW"
         fi
     fi
     update_admin_statuses_after_deploy
@@ -1237,23 +1274,32 @@ function write_completion_marker() {
     msg_ok "Completion marker written"
 }
 
+function selected_admin_status_value() {
+    case "$SELECTED_ADMIN_UI" in
+        dockge) printf '%s' "$SCRIPT62_DOCKGE" ;;
+        dockhand) printf '%s' "$SCRIPT62_DOCKHAND" ;;
+        komodo) printf '%s' "$SCRIPT62_KOMODO" ;;
+        portainer) printf '%s' "$SCRIPT62_PORTAINER" ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
 function show_finished_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
     echo -e "${YW}Admin UI:${CL}"
     final_line "Selected" "$SELECTED_ADMIN_UI_DISPLAY" "$ANS"
-    final_line "Previous" "$(admin_display_name "$PREVIOUS_ADMIN_UI")" "$(status_color_for_value "$PREVIOUS_ADMIN_UI")"
+    final_line "Status" "$(selected_admin_status_value)" "$(status_color_for_value "$(selected_admin_status_value)")"
     final_line "Action" "$ACTION_MODE" "$(status_color_for_value "$ACTION_MODE")"
     final_line "Secret mode" "$SECRET_MODE" "$(status_color_for_value "$SECRET_MODE")"
-    final_line "Bootstrap mode" "$BOOTSTRAP_MODE" "$(status_color_for_value "$BOOTSTRAP_MODE")"
-    final_line "Bootstrap access" "$SCRIPT62_BOOTSTRAP_ACCESS" "$(status_color_for_value "$SCRIPT62_BOOTSTRAP_ACCESS")"
+    if [ "$SCRIPT62_BOOTSTRAP_ACCESS" = "temporary-closed" ]; then
+        final_line "Bootstrap" "closed after migration" "$YW"
+    else
+        final_line "Bootstrap" "$SCRIPT62_BOOTSTRAP_ACCESS" "$(status_color_for_value "$SCRIPT62_BOOTSTRAP_ACCESS")"
+    fi
     if [ "$SCRIPT62_BOOTSTRAP_ACCESS" = "ready" ]; then
         final_line "Bootstrap URL" "$(selected_bootstrap_url)" "$GN"
     fi
-    final_line "Dockge" "$SCRIPT62_DOCKGE" "$(status_color_for_value "$SCRIPT62_DOCKGE")"
-    final_line "Dockhand" "$SCRIPT62_DOCKHAND" "$(status_color_for_value "$SCRIPT62_DOCKHAND")"
-    final_line "Komodo" "$SCRIPT62_KOMODO" "$(status_color_for_value "$SCRIPT62_KOMODO")"
-    final_line "Portainer" "$SCRIPT62_PORTAINER" "$(status_color_for_value "$SCRIPT62_PORTAINER")"
-    final_line "Public Auth routes" "$SCRIPT62_PUBLIC_AUTH_ROUTES" "$YW"
+    final_line "Public Auth route" "$SCRIPT62_PUBLIC_AUTH_ROUTES" "$YW"
     echo ""
     echo -e "${YW}Verification:${CL}"
     final_line "Status" "$VERIFY_STATUS" "$(status_color_for_value "$VERIFY_STATUS")"
@@ -1274,13 +1320,11 @@ function main() {
     collect_admin_ui_selection
     collect_bootstrap_decision
     show_setup_plan_and_confirm
-    section "APPLY CHANGES"
-    echo -e "${YW}Applying confirmed Admin UI bootstrap setup plan.${CL}"
+    section "DEPLOY SELECTED ADMIN UI"
+    wait_for_docker_readiness
     install_admin_ui_files
     ensure_admin_ui_secret_env
-    verify_networks
     validate_compose_files
-    wait_for_docker_readiness
     deploy_admin_ui
     section "VERIFICATION / MARKER"
     create_verification_report
