@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.5"
+SCRIPT_VERSION="v1.0.6"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="selected-ui-output-cleanup"
+SCRIPT_BUILD="selected-ui-layout-cleanup"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -118,7 +118,7 @@ COMPOSE_FILES_STATE="will install"
 NETWORK_T2_PROXY="unknown"
 NETWORK_SOCKET_PROXY="unknown"
 BOOTSTRAP_PORTS_STATE="unknown"
-UI_LABEL_WIDTH="20"
+UI_LABEL_WIDTH="24"
 
 function header_info() {
 cat <<'BANNER'
@@ -159,6 +159,8 @@ function status_color_for_value() {
 function ui_display_value() {
     local value="${1:-unknown}"
     case "$value" in
+        fresh-install) printf 'fresh install' ;;
+        rerun-update) printf 'rerun/update' ;;
         not-required) printf 'not required' ;;
         pending-script-6.3) printf 'pending Script 6.3' ;;
         preserve\ enabled|preserved-enabled|user-enabled) printf 'keep enabled' ;;
@@ -166,6 +168,7 @@ function ui_display_value() {
         detected/running) printf 'running' ;;
         temporary-closed) printf 'closed after migration' ;;
         temporary-for-migration) printf 'temporary for migration' ;;
+        not-applicable) printf 'not applicable' ;;
         *) printf '%s' "$value" ;;
     esac
 }
@@ -729,7 +732,64 @@ function collect_admin_ui_selection() {
 }
 
 function collect_bootstrap_decision() {
-    local keep="" port_status=""
+    local keep=""
+    section "BOOTSTRAP ACCESS"
+    refresh_setup_mode
+
+    if [ "$ACTION_MODE" = "rerun-update" ]; then
+        if admin_bootstrap_listening "$SELECTED_ADMIN_UI"; then
+            echo -e "${YW}${SELECTED_ADMIN_UI_DISPLAY} bootstrap is currently running.${CL}"
+            keep="$(read_yes_no "Keep bootstrap access enabled?" "y")"
+            if [[ "$keep" =~ ^[Yy]$ ]]; then
+                BOOTSTRAP_MODE="user-enabled"
+                BOOTSTRAP_ACTION="keep enabled"
+                msg_ok "Bootstrap access will be kept enabled."
+            else
+                BOOTSTRAP_MODE="user-disabled"
+                BOOTSTRAP_ACTION="keep disabled"
+                msg_ok "Bootstrap access will be kept disabled."
+            fi
+        else
+            echo -e "${YW}${SELECTED_ADMIN_UI_DISPLAY} bootstrap is not currently running.${CL}"
+            keep="$(read_yes_no "Enable bootstrap access?" "n")"
+            if [[ "$keep" =~ ^[Yy]$ ]]; then
+                BOOTSTRAP_MODE="user-enabled"
+                BOOTSTRAP_ACTION="enable"
+                msg_ok "Bootstrap access will be enabled."
+            else
+                BOOTSTRAP_MODE="user-disabled"
+                BOOTSTRAP_ACTION="keep disabled"
+                msg_ok "Bootstrap access will remain disabled."
+            fi
+        fi
+    elif [ "$ACTION_MODE" = "migration" ]; then
+        echo -e "${YW}${SELECTED_ADMIN_UI_DISPLAY} bootstrap will be enabled temporarily for migration verification.${CL}"
+        if [ "$BUSINESS_MODE" = "yes" ]; then
+            keep="$(read_yes_no "Keep new bootstrap access after successful migration?" "n")"
+        else
+            keep="$(read_yes_no "Keep new bootstrap access after successful migration?" "y")"
+        fi
+        if [[ "$keep" =~ ^[Yy]$ ]]; then
+            BOOTSTRAP_KEEP_AFTER_MIGRATION="yes"
+            BOOTSTRAP_MODE="user-enabled"
+            BOOTSTRAP_ACTION="temporary test, then keep enabled"
+            msg_ok "Bootstrap access will be kept enabled after migration."
+        else
+            BOOTSTRAP_KEEP_AFTER_MIGRATION="no"
+            BOOTSTRAP_MODE="temporary-for-migration"
+            BOOTSTRAP_ACTION="temporary test, then close"
+            msg_ok "Bootstrap access will be closed after migration."
+        fi
+    else
+        BOOTSTRAP_MODE="enabled"
+        BOOTSTRAP_ACTION="enable"
+        echo -e "${YW}${SELECTED_ADMIN_UI_DISPLAY} bootstrap will be enabled for initial setup.${CL}"
+        msg_ok "Bootstrap access will be enabled."
+    fi
+}
+
+function show_selected_stack_preflight() {
+    local port_status=""
     section "SELECTED STACK PREFLIGHT"
     refresh_setup_mode
 
@@ -740,61 +800,14 @@ function collect_bootstrap_decision() {
     aligned_status_line "Selected bootstrap" "$SELECTED_OVERRIDE_FILE" "$GN"
     aligned_status_line "Bootstrap current" "$BOOTSTRAP_CURRENT" "$(status_color_for_value "$BOOTSTRAP_CURRENT")"
     aligned_status_line "Bootstrap port" "$(selected_bootstrap_port_display)" "$(status_color_for_value "$(selected_bootstrap_port_status)")"
-    aligned_status_line "Live/business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
-
-    if [ "$ACTION_MODE" = "rerun-update" ]; then
-        if admin_bootstrap_listening "$SELECTED_ADMIN_UI"; then
-            keep="$(read_yes_no "Keep bootstrap access enabled for ${SELECTED_ADMIN_UI_DISPLAY}?" "y")"
-            if [[ "$keep" =~ ^[Yy]$ ]]; then
-                BOOTSTRAP_MODE="user-enabled"
-                BOOTSTRAP_ACTION="keep enabled"
-                msg_ok "Bootstrap access will be kept enabled"
-            else
-                BOOTSTRAP_MODE="user-disabled"
-                BOOTSTRAP_ACTION="keep disabled"
-                msg_ok "Bootstrap access will be kept disabled"
-            fi
-        else
-            keep="$(read_yes_no "Enable bootstrap access for ${SELECTED_ADMIN_UI_DISPLAY}?" "n")"
-            if [[ "$keep" =~ ^[Yy]$ ]]; then
-                BOOTSTRAP_MODE="user-enabled"
-                BOOTSTRAP_ACTION="enable"
-                msg_ok "Bootstrap access will be enabled"
-            else
-                BOOTSTRAP_MODE="user-disabled"
-                BOOTSTRAP_ACTION="keep disabled"
-                msg_ok "Bootstrap access will be kept disabled"
-            fi
-        fi
-    elif [ "$ACTION_MODE" = "migration" ]; then
-        if [ "$BUSINESS_MODE" = "yes" ]; then
-            keep="$(read_yes_no "Keep new bootstrap access after successful migration?" "n")"
-        else
-            keep="$(read_yes_no "Keep new bootstrap access after successful migration?" "y")"
-        fi
-        if [[ "$keep" =~ ^[Yy]$ ]]; then
-            BOOTSTRAP_KEEP_AFTER_MIGRATION="yes"
-            BOOTSTRAP_MODE="user-enabled"
-            BOOTSTRAP_ACTION="temporary test, then keep enabled"
-            msg_ok "Bootstrap access will be kept enabled after migration"
-        else
-            BOOTSTRAP_KEEP_AFTER_MIGRATION="no"
-            BOOTSTRAP_MODE="temporary-for-migration"
-            BOOTSTRAP_ACTION="temporary test, then close"
-            msg_ok "Bootstrap access will be closed after migration"
-        fi
-    else
-        BOOTSTRAP_MODE="enabled"
-        BOOTSTRAP_ACTION="enable"
-    fi
-
-    port_status="$(selected_bootstrap_port_status)"
     aligned_status_line "Bootstrap action" "$BOOTSTRAP_ACTION" "$GN"
+    aligned_status_line "Live/business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
     if [ "$ACTION_MODE" = "migration" ]; then
         aligned_status_line "Migration safety" "stop old after new verified" "$YW"
     fi
     aligned_status_line "Public Auth routes" "$SCRIPT62_PUBLIC_AUTH_ROUTES" "$YW"
 
+    port_status="$(selected_bootstrap_port_status)"
     if [ "$port_status" = "blocked" ] && { [ "$BOOTSTRAP_ACTION" != "keep disabled" ] && [ "$BOOTSTRAP_ACTION" != "disable" ]; }; then
         msg_warn "Selected bootstrap port ${SELECTED_BOOTSTRAP_PORT} is already in use by something other than the selected Admin UI. Deployment may fail unless that listener is expected."
     fi
@@ -826,9 +839,11 @@ function show_setup_plan_and_confirm() {
     local apply_yn=""
     section "SETUP PLAN"
     if [ "$ACTION_MODE" = "migration" ]; then
-        echo -e "${YW}Script 6.2 will deploy the new selected Admin UI, verify it, then stop the old Admin UI after confirmation.${CL}"
+        echo -e "${YW}Script 6.2 will deploy ${SELECTED_ADMIN_UI_DISPLAY}, verify it, then stop the old Admin UI after confirmation.${CL}"
+    elif [ "$ACTION_MODE" = "rerun-update" ]; then
+        echo -e "${YW}Rerun/update detected. ${SELECTED_ADMIN_UI_DISPLAY} data and secrets will be preserved.${CL}"
     else
-        echo -e "${YW}Script 6.2 will deploy or update only the selected Admin UI after confirmation.${CL}"
+        echo -e "${YW}Script 6.2 will deploy only the selected Admin UI after confirmation.${CL}"
     fi
     echo ""
     echo -e "${YW}Setup mode:${CL}"
@@ -837,8 +852,8 @@ function show_setup_plan_and_confirm() {
     aligned_status_line "Existing Admin UI" "$(admin_display_name "$PREVIOUS_ADMIN_UI")" "$(status_color_for_value "$PREVIOUS_ADMIN_UI")"
     aligned_status_line "Live/business mode" "$BUSINESS_MODE" "$(status_color_for_value "$BUSINESS_MODE")"
     aligned_status_line "Bootstrap current" "$BOOTSTRAP_CURRENT" "$(status_color_for_value "$BOOTSTRAP_CURRENT")"
-    aligned_status_line "Bootstrap action" "$BOOTSTRAP_ACTION" "$GN"
     aligned_status_line "Bootstrap port" "$(selected_bootstrap_port_display)" "$(status_color_for_value "$(selected_bootstrap_port_status)")"
+    aligned_status_line "Bootstrap action" "$BOOTSTRAP_ACTION" "$GN"
     if [ "$ACTION_MODE" = "migration" ]; then
         aligned_status_line "Stop old stack" "after new verified" "$YW"
         aligned_status_line "Keep new bootstrap" "$BOOTSTRAP_KEEP_AFTER_MIGRATION" "$(status_color_for_value "$BOOTSTRAP_KEEP_AFTER_MIGRATION")"
@@ -848,12 +863,8 @@ function show_setup_plan_and_confirm() {
     if [ "$ACTION_MODE" = "migration" ]; then
         echo ""
         echo -e "${YW}Migration safety:${CL}"
-        echo -e "${YW}The existing Admin UI will stay running until the new selected stack verifies through bootstrap access.${CL}"
-        echo -e "${YW}Old data, secrets, and compose files will be preserved. Only the old stack is stopped after new verification succeeds.${CL}"
-    elif [ "$ACTION_MODE" = "rerun-update" ]; then
-        echo ""
-        echo -e "${YW}Existing selected Admin UI detected. This rerun updates only ${SELECTED_ADMIN_UI_DISPLAY}.${CL}"
-        echo -e "${YW}Persistent data and existing secrets are preserved.${CL}"
+        echo -e "${YW}Existing Admin UI stays running until ${SELECTED_ADMIN_UI_DISPLAY} verifies successfully.${CL}"
+        echo -e "${YW}Old data, secrets, and compose files are preserved; only the old stack is stopped.${CL}"
     fi
     echo ""
     echo -e "${YW}Apply changes:${CL}"
@@ -861,19 +872,14 @@ function show_setup_plan_and_confirm() {
     aligned_status_line "Bootstrap override" "$SELECTED_OVERRIDE_FILE" "$GN"
     aligned_status_line "Secrets/passwords" "selected only" "$GN"
     aligned_status_line "Docker networks" "verify/reuse" "$GN"
-    aligned_status_line "Compose config" "validate selected stack only" "$GN"
-    aligned_status_line "Deployment" "deploy selected stack only" "$GN"
+    aligned_status_line "Compose config" "validate selected only" "$GN"
+    aligned_status_line "Deployment" "deploy selected only" "$GN"
     if [ "$ACTION_MODE" = "migration" ]; then
-        aligned_status_line "Migration" "stop old only after new verified" "$YW"
+        aligned_status_line "Migration" "stop old after verify" "$YW"
     else
-        aligned_status_line "Migration" "not applicable" "$YW"
+        aligned_status_line "Migration" "not-applicable" "$YW"
     fi
-    echo ""
-    echo -e "${YW}Prepared by Script 6.1:${CL}"
-    aligned_status_line "Docker dir" "$DOCKER_DIR" "$GN"
-    aligned_status_line "Compose dir" "$COMPOSE_DIR" "$GN"
-    aligned_status_line "Secrets dir" "$SECRETS_DIR" "$GN"
-    aligned_status_line "Domain" "$DOMAIN_VALUE" "$GN"
+    aligned_status_line "Environment" "loaded from Script 6.1 handoff" "$GN"
     echo ""
     if [ -r /dev/tty ]; then read -r -p "Apply this Admin UI bootstrap setup plan? [Y/n]: " apply_yn </dev/tty || apply_yn=""; else read -r -p "Apply this Admin UI bootstrap setup plan? [Y/n]: " apply_yn || apply_yn=""; fi
     if [[ "$apply_yn" =~ ^[Nn]$ ]]; then
@@ -1176,7 +1182,7 @@ function update_admin_statuses_after_deploy() {
 
 function deploy_admin_ui() {
     local include_bootstrap="yes"
-    mini_header "Admin UI deployment"
+    mini_header "Admin UI"
     if [ "$BOOTSTRAP_ACTION" = "keep disabled" ] || [ "$BOOTSTRAP_ACTION" = "disable" ]; then include_bootstrap="no"; fi
     if [ "$ACTION_MODE" = "migration" ]; then include_bootstrap="yes"; fi
     deploy_selected_stack "$include_bootstrap"
@@ -1348,6 +1354,7 @@ function main() {
     show_admin_ui_detection
     collect_admin_ui_selection
     collect_bootstrap_decision
+    show_selected_stack_preflight
     show_setup_plan_and_confirm
     section "DEPLOY SELECTED ADMIN UI"
     wait_for_docker_readiness
