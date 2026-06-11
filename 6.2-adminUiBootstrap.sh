@@ -21,9 +21,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.2-adminUiBootstrap.sh"
-SCRIPT_VERSION="v1.0.8"
+SCRIPT_VERSION="v1.0.9"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="selected-ui-section-merge"
+SCRIPT_BUILD="selected-ui-alignment-fix"
 
 T=15
 LOG_FILE="/var/log/circl8-admin-ui.log"
@@ -178,14 +178,14 @@ function aligned_status_line() {
     [ -n "$value" ] || value="unknown"
     [ -n "$color" ] || color="$(status_color_for_value "$value")"
     display_value="$(ui_display_value "$value")"
-    printf '    %b%-*s%b %b%s%b\n' "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    printf '  %b%-*s%b %b%s%b\n' "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function final_line() {
     local label="$1" value="${2:-not configured}" color="${3:-$GN}" display_value=""
     [ -n "$value" ] || value="not configured"
     display_value="$(ui_display_value "$value")"
-    printf '    %b%-*s%b %b%s%b\n' "$BL" "$UI_LABEL_WIDTH" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    printf '  %b%-*s%b %b%s%b\n' "$BL" "$UI_LABEL_WIDTH" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function mini_header() {
@@ -202,7 +202,7 @@ function deploy_status_line() {
     [ -n "$value" ] || value="unknown"
     [ -n "$color" ] || color="$(status_color_for_value "$value")"
     display_value="$(ui_display_value "$value")"
-    printf '    %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
+    printf '  %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function trim_value() {
