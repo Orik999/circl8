@@ -21,15 +21,16 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.1-platformCoreBootstrap.sh"
-SCRIPT_VERSION="v1.0.7"
+SCRIPT_VERSION="v1.0.8"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="ui-alignment-polish"
+SCRIPT_BUILD="deploy-readiness-log-preserve"
 
 T=15
 LOG_FILE="/var/log/circl8-platform-core.log"
 RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/circl8-platform-core-verify.log"
 DEPLOY_OUTPUT_FILE=""
+FAILED_DEPLOY_LOG=""
 COMPLETED_MARKER="/root/.circl8-platform-core-completed"
 SCRIPT6_MARKER="/root/.docker-env-setup-completed"
 
@@ -682,23 +683,135 @@ function write_deployment_failure_log() {
     local display_name="${1:-unknown}"
     local failed_file="${2:-unknown}"
     local failed_project="${3:-unknown}"
+    local reason="${4:-deployment failed}"
+    local timestamp=""
+
+    timestamp="$(date +%Y%m%d-%H%M%S)"
+    FAILED_DEPLOY_LOG="/var/log/circl8-platform-core-deploy-failed-${timestamp}.log"
+
     {
         echo "--- CIRCL8 PLATFORM CORE DEPLOYMENT FAILURE LOG ---"
         echo "Date: $(date)"
         echo "Script: ${SCRIPT_SOURCE} ${SCRIPT_VERSION} ${SCRIPT_BUILD}"
+        echo "Failure: ${reason}"
         echo "Failed stack: ${display_name}"
         echo "Compose file: ${failed_file}"
         echo "Compose project: ${failed_project}"
         echo "Docker dir: ${DOCKER_DIR}"
         echo "Compose dir: ${COMPOSE_DIR}"
-        echo "Detailed deployment output:"
+        echo "Verify log: ${VERIFY_LOG}"
+        echo ""
+        echo "Detailed deployment/readiness output:"
         if [ -n "${DEPLOY_OUTPUT_FILE:-}" ] && [ -s "$DEPLOY_OUTPUT_FILE" ]; then
             cat "$DEPLOY_OUTPUT_FILE"
         else
             echo "No deployment output captured."
         fi
-    } | write_root_file "$VERIFY_LOG"
-    if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" chmod 0644 "$VERIFY_LOG" 2>/dev/null || true; else chmod 0644 "$VERIFY_LOG" 2>/dev/null || true; fi
+    } | write_root_file "$FAILED_DEPLOY_LOG"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" chmod 0644 "$FAILED_DEPLOY_LOG" 2>/dev/null || true
+    else
+        chmod 0644 "$FAILED_DEPLOY_LOG" 2>/dev/null || true
+    fi
+}
+
+function fail_with_deployment_log() {
+    local display_name="${1:-unknown}"
+    local failed_file="${2:-unknown}"
+    local failed_project="${3:-unknown}"
+    local reason="${4:-deployment failed}"
+
+    write_deployment_failure_log "$display_name" "$failed_file" "$failed_project" "$reason"
+    echo -e "${BFR} ${CROSS} ${RD}${reason}${CL}"
+    echo -e "  ${BL}Verify log:${CL} ${GN}${VERIFY_LOG}${CL}"
+    echo -e "  ${BL}Failure log:${CL} ${GN}${FAILED_DEPLOY_LOG}${CL}"
+    exit 1
+}
+
+function wait_for_docker_readiness() {
+    local attempts=10
+    local delay=2
+    local i=""
+    local docker_ready="no"
+    local compose_ready="no"
+    local api_ready="no"
+    local networks_ready="no"
+
+    section "DOCKER READINESS"
+
+    for ((i=1; i<=attempts; i++)); do
+        docker_ready="no"
+        compose_ready="no"
+        api_ready="no"
+        networks_ready="no"
+
+        command -v docker >/dev/null 2>&1 && docker --version >/dev/null 2>&1 && docker_ready="yes"
+        docker compose version >/dev/null 2>&1 && compose_ready="yes"
+        docker info >/dev/null 2>&1 && api_ready="yes"
+        docker network inspect socket_proxy >/dev/null 2>&1 && docker network inspect t2_proxy >/dev/null 2>&1 && networks_ready="yes"
+
+        {
+            echo ""
+            echo "--- Docker readiness attempt ${i}/${attempts} ---"
+            echo "Date: $(date)"
+            echo "Docker command: ${docker_ready}"
+            echo "Docker Compose: ${compose_ready}"
+            echo "Docker API: ${api_ready}"
+            echo "Docker networks: ${networks_ready}"
+        } >> "$DEPLOY_OUTPUT_FILE"
+
+        if [ "$docker_ready" = "yes" ] && [ "$compose_ready" = "yes" ] && [ "$api_ready" = "yes" ] && [ "$networks_ready" = "yes" ]; then
+            aligned_status_line "Docker daemon" "ready" "$GN" 24
+            aligned_status_line "Docker Compose" "ready" "$GN" 24
+            aligned_status_line "Docker API" "responsive" "$GN" 24
+            aligned_status_line "Docker networks" "settled" "$GN" 24
+            return 0
+        fi
+
+        sleep "$delay"
+    done
+
+    aligned_status_line "Docker daemon" "$docker_ready" "$(status_color_for_value "$docker_ready")" 24
+    aligned_status_line "Docker Compose" "$compose_ready" "$(status_color_for_value "$compose_ready")" 24
+    aligned_status_line "Docker API" "$api_ready" "$(status_color_for_value "$api_ready")" 24
+    aligned_status_line "Docker networks" "$networks_ready" "$(status_color_for_value "$networks_ready")" 24
+    fail_with_deployment_log "Docker readiness" "n/a" "n/a" "Docker readiness did not settle before deployment"
+}
+
+function wait_for_container_ready() {
+    local name="${1:-}"
+    local display_name="${2:-container}"
+    local timeout_seconds="${3:-60}"
+    local interval_seconds="${4:-3}"
+    local elapsed=0
+    local state="unknown"
+
+    [ -n "$name" ] || return 1
+
+    while [ "$elapsed" -le "$timeout_seconds" ]; do
+        state="$(container_state "$name")"
+        {
+            echo ""
+            echo "--- Waiting for ${display_name} readiness ---"
+            echo "Date: $(date)"
+            echo "Container: ${name}"
+            echo "State: ${state}"
+            echo "Elapsed: ${elapsed}/${timeout_seconds}s"
+        } >> "$DEPLOY_OUTPUT_FILE"
+
+        case "$state" in
+            running|healthy)
+                msg_ok "${display_name}: ${state}"
+                return 0
+                ;;
+        esac
+
+        sleep "$interval_seconds"
+        elapsed=$((elapsed + interval_seconds))
+    done
+
+    fail_with_deployment_log "$display_name" "n/a" "n/a" "${display_name} did not become ready before timeout"
 }
 
 function deploy_compose_file() {
@@ -706,32 +819,54 @@ function deploy_compose_file() {
     local project=""
     local display_name=""
     local compose_path=""
+    local attempt=""
+    local max_attempts=3
+    local retry_delay=4
+
     [ -n "$file" ] || msg_error "Compose filename was not provided to deploy_compose_file."
     project="$(compose_project_for_file "$file")"
     display_name="$(compose_display_name "$file")"
     compose_path="$(compose_file_path "$file")"
+
     msg_info "Deploying ${display_name}"
-    {
-        echo ""
-        echo "--- Deploying ${display_name} (${file}) ---"
-        echo "Date: $(date)"
-        echo "Project: ${project}"
-        echo "Compose file: ${compose_path}"
-        docker compose --env-file "$ENV_FILE" -p "$project" -f "$compose_path" up -d --remove-orphans
-    } >> "$DEPLOY_OUTPUT_FILE" 2>&1 || {
-        write_deployment_failure_log "$display_name" "$file" "$project"
-        msg_error "${display_name} deployment failed. See ${VERIFY_LOG}"
-    }
-    msg_ok "${display_name}: deployed"
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        {
+            echo ""
+            echo "--- Deploying ${display_name} (${file}) attempt ${attempt}/${max_attempts} ---"
+            echo "Date: $(date)"
+            echo "Project: ${project}"
+            echo "Compose file: ${compose_path}"
+        } >> "$DEPLOY_OUTPUT_FILE"
+
+        if docker compose --env-file "$ENV_FILE" -p "$project" -f "$compose_path" up -d --remove-orphans >> "$DEPLOY_OUTPUT_FILE" 2>&1; then
+            msg_ok "${display_name}: deployed"
+            return 0
+        fi
+
+        {
+            echo "Deploy attempt ${attempt}/${max_attempts} failed for ${display_name}."
+            echo "Retry delay: ${retry_delay}s"
+        } >> "$DEPLOY_OUTPUT_FILE"
+
+        if [ "$attempt" -lt "$max_attempts" ]; then
+            sleep "$retry_delay"
+        fi
+    done
+
+    fail_with_deployment_log "$display_name" "$file" "$project" "${display_name} deployment failed"
 }
 
 function deploy_platform_core() {
     section "DEPLOYMENT"
     deploy_compose_file "$COMPOSE_SOCKET_PROXY"
+    wait_for_container_ready "socket-proxy" "Socket Proxy" 60 3
     deploy_compose_file "$COMPOSE_TRAEFIK"
+    wait_for_container_ready "traefik" "Traefik" 60 3
     if [ "$CF_SERVICES_ENABLED" = "yes" ]; then
         deploy_compose_file "$COMPOSE_CF_DDNS"
+        wait_for_container_ready "cf-ddns" "Cloudflare DDNS" 60 3
         deploy_compose_file "$COMPOSE_CF_COMPANION"
+        wait_for_container_ready "cf-companion" "Cloudflare Companion" 60 3
     else
         SCRIPT61_CF_DDNS="skipped"
         SCRIPT61_CF_COMPANION="skipped"
@@ -944,6 +1079,7 @@ function apply_platform_core_changes() {
     install_core_compose_files
     create_networks
     validate_compose_files
+    wait_for_docker_readiness
     deploy_platform_core
 }
 
