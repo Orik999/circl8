@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.12"
+SCRIPT_VERSION="v1.0.13"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-final-terminal-polish"
+SCRIPT_BUILD="authentik-fresh-folder-prep-fix"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -86,10 +86,10 @@ SCRIPT63_SETUP_MODE="fresh-install"
 AUTHENTIK_EXISTING="not detected"
 AUTHENTIK_MARKER_STATUS="not present"
 AUTHENTIK_CONTAINER_STATUS="not detected"
-SCRIPT63_LANE="automation"
-SCRIPT63_STATUS="deployed-auth-not-configured"
-SCRIPT63_VERIFY_STATUS="DEPLOYED"
-SCRIPT63_DEPLOYMENT_STATUS="completed"
+SCRIPT63_LANE="prep"
+SCRIPT63_STATUS="prep-pending"
+SCRIPT63_VERIFY_STATUS="PENDING"
+SCRIPT63_DEPLOYMENT_STATUS="not-run"
 SCRIPT63_MARKER_WRITTEN="no"
 SCRIPT63_SECRET_STORAGE="env-only"
 SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
@@ -823,9 +823,24 @@ function root_download_url_to_file() {
     rm -f "$tmp"
 }
 
+function set_prep_failure_status() {
+    SCRIPT63_LANE="prep"
+    SCRIPT63_STATUS="prep-failed"
+    SCRIPT63_VERIFY_STATUS="FAILED"
+    SCRIPT63_DEPLOYMENT_STATUS="not-run"
+    AUTHENTIK_DEPLOYMENT_STATUS="not-run"
+    SCRIPT63_MARKER_WRITTEN="no"
+    SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+    SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
+    SCRIPT63_READY_FOR_SCRIPT64="no"
+}
+
 function fail_with_verify_log() {
     local message="$1"
     clear_progress_line || true
+    if [ "${SCRIPT63_LANE:-}" == "prep" ]; then
+        set_prep_failure_status
+    fi
     write_verify_report || true
     echo -e "${CROSS} ${RD}${message}${CL}"
     echo -e "  ${BL}Verify log:${CL} ${VERIFY_LOG}"
@@ -835,7 +850,9 @@ function fail_with_verify_log() {
 function fail_with_failure_log() {
     local message="$1"
     clear_progress_line || true
-    if [ "${SCRIPT63_LANE:-}" == "deploy" ] && [ "${SCRIPT63_DEPLOYMENT_STATUS:-}" != "completed" ]; then
+    if [ "${SCRIPT63_LANE:-}" == "prep" ]; then
+        set_prep_failure_status
+    elif [ "${SCRIPT63_LANE:-}" == "deploy" ] && [ "${SCRIPT63_DEPLOYMENT_STATUS:-}" != "completed" ]; then
         SCRIPT63_STATUS="deploy-failed"
         SCRIPT63_VERIFY_STATUS="FAILED"
         SCRIPT63_DEPLOYMENT_STATUS="failed"
@@ -1139,7 +1156,11 @@ function root_set_dir_mode() {
 function resolve_authentik_dir_owner_group() {
     AUTHENTIK_DIR_OWNER_GROUP="$(root_stat_owner_group "$DOCKER_DIR")"
     if [ -z "$AUTHENTIK_DIR_OWNER_GROUP" ] || [ "$AUTHENTIK_DIR_OWNER_GROUP" == ":" ]; then
-        fail_with_verify_log "Docker project directory owner/group could not be detected."
+        AUTHENTIK_DIR_OWNER_GROUP="$(root_stat_owner_group "${DOCKER_DIR}/appdata")"
+    fi
+    if [ -z "$AUTHENTIK_DIR_OWNER_GROUP" ] || [ "$AUTHENTIK_DIR_OWNER_GROUP" == ":" ]; then
+        append_deploy_log "Authentik folder owner/group could not be detected from Docker project directory or appdata directory."
+        fail_with_failure_log "Docker project directory owner/group could not be detected."
     fi
 }
 
@@ -1388,15 +1409,55 @@ function append_missing_env_values() {
     ENV_STATUS="ready"
 }
 
+function append_folder_prep_diagnostic() {
+    local path="$1" expected_owner_group="$2" expected_mode="$3" reason="$4" actual_owner_group="missing" actual_mode="missing"
+    init_deploy_output_log
+    if root_path_exists "$path"; then
+        actual_owner_group="$(root_stat_owner_group "$path")"
+        actual_mode="$(root_stat_mode "$path")"
+    fi
+    append_deploy_log "Authentik folder prep failure: ${reason}"
+    append_deploy_log "Path: ${path}"
+    append_deploy_log "Expected owner/group: ${expected_owner_group}"
+    append_deploy_log "Expected mode: ${expected_mode}"
+    append_deploy_log "Actual owner/group: ${actual_owner_group}"
+    append_deploy_log "Actual mode: ${actual_mode}"
+}
+
+function verify_managed_dir() {
+    local path="$1" expected_owner_group="$2" expected_mode="$3" actual_owner_group="" actual_mode=""
+    if ! root_path_exists "$path"; then
+        append_folder_prep_diagnostic "$path" "$expected_owner_group" "$expected_mode" "directory is missing after create/repair"
+        return 1
+    fi
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -d "$path" || { append_folder_prep_diagnostic "$path" "$expected_owner_group" "$expected_mode" "path exists but is not a directory"; return 1; }
+    else
+        test -d "$path" || { append_folder_prep_diagnostic "$path" "$expected_owner_group" "$expected_mode" "path exists but is not a directory"; return 1; }
+    fi
+    actual_owner_group="$(root_stat_owner_group "$path")"
+    actual_mode="$(root_stat_mode "$path")"
+    if [ "$actual_owner_group" != "$expected_owner_group" ]; then
+        append_folder_prep_diagnostic "$path" "$expected_owner_group" "$expected_mode" "owner/group mismatch after create/repair"
+        return 1
+    fi
+    if [ "$actual_mode" != "$expected_mode" ]; then
+        append_folder_prep_diagnostic "$path" "$expected_owner_group" "$expected_mode" "mode mismatch after create/repair"
+        return 1
+    fi
+    return 0
+}
+
 function ensure_managed_dir() {
-    local path="$1" status_var="$2" mode="${3:-755}" preserve_if_nonempty="${4:-no}" changed="no" was_nonempty="no" current_owner_group="" current_mode=""
+    local path="$1" status_var="$2" mode="${3:-755}" preserve_if_nonempty="${4:-no}" created="no" repaired="no" was_nonempty="no" current_owner_group="" current_mode=""
 
     if ! root_path_exists "$path"; then
         if ! root_install_dir "$path" "$mode"; then
             printf -v "$status_var" '%s' "failed"
+            append_folder_prep_diagnostic "$path" "$AUTHENTIK_DIR_OWNER_GROUP" "$mode" "directory creation failed"
             return 1
         fi
-        changed="yes"
+        created="yes"
     fi
 
     if [ "$preserve_if_nonempty" == "yes" ] && root_dir_has_entries "$path"; then
@@ -1407,28 +1468,39 @@ function ensure_managed_dir() {
     if [ "$current_owner_group" != "$AUTHENTIK_DIR_OWNER_GROUP" ]; then
         if ! root_set_dir_owner_group "$path" "$AUTHENTIK_DIR_OWNER_GROUP"; then
             printf -v "$status_var" '%s' "failed"
+            append_folder_prep_diagnostic "$path" "$AUTHENTIK_DIR_OWNER_GROUP" "$mode" "owner/group repair failed"
             return 1
         fi
-        changed="yes"
+        repaired="yes"
     fi
 
     current_mode="$(root_stat_mode "$path")"
     if [ "$current_mode" != "$mode" ]; then
         if ! root_set_dir_mode "$path" "$mode"; then
             printf -v "$status_var" '%s' "failed"
+            append_folder_prep_diagnostic "$path" "$AUTHENTIK_DIR_OWNER_GROUP" "$mode" "mode repair failed"
             return 1
         fi
-        changed="yes"
+        repaired="yes"
     fi
 
-    if ! root_write_test_dir "$path"; then
+    if ! verify_managed_dir "$path" "$AUTHENTIK_DIR_OWNER_GROUP" "$mode"; then
         printf -v "$status_var" '%s' "failed"
         return 1
     fi
 
-    if [ "$was_nonempty" == "yes" ] && [ "$changed" == "no" ]; then
-        printf -v "$status_var" '%s' "preserved"
-    elif [ "$changed" == "yes" ]; then
+    # For existing PostgreSQL data, avoid creating test files inside database contents.
+    if [ "$preserve_if_nonempty" == "yes" ] && [ "$was_nonempty" == "yes" ]; then
+        :
+    elif ! root_write_test_dir "$path"; then
+        printf -v "$status_var" '%s' "failed"
+        append_folder_prep_diagnostic "$path" "$AUTHENTIK_DIR_OWNER_GROUP" "$mode" "writeability test failed"
+        return 1
+    fi
+
+    if [ "$created" == "yes" ]; then
+        printf -v "$status_var" '%s' "created"
+    elif [ "$repaired" == "yes" ]; then
         printf -v "$status_var" '%s' "fixed"
     else
         printf -v "$status_var" '%s' "ready"
@@ -1448,12 +1520,21 @@ function ensure_postgresql_dir() {
 }
 
 function prepare_authentik_folders() {
+    SCRIPT63_LANE="prep"
+    SCRIPT63_STATUS="prep-running"
+    SCRIPT63_VERIFY_STATUS="PENDING"
+    SCRIPT63_DEPLOYMENT_STATUS="not-run"
+    AUTHENTIK_DEPLOYMENT_STATUS="not-run"
+    SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+    init_deploy_output_log
     resolve_authentik_dir_owner_group
-    ensure_regular_dir "$AUTHENTIK_APPDATA_DIR" AUTHENTIK_APPDATA_DIR_STATUS || fail_with_verify_log "Authentik appdata folder could not be prepared safely."
-    ensure_postgresql_dir || fail_with_verify_log "PostgreSQL data folder could not be prepared safely."
-    ensure_regular_dir "$AUTHENTIK_MEDIA_DIR" AUTHENTIK_MEDIA_DIR_STATUS || fail_with_verify_log "Authentik media folder could not be prepared safely."
-    ensure_regular_dir "$AUTHENTIK_TEMPLATES_DIR" AUTHENTIK_TEMPLATES_DIR_STATUS || fail_with_verify_log "Authentik templates folder could not be prepared safely."
-    ensure_regular_dir "$AUTHENTIK_CERTS_DIR" AUTHENTIK_CERTS_DIR_STATUS || fail_with_verify_log "Authentik certs folder could not be prepared safely."
+    ensure_regular_dir "$AUTHENTIK_APPDATA_DIR" AUTHENTIK_APPDATA_DIR_STATUS || fail_with_failure_log "Authentik appdata folder could not be prepared safely."
+    ensure_postgresql_dir || fail_with_failure_log "PostgreSQL data folder could not be prepared safely."
+    ensure_regular_dir "$AUTHENTIK_MEDIA_DIR" AUTHENTIK_MEDIA_DIR_STATUS || fail_with_failure_log "Authentik media folder could not be prepared safely."
+    ensure_regular_dir "$AUTHENTIK_TEMPLATES_DIR" AUTHENTIK_TEMPLATES_DIR_STATUS || fail_with_failure_log "Authentik templates folder could not be prepared safely."
+    ensure_regular_dir "$AUTHENTIK_CERTS_DIR" AUTHENTIK_CERTS_DIR_STATUS || fail_with_failure_log "Authentik certs folder could not be prepared safely."
+    SCRIPT63_STATUS="prep-ready"
+    SCRIPT63_VERIFY_STATUS="PREPARED"
 }
 
 function display_env_plan_status() {
@@ -1524,6 +1605,19 @@ function inspect_env_required_for_deploy() {
     fi
 }
 
+function preserve_success_folder_status() {
+    local status_var="$1" path="$2" current_value=""
+    if ! root_path_exists "$path"; then
+        printf -v "$status_var" '%s' "failed"
+        return 0
+    fi
+    eval "current_value=\${${status_var}:-unknown}"
+    case "$current_value" in
+        ready|created|fixed) return 0 ;;
+        *) printf -v "$status_var" '%s' "ready" ;;
+    esac
+}
+
 function inspect_folders_required_for_deploy() {
     AUTHENTIK_APPDATA_DIR="${DOCKER_DIR}/appdata/authentik"
     AUTHENTIK_POSTGRESQL_DIR="${AUTHENTIK_APPDATA_DIR}/postgresql"
@@ -1531,15 +1625,11 @@ function inspect_folders_required_for_deploy() {
     AUTHENTIK_TEMPLATES_DIR="${AUTHENTIK_APPDATA_DIR}/custom-templates"
     AUTHENTIK_CERTS_DIR="${AUTHENTIK_APPDATA_DIR}/certs"
 
-    if root_path_exists "$AUTHENTIK_APPDATA_DIR"; then AUTHENTIK_APPDATA_DIR_STATUS="ready"; else AUTHENTIK_APPDATA_DIR_STATUS="failed"; fi
-    if root_path_exists "$AUTHENTIK_POSTGRESQL_DIR"; then
-        if root_dir_has_entries "$AUTHENTIK_POSTGRESQL_DIR"; then AUTHENTIK_POSTGRESQL_DIR_STATUS="preserved"; else AUTHENTIK_POSTGRESQL_DIR_STATUS="ready"; fi
-    else
-        AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"
-    fi
-    if root_path_exists "$AUTHENTIK_MEDIA_DIR"; then AUTHENTIK_MEDIA_DIR_STATUS="ready"; else AUTHENTIK_MEDIA_DIR_STATUS="failed"; fi
-    if root_path_exists "$AUTHENTIK_TEMPLATES_DIR"; then AUTHENTIK_TEMPLATES_DIR_STATUS="ready"; else AUTHENTIK_TEMPLATES_DIR_STATUS="failed"; fi
-    if root_path_exists "$AUTHENTIK_CERTS_DIR"; then AUTHENTIK_CERTS_DIR_STATUS="ready"; else AUTHENTIK_CERTS_DIR_STATUS="failed"; fi
+    preserve_success_folder_status AUTHENTIK_APPDATA_DIR_STATUS "$AUTHENTIK_APPDATA_DIR"
+    preserve_success_folder_status AUTHENTIK_POSTGRESQL_DIR_STATUS "$AUTHENTIK_POSTGRESQL_DIR"
+    preserve_success_folder_status AUTHENTIK_MEDIA_DIR_STATUS "$AUTHENTIK_MEDIA_DIR"
+    preserve_success_folder_status AUTHENTIK_TEMPLATES_DIR_STATUS "$AUTHENTIK_TEMPLATES_DIR"
+    preserve_success_folder_status AUTHENTIK_CERTS_DIR_STATUS "$AUTHENTIK_CERTS_DIR"
 
     AUTHENTIK_APPDATA_DIR_PLAN="$AUTHENTIK_APPDATA_DIR_STATUS"
     AUTHENTIK_POSTGRESQL_DIR_PLAN="$AUTHENTIK_POSTGRESQL_DIR_STATUS"
@@ -1563,9 +1653,22 @@ function inspect_authentik_prep_for_deploy() {
     fi
 }
 
+function append_prep_readiness_diagnostics() {
+    init_deploy_output_log
+    append_deploy_log "Authentik preparation readiness failed."
+    append_deploy_log "Expected Authentik folder owner/group: ${AUTHENTIK_DIR_OWNER_GROUP:-unknown}"
+    append_deploy_log "Environment status: ${ENV_STATUS}"
+    append_folder_prep_diagnostic "$AUTHENTIK_APPDATA_DIR" "${AUTHENTIK_DIR_OWNER_GROUP:-unknown}" "755" "readiness status ${AUTHENTIK_APPDATA_DIR_STATUS}"
+    append_folder_prep_diagnostic "$AUTHENTIK_POSTGRESQL_DIR" "${AUTHENTIK_DIR_OWNER_GROUP:-unknown}" "750" "readiness status ${AUTHENTIK_POSTGRESQL_DIR_STATUS}"
+    append_folder_prep_diagnostic "$AUTHENTIK_MEDIA_DIR" "${AUTHENTIK_DIR_OWNER_GROUP:-unknown}" "755" "readiness status ${AUTHENTIK_MEDIA_DIR_STATUS}"
+    append_folder_prep_diagnostic "$AUTHENTIK_TEMPLATES_DIR" "${AUTHENTIK_DIR_OWNER_GROUP:-unknown}" "755" "readiness status ${AUTHENTIK_TEMPLATES_DIR_STATUS}"
+    append_folder_prep_diagnostic "$AUTHENTIK_CERTS_DIR" "${AUTHENTIK_DIR_OWNER_GROUP:-unknown}" "755" "readiness status ${AUTHENTIK_CERTS_DIR_STATUS}"
+}
+
 function validate_prep_ready_for_deploy() {
     if [ "$SCRIPT63_READY_FOR_DEPLOYMENT_LANE" != "yes" ]; then
-        fail_with_verify_log "Authentik preparation is not ready for deployment."
+        append_prep_readiness_diagnostics
+        fail_with_failure_log "Authentik preparation is not ready for deployment."
     fi
 }
 
@@ -1757,8 +1860,7 @@ function run_docker_readiness_gate() {
         if docker_cmd info >/dev/null 2>&1 \
             && docker_cmd compose version >/dev/null 2>&1 \
             && docker_cmd network inspect t2_proxy >/dev/null 2>&1 \
-            && root_file_not_empty "$ENV_FILE" \
-            && root_file_not_empty "$AUTHENTIK_COMPOSE_RUNTIME_PATH"; then
+            && root_file_not_empty "$ENV_FILE"; then
             ok="yes"
             break
         fi
@@ -1904,6 +2006,10 @@ function wait_for_internal_api_ready() {
 }
 
 function run_authentik_deploy() {
+    SCRIPT63_LANE="deploy"
+    SCRIPT63_STATUS="deploy-running"
+    SCRIPT63_VERIFY_STATUS="PENDING"
+    SCRIPT63_DEPLOYMENT_STATUS="not-run"
     section "DEPLOY AUTHENTIK"
     init_deploy_output_log
 
@@ -2365,8 +2471,19 @@ function inspect_existing_authentik_deployment() {
     return 1
 }
 
-function inspect_authentik_automation_preflight() {
+function ensure_authentik_deployed_for_automation() {
+    if inspect_existing_authentik_deployment; then
+        return 0
+    fi
+    run_authentik_deploy
     inspect_existing_authentik_deployment || fail_with_failure_log "Authentik deployment readiness is required before automation."
+}
+
+function inspect_authentik_automation_preflight() {
+    SCRIPT63_LANE="automation"
+    if ! inspect_existing_authentik_deployment; then
+        return 0
+    fi
     validate_authentik_compose_config
     if run_authentik_python_action inspect; then
         AUTHENTIK_API_ACCESS_STATUS="valid"
@@ -2619,14 +2736,23 @@ function main() {
     validate_script62_handoff
     runtime_preflight
     detect_authentik_state
+    inspect_folders_required_for_deploy
+    prepare_authentik_folders
     inspect_authentik_prep_for_deploy
     show_authentik_preflight
     show_authentik_prep_plan
     validate_prep_ready_for_deploy
     inspect_authentik_automation_preflight
-    show_automation_preflight
+    if [ "$SCRIPT63_READY_FOR_AUTOMATION_LANE" == "yes" ]; then
+        show_automation_preflight
+    fi
     show_setup_plan
     confirm_or_exit
+    if [ "$SCRIPT63_READY_FOR_AUTOMATION_LANE" != "yes" ]; then
+        ensure_authentik_deployed_for_automation
+        inspect_authentik_automation_preflight
+        show_automation_preflight
+    fi
     configure_authentik_forwardauth
     verify_forwardauth
     show_verification_marker_scaffold
