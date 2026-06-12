@@ -5,8 +5,9 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 #  Project Circl8 - Script 6.3 Authentik Prep
 # =========================================================
-# Lane 3 only: hard gate, read-only preflight, add-only env prep,
-# safe Authentik folder prep, prep verify report, and no deployment.
+# Lane 4 only: hard gate, preflight, env/folder readiness validation,
+# Authentik compose deployment, container readiness, deploy verify report,
+# and no provider/application/outpost automation.
 
 # --- COLOR VARIABLES ---
 YW="$(printf '\033[33m')"
@@ -26,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.3"
+SCRIPT_VERSION="v1.0.4"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-prep-folder-permissions"
+SCRIPT_BUILD="authentik-deploy-readiness"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -85,13 +86,14 @@ SCRIPT63_SETUP_MODE="fresh-install"
 AUTHENTIK_EXISTING="not detected"
 AUTHENTIK_MARKER_STATUS="not present"
 AUTHENTIK_CONTAINER_STATUS="not detected"
-SCRIPT63_LANE="prep"
+SCRIPT63_LANE="deploy"
 SCRIPT63_STATUS="prepared-not-deployed"
 SCRIPT63_VERIFY_STATUS="PREPARED"
 SCRIPT63_DEPLOYMENT_STATUS="not-run"
 SCRIPT63_MARKER_WRITTEN="no"
 SCRIPT63_SECRET_STORAGE="env-only"
 SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
 
 ENV_STATUS="unknown"
 ENV_BACKUP_STATUS="not-needed"
@@ -124,6 +126,21 @@ AUTHENTIK_POSTGRESQL_DIR_PLAN="unknown"
 AUTHENTIK_MEDIA_DIR_PLAN="unknown"
 AUTHENTIK_TEMPLATES_DIR_PLAN="unknown"
 AUTHENTIK_CERTS_DIR_PLAN="unknown"
+
+COMPOSE_PROJECT_NAME="circl8-authentik"
+AUTHENTIK_RAW_COMPOSE_URL="https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main/docker/05-authentik-compose.yml"
+AUTHENTIK_COMPOSE_RUNTIME_PATH=""
+AUTHENTIK_COMPOSE_SOURCE_STATUS="unknown"
+AUTHENTIK_COMPOSE_CONFIG_STATUS="unknown"
+DOCKER_READINESS_STATUS="unknown"
+DOCKER_DAEMON_READINESS_STATUS="unknown"
+DOCKER_COMPOSE_READINESS_STATUS="unknown"
+DOCKER_NETWORKS_READINESS_STATUS="unknown"
+AUTHENTIK_DEPLOYMENT_STATUS="not-run"
+AUTHENTIK_POSTGRES_STATUS="unknown"
+AUTHENTIK_SERVER_STATUS="unknown"
+AUTHENTIK_WORKER_STATUS="unknown"
+AUTHENTIK_INTERNAL_API_STATUS="unknown"
 
 # =========================================================
 #  OUTPUT HELPERS
@@ -168,7 +185,7 @@ function mini_header() {
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        ready|present|completed|PASS|yes|running|active|responsive|detected|configured|generated|preserved|fixed|valid|SKELETON|PREPARED|fresh\ install|fresh-install|rerun/update|rerun-update|not\ written|not\ run|not-run|not\ used|planned|unchanged|stored\ root-only|env\ only|env-only|created|not\ needed|not-needed|reused|partial|will\ create|will-create|will\ generate|will-generate)
+        ready|present|completed|PASS|yes|running|active|responsive|detected|configured|generated|preserved|fixed|valid|installed|healthy|settled|DEPLOYED|SKELETON|PREPARED|fresh\ install|fresh-install|rerun/update|rerun-update|not\ written|not\ run|not-run|not\ used|planned|unchanged|stored\ root-only|env\ only|env-only|created|not\ needed|not-needed|reused|partial|will\ create|will-create|will\ generate|will-generate)
             printf '%s' "$GN"
             ;;
         warning|skipped|unknown|not\ detected|will\ install\ later|not\ present|not\ configured|reuse\ if\ present|missing|preserve\ in\ later\ lane|planned\ for\ later\ lane)
@@ -198,6 +215,8 @@ function ui_display_value() {
         env-only) printf '.env only' ;;
         not-needed) printf 'not needed' ;;
         not-configured) printf 'not configured' ;;
+        pending-lane-5) printf 'pending lane 5' ;;
+        deployed-auth-not-configured) printf 'deployed, Auth not configured' ;;
         *) printf '%s' "$value" ;;
     esac
 }
@@ -542,6 +561,10 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT63_SETUP_MODE=${SCRIPT63_SETUP_MODE}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_EXISTING=${AUTHENTIK_EXISTING}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE=${AUTHENTIK_COMPOSE_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_FILE=${AUTHENTIK_COMPOSE_FILE}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_RUNTIME_PATH=${AUTHENTIK_COMPOSE_RUNTIME_PATH}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_STATUS=${AUTHENTIK_COMPOSE_SOURCE_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_CONFIG=${AUTHENTIK_COMPOSE_CONFIG_STATUS}"
         printf '%s\n' "SCRIPT63_TRAEFIK_AUTHENTIK_REFERENCES=${TRAEFIK_AUTHENTIK_REFERENCES}"
         printf '%s\n' "SCRIPT63_ENV_STATUS=${ENV_STATUS}"
         printf '%s\n' "SCRIPT63_ENV_BACKUP=${ENV_BACKUP_STATUS}"
@@ -559,13 +582,26 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT63_AUTHENTIK_TEMPLATES_DIR=${AUTHENTIK_TEMPLATES_DIR_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_CERTS_DIR=${AUTHENTIK_CERTS_DIR_STATUS}"
         printf '%s\n' "SCRIPT63_READY_FOR_DEPLOYMENT_LANE=${SCRIPT63_READY_FOR_DEPLOYMENT_LANE}"
+        printf '%s\n' "SCRIPT63_READY_FOR_AUTOMATION_LANE=${SCRIPT63_READY_FOR_AUTOMATION_LANE}"
+        printf '%s\n' "SCRIPT63_DOCKER_READINESS=${DOCKER_READINESS_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_DEPLOYMENT=${AUTHENTIK_DEPLOYMENT_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_POSTGRES=${AUTHENTIK_POSTGRES_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_SERVER=${AUTHENTIK_SERVER_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_WORKER=${AUTHENTIK_WORKER_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_INTERNAL_API=${AUTHENTIK_INTERNAL_API_STATUS}"
+        printf '%s\n' "SCRIPT63_FORWARD_AUTH_AUTOMATION=pending-lane-5"
+        printf '%s\n' "SCRIPT63_PROVIDER=pending-lane-5"
+        printf '%s\n' "SCRIPT63_APPLICATION=pending-lane-5"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_OUTPOST=pending-lane-5"
+        printf '%s\n' "SCRIPT63_FORWARD_AUTH=pending-lane-5"
+        printf '%s\n' "SCRIPT63_READY_FOR_SCRIPT64=no"
         printf '%s\n' "SCRIPT63_COMPLETION_MARKER_PATH=${SCRIPT63_MARKER}"
-        printf '%s\n' "SCRIPT63_COMPLETION_MARKER_NOTE=not written in prep lane"
+        printf '%s\n' "SCRIPT63_COMPLETION_MARKER_NOTE=not written in deploy lane"
     } | write_text_root_file "$VERIFY_LOG"
 }
 
 function preserve_failure_log() {
-    local reason="${1:-Authentik skeleton checks failed}"
+    local reason="${1:-Authentik deployment checks failed}"
     local ts=""
     ts="$(date +%Y%m%d-%H%M%S)"
     FAILURE_LOG="/var/log/circl8-authentik-deploy-failed-${ts}.log"
@@ -573,6 +609,56 @@ function preserve_failure_log() {
         echo "$reason"
         [ -n "${DEPLOY_OUTPUT_LOG:-}" ] && [ -s "$DEPLOY_OUTPUT_LOG" ] && cat "$DEPLOY_OUTPUT_LOG"
     } | write_text_root_file "$FAILURE_LOG"
+}
+
+
+function init_deploy_output_log() {
+    if [ -z "${DEPLOY_OUTPUT_LOG:-}" ]; then
+        DEPLOY_OUTPUT_LOG="$(mktemp /tmp/circl8-authentik-deploy.XXXXXX)"
+    fi
+}
+
+function append_deploy_log() {
+    init_deploy_output_log
+    printf '%s\n' "$*" >> "$DEPLOY_OUTPUT_LOG"
+}
+
+function append_file_to_deploy_log_sanitized() {
+    local file="$1"
+    init_deploy_output_log
+    [ -s "$file" ] || return 0
+    sed -E '/(PASSWORD|TOKEN|SECRET_KEY|AUTHENTIK_EMAIL__PASSWORD|AUTHENTIK_POSTGRES_PASSWORD|AUTHENTIK_BOOTSTRAP)/Id' "$file" >> "$DEPLOY_OUTPUT_LOG" || true
+}
+
+function root_copy_regular_file() {
+    local src="$1" dest="$2"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp -f "$src" "$dest"
+    else
+        cp -f "$src" "$dest"
+    fi
+}
+
+function root_download_url_to_file() {
+    local url="$1" dest="$2" tmp=""
+    tmp="$(mktemp /tmp/circl8-authentik-compose.XXXXXX)"
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -fsSL "$url" -o "$tmp" >>"$DEPLOY_OUTPUT_LOG" 2>&1; then
+            rm -f "$tmp"
+            return 1
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if ! wget -qO "$tmp" "$url" >>"$DEPLOY_OUTPUT_LOG" 2>&1; then
+            rm -f "$tmp"
+            return 1
+        fi
+    else
+        rm -f "$tmp"
+        append_deploy_log "Neither curl nor wget is available for compose download."
+        return 1
+    fi
+    root_copy_regular_file "$tmp" "$dest"
+    rm -f "$tmp"
 }
 
 function fail_with_verify_log() {
@@ -585,6 +671,12 @@ function fail_with_verify_log() {
 
 function fail_with_failure_log() {
     local message="$1"
+    if [ "${SCRIPT63_LANE:-}" == "deploy" ] && [ "${SCRIPT63_DEPLOYMENT_STATUS:-}" != "completed" ]; then
+        SCRIPT63_STATUS="deploy-failed"
+        SCRIPT63_VERIFY_STATUS="FAILED"
+        SCRIPT63_DEPLOYMENT_STATUS="failed"
+        SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
+    fi
     preserve_failure_log "$message" || true
     write_verify_report || true
     echo -e "${CROSS} ${RD}${message}${CL}"
@@ -593,7 +685,7 @@ function fail_with_failure_log() {
     exit 1
 }
 
-# Placeholder for future lanes. Intentionally not called in lane 2.
+# Placeholder for final completion lane. Intentionally not called in lane 4.
 function write_completion_marker() {
     return 0
 }
@@ -933,6 +1025,7 @@ function prompt_missing_bootstrap_email() {
         AUTHENTIK_BOOTSTRAP_EMAIL_STATUS="missing"
         ENV_STATUS="failed"
         SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
         deploy_status_line "Bootstrap email" "missing" "$RD"
         fail_with_verify_log "AUTHENTIK_BOOTSTRAP_EMAIL is required before Authentik deployment."
     fi
@@ -948,6 +1041,7 @@ function plan_authentik_env() {
     ENV_KEYS_PRESERVED=0
     ENV_STATUS="planned"
     SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
 
     DOMAIN_VALUE="$(env_value DOMAIN)"
     route_host="$(env_value AUTHENTIK_ROUTE_HOST)"
@@ -1161,12 +1255,116 @@ function display_env_plan_status() {
     esac
 }
 
+
+# =========================================================
+#  DEPLOY-LANE READINESS INSPECTION
+# =========================================================
+function inspect_env_required_for_deploy() {
+    local key="" missing="no"
+    ENV_APPEND_LINES=()
+    ENV_KEYS_ADDED=0
+    ENV_KEYS_PRESERVED=0
+    ENV_BACKUP_STATUS="not-needed"
+    ENV_STATUS="ready"
+    SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+
+    DOMAIN_VALUE="$(env_value DOMAIN)"
+    AUTHENTIK_ROUTE_HOST="$(env_value AUTHENTIK_ROUTE_HOST)"
+    AUTHENTIK_EXTERNAL_URL="$(env_value AUTHENTIK_EXTERNAL_URL)"
+
+    for key in AUTHENTIK_ROUTE_HOST AUTHENTIK_EXTERNAL_URL AUTHENTIK_HOST AUTHENTIK_HOST_BROWSER AUTHENTIK_HOST_BROWSER_VALUE; do
+        if env_has_nonempty_value "$key"; then
+            ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+        else
+            missing="yes"
+        fi
+    done
+
+    if env_has_nonempty_value AUTHENTIK_SECRET_KEY; then
+        AUTHENTIK_SECRET_KEY_STATUS="preserved"; ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+    else
+        AUTHENTIK_SECRET_KEY_STATUS="missing"; missing="yes"
+    fi
+    if env_has_nonempty_value AUTHENTIK_POSTGRES_PASSWORD; then
+        AUTHENTIK_POSTGRES_PASSWORD_STATUS="preserved"; ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+    else
+        AUTHENTIK_POSTGRES_PASSWORD_STATUS="missing"; missing="yes"
+    fi
+    if env_has_nonempty_value AUTHENTIK_BOOTSTRAP_EMAIL; then
+        AUTHENTIK_BOOTSTRAP_EMAIL_STATUS="preserved"; ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+    else
+        AUTHENTIK_BOOTSTRAP_EMAIL_STATUS="missing"; missing="yes"
+    fi
+    if env_has_nonempty_value AUTHENTIK_BOOTSTRAP_PASSWORD; then
+        AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS="preserved"; ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+    else
+        AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS="missing"; missing="yes"
+    fi
+    if env_has_nonempty_value AUTHENTIK_BOOTSTRAP_TOKEN; then
+        AUTHENTIK_BOOTSTRAP_TOKEN_STATUS="preserved"; ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+    else
+        AUTHENTIK_BOOTSTRAP_TOKEN_STATUS="missing"; missing="yes"
+    fi
+
+    classify_smtp_status
+
+    if [ "$missing" == "yes" ]; then
+        ENV_STATUS="failed"
+    fi
+}
+
+function inspect_folders_required_for_deploy() {
+    AUTHENTIK_APPDATA_DIR="${DOCKER_DIR}/appdata/authentik"
+    AUTHENTIK_POSTGRESQL_DIR="${AUTHENTIK_APPDATA_DIR}/postgresql"
+    AUTHENTIK_MEDIA_DIR="${AUTHENTIK_APPDATA_DIR}/media"
+    AUTHENTIK_TEMPLATES_DIR="${AUTHENTIK_APPDATA_DIR}/custom-templates"
+    AUTHENTIK_CERTS_DIR="${AUTHENTIK_APPDATA_DIR}/certs"
+
+    if root_path_exists "$AUTHENTIK_APPDATA_DIR"; then AUTHENTIK_APPDATA_DIR_STATUS="ready"; else AUTHENTIK_APPDATA_DIR_STATUS="failed"; fi
+    if root_path_exists "$AUTHENTIK_POSTGRESQL_DIR"; then
+        if root_dir_has_entries "$AUTHENTIK_POSTGRESQL_DIR"; then AUTHENTIK_POSTGRESQL_DIR_STATUS="preserved"; else AUTHENTIK_POSTGRESQL_DIR_STATUS="ready"; fi
+    else
+        AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"
+    fi
+    if root_path_exists "$AUTHENTIK_MEDIA_DIR"; then AUTHENTIK_MEDIA_DIR_STATUS="ready"; else AUTHENTIK_MEDIA_DIR_STATUS="failed"; fi
+    if root_path_exists "$AUTHENTIK_TEMPLATES_DIR"; then AUTHENTIK_TEMPLATES_DIR_STATUS="ready"; else AUTHENTIK_TEMPLATES_DIR_STATUS="failed"; fi
+    if root_path_exists "$AUTHENTIK_CERTS_DIR"; then AUTHENTIK_CERTS_DIR_STATUS="ready"; else AUTHENTIK_CERTS_DIR_STATUS="failed"; fi
+
+    AUTHENTIK_APPDATA_DIR_PLAN="$AUTHENTIK_APPDATA_DIR_STATUS"
+    AUTHENTIK_POSTGRESQL_DIR_PLAN="$AUTHENTIK_POSTGRESQL_DIR_STATUS"
+    AUTHENTIK_MEDIA_DIR_PLAN="$AUTHENTIK_MEDIA_DIR_STATUS"
+    AUTHENTIK_TEMPLATES_DIR_PLAN="$AUTHENTIK_TEMPLATES_DIR_STATUS"
+    AUTHENTIK_CERTS_DIR_PLAN="$AUTHENTIK_CERTS_DIR_STATUS"
+}
+
+function inspect_authentik_prep_for_deploy() {
+    inspect_env_required_for_deploy
+    inspect_folders_required_for_deploy
+    if [ "$ENV_STATUS" == "ready" ] \
+        && [ "$AUTHENTIK_APPDATA_DIR_STATUS" != "failed" ] \
+        && [ "$AUTHENTIK_POSTGRESQL_DIR_STATUS" != "failed" ] \
+        && [ "$AUTHENTIK_MEDIA_DIR_STATUS" != "failed" ] \
+        && [ "$AUTHENTIK_TEMPLATES_DIR_STATUS" != "failed" ] \
+        && [ "$AUTHENTIK_CERTS_DIR_STATUS" != "failed" ]; then
+        SCRIPT63_READY_FOR_DEPLOYMENT_LANE="yes"
+    else
+        SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+    fi
+}
+
+function validate_prep_ready_for_deploy() {
+    if [ "$SCRIPT63_READY_FOR_DEPLOYMENT_LANE" != "yes" ]; then
+        fail_with_verify_log "Authentik preparation is not ready for deployment."
+    fi
+}
+
 # =========================================================
 #  AUTHENTIK PREFLIGHT / DETECTION
 # =========================================================
 function detect_authentik_compose() {
     local runtime_compose="${COMPOSE_DIR}/05-authentik-compose.yml"
     local repo_compose="./docker/05-authentik-compose.yml"
+    AUTHENTIK_COMPOSE_RUNTIME_PATH="$runtime_compose"
 
     if root_path_exists "$runtime_compose"; then
         AUTHENTIK_COMPOSE_STATUS="present"
@@ -1224,10 +1422,10 @@ function show_authentik_preflight() {
     aligned_status_line "Public route" "$AUTHENTIK_ROUTE_HOST"
     aligned_status_line "External URL" "$AUTHENTIK_EXTERNAL_URL"
     aligned_status_line "Database" "PostgreSQL 17"
-    aligned_status_line "PostgreSQL data" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'preserve' || printf 'planned')"
+    aligned_status_line "PostgreSQL data" "$AUTHENTIK_POSTGRESQL_DIR_STATUS"
     aligned_status_line "Redis" "not used"
     aligned_status_line "SMTP" "$SMTP_STATUS" "$(status_color_for_value "$SMTP_STATUS")"
-    aligned_status_line "Embedded Outpost" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'verify/update later' || printf 'planned')"
+    aligned_status_line "Embedded Outpost" "pending-lane-5"
     aligned_status_line "Admin UI bootstrap" "unchanged"
 
     if [ "$TRAEFIK_DYNAMIC_STATUS" != "present" ] || [ "$TRAEFIK_AUTHENTIK_REFERENCES" != "ready" ]; then
@@ -1263,81 +1461,269 @@ function show_setup_plan() {
 
     if [ "$SCRIPT63_SETUP_MODE" == "rerun-update" ]; then
         echo -e "${YW}Rerun/update detected. Authentik data, database, and secrets will be preserved.${CL}"
-        echo -e "${YW}This lane only prepares env, secrets, and folders.${CL}"
+        echo -e "${YW}This lane refreshes the compose file, redeploys Authentik, and verifies readiness only.${CL}"
     else
-        echo -e "${YW}Script 6.3 lane 3 will prepare Authentik env, secrets, and folders only.${CL}"
-        echo -e "${YW}No deployment, API automation, provider, outpost, or completion marker will run.${CL}"
+        echo -e "${YW}Script 6.3 lane 4 will deploy Authentik containers only.${CL}"
+        echo -e "${YW}Provider, application, Embedded Outpost, and ForwardAuth automation remain pending lane 5.${CL}"
     fi
 
     mini_header "Setup mode"
     aligned_status_line "Mode" "$SCRIPT63_SETUP_MODE"
-    aligned_status_line "Data/secrets" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'preserve' || printf 'create missing only')"
-    aligned_status_line "Folders" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'verify/create missing' || printf 'create/verify')"
-    aligned_status_line ".env update" "$([ "${#ENV_APPEND_LINES[@]}" -gt 0 ] && printf 'add missing keys only' || printf 'not needed')"
-    aligned_status_line "SMTP" "reuse if present"
-    aligned_status_line "Secret storage" "$SCRIPT63_SECRET_STORAGE" "$GN"
-    aligned_status_line "Deployment" "not run"
+    aligned_status_line "Compose file" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'refresh' || printf 'install/refresh')"
+    aligned_status_line "Data/secrets" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'preserve' || printf 'prepared')"
+    aligned_status_line "Docker networks" "verify/reuse"
+    aligned_status_line "Compose config" "validate Authentik only"
+    aligned_status_line "Deployment" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'redeploy Authentik only' || printf 'deploy Authentik only')"
+    aligned_status_line "Readiness" "PostgreSQL/server/worker/internal API"
+    aligned_status_line "ForwardAuth automation" "pending-lane-5"
     aligned_status_line "Completion marker" "not written"
 }
 
 function confirm_or_exit() {
     local answer=""
     echo ""
-    answer="$(timed_yes_no_value_only "Apply this Authentik preparation plan?" "y")"
+    answer="$(timed_yes_no_value_only "Apply this Authentik deployment plan?" "y")"
     if [[ "$answer" =~ ^[Nn]$ ]]; then
-        msg_ok "Authentik preparation plan cancelled"
+        msg_ok "Authentik deployment plan cancelled"
         exit 0
     fi
-    tty_println "${CM} ${GN}Applying confirmed Authentik preparation plan.${CL}"
+    tty_println "${CM} ${GN}Applying confirmed Authentik deployment plan.${CL}"
 }
 
-function run_authentik_prep() {
-    section "PREPARE AUTHENTIK"
+function install_authentik_compose_file() {
+    local local_source="./docker/${AUTHENTIK_COMPOSE_FILE}"
+    AUTHENTIK_COMPOSE_RUNTIME_PATH="${COMPOSE_DIR}/${AUTHENTIK_COMPOSE_FILE}"
+    init_deploy_output_log
 
-    mini_header "Environment"
-    append_missing_env_values
-    deploy_status_line ".env backup" "$ENV_BACKUP_STATUS" "$(status_color_for_value "$ENV_BACKUP_STATUS")"
-    deploy_status_line "Authentik secret key" "$([ "$AUTHENTIK_SECRET_KEY_STATUS" == "generated" ] && printf 'configured' || printf 'preserved')" "$GN"
-    deploy_status_line "PostgreSQL password" "$([ "$AUTHENTIK_POSTGRES_PASSWORD_STATUS" == "generated" ] && printf 'configured' || printf 'preserved')" "$GN"
-    deploy_status_line "Bootstrap email" "$([ "$AUTHENTIK_BOOTSTRAP_EMAIL_STATUS" == "configured" ] && printf 'configured' || printf 'preserved')" "$GN"
-    deploy_status_line "Bootstrap password" "$([ "$AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS" == "generated" ] && printf 'configured' || printf 'preserved')" "$GN"
-    deploy_status_line "Bootstrap token" "$([ "$AUTHENTIK_BOOTSTRAP_TOKEN_STATUS" == "generated" ] && printf 'configured' || printf 'preserved')" "$GN"
-    deploy_status_line "SMTP" "$([ "$SMTP_STATUS" == "configured" ] && printf 'reused' || printf '%s' "$SMTP_STATUS")" "$(status_color_for_value "$SMTP_STATUS")"
-    deploy_status_line "Secret storage" "$SCRIPT63_SECRET_STORAGE" "$GN"
+    if [ -f "$local_source" ]; then
+        append_deploy_log "Installing Authentik compose from repo-local source: ${local_source}"
+        if root_copy_regular_file "$local_source" "$AUTHENTIK_COMPOSE_RUNTIME_PATH" && root_file_not_empty "$AUTHENTIK_COMPOSE_RUNTIME_PATH"; then
+            AUTHENTIK_COMPOSE_SOURCE_STATUS="installed"
+            AUTHENTIK_COMPOSE_STATUS="present"
+            AUTHENTIK_COMPOSE_LOCATION="$AUTHENTIK_COMPOSE_RUNTIME_PATH"
+            return 0
+        fi
+    else
+        append_deploy_log "Repo-local Authentik compose source not found; downloading from GitHub raw URL."
+        if root_download_url_to_file "$AUTHENTIK_RAW_COMPOSE_URL" "$AUTHENTIK_COMPOSE_RUNTIME_PATH" && root_file_not_empty "$AUTHENTIK_COMPOSE_RUNTIME_PATH"; then
+            AUTHENTIK_COMPOSE_SOURCE_STATUS="installed"
+            AUTHENTIK_COMPOSE_STATUS="present"
+            AUTHENTIK_COMPOSE_LOCATION="$AUTHENTIK_COMPOSE_RUNTIME_PATH"
+            return 0
+        fi
+    fi
 
-    mini_header "Folders"
-    prepare_authentik_folders
-    deploy_status_line "Authentik appdata" "$AUTHENTIK_APPDATA_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_APPDATA_DIR_STATUS")"
-    deploy_status_line "PostgreSQL data" "$AUTHENTIK_POSTGRESQL_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_POSTGRESQL_DIR_STATUS")"
-    deploy_status_line "Media" "$AUTHENTIK_MEDIA_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_MEDIA_DIR_STATUS")"
-    deploy_status_line "Templates" "$AUTHENTIK_TEMPLATES_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_TEMPLATES_DIR_STATUS")"
-    deploy_status_line "Certs" "$AUTHENTIK_CERTS_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_CERTS_DIR_STATUS")"
+    AUTHENTIK_COMPOSE_SOURCE_STATUS="failed"
+    fail_with_failure_log "Authentik compose file could not be installed."
+}
 
-    SCRIPT63_READY_FOR_DEPLOYMENT_LANE="yes"
+function run_docker_readiness_gate() {
+    local attempt="" ok="no"
+    init_deploy_output_log
+    for attempt in {1..10}; do
+        append_deploy_log "Docker readiness attempt ${attempt}."
+        if docker_cmd info >/dev/null 2>&1 \
+            && docker_cmd compose version >/dev/null 2>&1 \
+            && docker_cmd network inspect t2_proxy >/dev/null 2>&1 \
+            && root_file_not_empty "$ENV_FILE"; then
+            ok="yes"
+            break
+        fi
+        sleep 2
+    done
+
+    if [ "$ok" != "yes" ]; then
+        DOCKER_READINESS_STATUS="failed"
+        DOCKER_DAEMON_READINESS_STATUS="failed"
+        DOCKER_COMPOSE_READINESS_STATUS="failed"
+        DOCKER_NETWORKS_READINESS_STATUS="failed"
+        fail_with_failure_log "Docker readiness gate failed."
+    fi
+
+    DOCKER_READINESS_STATUS="ready"
+    DOCKER_DAEMON_READINESS_STATUS="ready"
+    DOCKER_COMPOSE_READINESS_STATUS="ready"
+    DOCKER_API_STATUS="responsive"
+    DOCKER_NETWORKS_READINESS_STATUS="settled"
+}
+
+function validate_authentik_compose_config() {
+    local err_file=""
+    err_file="$(mktemp /tmp/circl8-authentik-compose-config.XXXXXX)"
+    init_deploy_output_log
+    append_deploy_log "Validating Authentik compose config. Full rendered config is intentionally not logged."
+    if docker_cmd compose --env-file "$ENV_FILE" -p "$COMPOSE_PROJECT_NAME" -f "$AUTHENTIK_COMPOSE_RUNTIME_PATH" config >/dev/null 2>"$err_file"; then
+        AUTHENTIK_COMPOSE_CONFIG_STATUS="valid"
+        rm -f "$err_file"
+        return 0
+    fi
+
+    AUTHENTIK_COMPOSE_CONFIG_STATUS="failed"
+    append_deploy_log "Authentik compose validation stderr, sanitized:"
+    append_file_to_deploy_log_sanitized "$err_file"
+    rm -f "$err_file"
+    fail_with_failure_log "Authentik compose validation failed."
+}
+
+function deploy_authentik_compose() {
+    local attempt="" out_file="" ok="no"
+    init_deploy_output_log
+    for attempt in {1..3}; do
+        out_file="$(mktemp /tmp/circl8-authentik-compose-up.XXXXXX)"
+        append_deploy_log "Authentik compose deployment attempt ${attempt}."
+        if docker_cmd compose --env-file "$ENV_FILE" -p "$COMPOSE_PROJECT_NAME" -f "$AUTHENTIK_COMPOSE_RUNTIME_PATH" up -d --remove-orphans >"$out_file" 2>&1; then
+            append_file_to_deploy_log_sanitized "$out_file"
+            rm -f "$out_file"
+            ok="yes"
+            break
+        fi
+        append_file_to_deploy_log_sanitized "$out_file"
+        rm -f "$out_file"
+        sleep 5
+    done
+
+    if [ "$ok" != "yes" ]; then
+        AUTHENTIK_DEPLOYMENT_STATUS="failed"
+        fail_with_failure_log "Authentik compose deployment failed."
+    fi
+    AUTHENTIK_DEPLOYMENT_STATUS="completed"
+}
+
+function docker_inspect_value() {
+    local format="$1" name="$2"
+    docker_cmd inspect -f "$format" "$name" 2>/dev/null || true
+}
+
+function collect_authentik_failure_context() {
+    local container=""
+    init_deploy_output_log
+    append_deploy_log "Container status snapshot:"
+    docker_cmd ps -a --filter "name=authentik" --format '{{.Names}} {{.Status}}' >> "$DEPLOY_OUTPUT_LOG" 2>/dev/null || true
+    for container in authentik-postgresql authentik-server authentik-worker; do
+        append_deploy_log "Logs for ${container}, sanitized:"
+        docker_cmd logs --tail 120 "$container" 2>/dev/null | sed -E '/(PASSWORD|TOKEN|SECRET_KEY|AUTHENTIK_EMAIL__PASSWORD|AUTHENTIK_POSTGRES_PASSWORD|AUTHENTIK_BOOTSTRAP)/Id' >> "$DEPLOY_OUTPUT_LOG" || true
+    done
+}
+
+function wait_for_postgresql_healthy() {
+    local deadline="" status=""
+    deadline=$(( $(date +%s) + 180 ))
+    while [ "$(date +%s)" -le "$deadline" ]; do
+        status="$(docker_inspect_value '{{.State.Health.Status}}' authentik-postgresql)"
+        if [ "$status" == "healthy" ]; then
+            AUTHENTIK_POSTGRES_STATUS="healthy"
+            return 0
+        fi
+        sleep 5
+    done
+    AUTHENTIK_POSTGRES_STATUS="failed"
+    collect_authentik_failure_context
+    fail_with_failure_log "PostgreSQL did not become healthy before timeout."
+}
+
+function wait_for_container_running() {
+    local name="$1" status_var="$2" deadline="" state="" running="" restarting=""
+    deadline=$(( $(date +%s) + 180 ))
+    while [ "$(date +%s)" -le "$deadline" ]; do
+        state="$(docker_inspect_value '{{.State.Running}} {{.State.Restarting}}' "$name")"
+        running="${state%% *}"
+        restarting="${state##* }"
+        if [ "$running" == "true" ] && [ "$restarting" == "false" ]; then
+            printf -v "$status_var" '%s' "running"
+            return 0
+        fi
+        sleep 5
+    done
+    printf -v "$status_var" '%s' "failed"
+    collect_authentik_failure_context
+    fail_with_failure_log "${name} did not become ready before timeout."
+}
+
+function authentik_internal_api_check_once() {
+    local py_code="" api_url="http://127.0.0.1:9000/api/v3/core/users/me/"
+    py_code='import sys, urllib.request, urllib.error
+url=sys.argv[1]
+try:
+    response=urllib.request.urlopen(url, timeout=5)
+    code=getattr(response, "status", 200)
+except urllib.error.HTTPError as error:
+    code=error.code
+except Exception:
+    code=0
+sys.exit(0 if code in (200, 401, 403) else 1)'
+    docker_cmd exec authentik-server python -c "$py_code" "$api_url" >/dev/null 2>&1 \
+        || docker_cmd exec authentik-server python3 -c "$py_code" "$api_url" >/dev/null 2>&1
+}
+
+function wait_for_internal_api_ready() {
+    local deadline=""
+    deadline=$(( $(date +%s) + 300 ))
+    while [ "$(date +%s)" -le "$deadline" ]; do
+        if authentik_internal_api_check_once; then
+            AUTHENTIK_INTERNAL_API_STATUS="ready"
+            return 0
+        fi
+        sleep 5
+    done
+    AUTHENTIK_INTERNAL_API_STATUS="failed"
+    collect_authentik_failure_context
+    fail_with_failure_log "Authentik server did not become ready before timeout."
+}
+
+function run_authentik_deploy() {
+    section "DEPLOY AUTHENTIK"
+    init_deploy_output_log
+
+    mini_header "Docker readiness"
+    run_docker_readiness_gate
+    deploy_status_line "Docker daemon" "$DOCKER_DAEMON_READINESS_STATUS" "$GN"
+    deploy_status_line "Docker Compose" "$DOCKER_COMPOSE_READINESS_STATUS" "$GN"
+    deploy_status_line "Docker API" "$DOCKER_API_STATUS" "$GN"
+    deploy_status_line "Docker networks" "$DOCKER_NETWORKS_READINESS_STATUS" "$GN"
+
+    mini_header "Compose files"
+    install_authentik_compose_file
+    deploy_status_line "Authentik compose" "$AUTHENTIK_COMPOSE_SOURCE_STATUS" "$GN"
+
+    mini_header "Compose validation"
+    validate_authentik_compose_config
+    deploy_status_line "Authentik compose" "$AUTHENTIK_COMPOSE_CONFIG_STATUS" "$GN"
+
+    mini_header "Authentik"
+    deploy_authentik_compose
+    deploy_status_line "Compose deployment" "$AUTHENTIK_DEPLOYMENT_STATUS" "$GN"
+    wait_for_postgresql_healthy
+    deploy_status_line "PostgreSQL" "$AUTHENTIK_POSTGRES_STATUS" "$GN"
+    wait_for_container_running authentik-server AUTHENTIK_SERVER_STATUS
+    deploy_status_line "Authentik server" "$AUTHENTIK_SERVER_STATUS" "$GN"
+    wait_for_container_running authentik-worker AUTHENTIK_WORKER_STATUS
+    deploy_status_line "Authentik worker" "$AUTHENTIK_WORKER_STATUS" "$GN"
+    wait_for_internal_api_ready
+    deploy_status_line "Internal API" "$AUTHENTIK_INTERNAL_API_STATUS" "$GN"
+
+    SCRIPT63_STATUS="deployed-auth-not-configured"
+    SCRIPT63_VERIFY_STATUS="DEPLOYED"
+    SCRIPT63_DEPLOYMENT_STATUS="completed"
+    SCRIPT63_READY_FOR_AUTOMATION_LANE="yes"
 }
 
 function show_verification_marker_scaffold() {
     section "VERIFICATION / MARKER"
     write_verify_report
-    deploy_status_line "Authentik prep report" "created" "$GN" 24
+    deploy_status_line "Authentik deploy report" "created" "$GN" 24
     deploy_status_line "Completion marker" "not written" "$GN" 24
 }
 
-function show_prep_finished() {
-    section_flash_success "AUTHENTIK PREP COMPLETE"
+function show_deploy_finished() {
+    section_flash_success "AUTHENTIK DEPLOY COMPLETE"
 
     mini_header "Authentik"
-    final_line "Status" "prepared"
-    final_line "Action" "$SCRIPT63_SETUP_MODE"
-    [ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && final_line "Existing Authentik" "$AUTHENTIK_EXISTING"
-    final_line "Compose file" "$AUTHENTIK_COMPOSE_STATUS" "$(status_color_for_value "$AUTHENTIK_COMPOSE_STATUS")"
-    final_line "Database" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'PostgreSQL 17 preserve planned' || printf 'PostgreSQL 17 planned')"
-    final_line "Redis" "not used"
-    final_line "SMTP" "$SMTP_STATUS" "$(status_color_for_value "$SMTP_STATUS")"
-    final_line "Secret storage" "$SCRIPT63_SECRET_STORAGE" "$GN"
-    final_line "Embedded Outpost" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'verify/update planned' || printf 'planned')"
-    final_line "Admin UI bootstrap" "unchanged"
-    final_line "Deployment" "not run"
+    final_line "Status" "deployed"
+    final_line "PostgreSQL" "$AUTHENTIK_POSTGRES_STATUS" "$(status_color_for_value "$AUTHENTIK_POSTGRES_STATUS")"
+    final_line "Server" "$AUTHENTIK_SERVER_STATUS" "$(status_color_for_value "$AUTHENTIK_SERVER_STATUS")"
+    final_line "Worker" "$AUTHENTIK_WORKER_STATUS" "$(status_color_for_value "$AUTHENTIK_WORKER_STATUS")"
+    final_line "Internal API" "$AUTHENTIK_INTERNAL_API_STATUS" "$(status_color_for_value "$AUTHENTIK_INTERNAL_API_STATUS")"
+    final_line "ForwardAuth automation" "pending-lane-5" "$YW"
     final_line "Completion marker" "not written"
 
     mini_header "Verification"
@@ -1345,7 +1731,7 @@ function show_prep_finished() {
     final_line "Verify log" "$VERIFY_LOG" "$BL"
 
     mini_header "Next Step"
-    echo -e "${GN}Continue Script 6.3 implementation: deployment and readiness.${CL}"
+    echo -e "${GN}Continue Script 6.3 implementation: provider, application, Embedded Outpost, and ForwardAuth automation.${CL}"
 }
 
 function main() {
@@ -1353,14 +1739,15 @@ function main() {
     validate_script62_handoff
     runtime_preflight
     detect_authentik_state
-    plan_authentik_prep
+    inspect_authentik_prep_for_deploy
     show_authentik_preflight
     show_authentik_prep_plan
+    validate_prep_ready_for_deploy
     show_setup_plan
     confirm_or_exit
-    run_authentik_prep
+    run_authentik_deploy
     show_verification_marker_scaffold
-    show_prep_finished
+    show_deploy_finished
 }
 
 main "$@"
