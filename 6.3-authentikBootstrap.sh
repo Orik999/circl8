@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.11"
+SCRIPT_VERSION="v1.0.12"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-final-ui-report-polish"
+SCRIPT_BUILD="authentik-final-terminal-polish"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -164,6 +164,7 @@ TRAEFIK_RESOLUTION_STATUS="not-run"
 TRAEFIK_FORWARD_AUTH_ERRORS="unknown"
 AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
 AUTHENTIK_API_TOKEN_VALUE=""
+PROGRESS_LINE_ACTIVE="no"
 
 
 # =========================================================
@@ -319,11 +320,20 @@ function clear_transient_line() {
 }
 
 function progress_line() {
-    tty_print "${BFR}${YW}* $1...${CL}"
+    PROGRESS_LINE_ACTIVE="yes"
+    # Progress lines use stdout instead of direct /dev/tty so they stay ordered with
+    # section headers written through tee-based logging. This prevents stale progress
+    # text from merging with borders or later rows.
+    printf '%b' "${BFR}${YW}* $1...${CL}"
 }
 
 function clear_progress_line() {
-    clear_transient_line
+    if [ "${PROGRESS_LINE_ACTIVE:-no}" == "yes" ]; then
+        printf '%b' "${BFR}"
+        PROGRESS_LINE_ACTIVE="no"
+    else
+        clear_transient_line
+    fi
 }
 
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
@@ -1636,8 +1646,7 @@ function show_authentik_preflight() {
 
 function show_authentik_prep_plan() {
     section "AUTHENTIK PREP"
-
-    mini_header "Environment"
+    mini_header_compact "Environment"
     aligned_status_line "AUTHENTIK_SECRET_KEY" "$(display_env_plan_status "$AUTHENTIK_SECRET_KEY_STATUS")" "$(prep_value_color "$AUTHENTIK_SECRET_KEY_STATUS")"
     aligned_status_line "PostgreSQL password" "$(display_env_plan_status "$AUTHENTIK_POSTGRES_PASSWORD_STATUS")" "$(prep_value_color "$AUTHENTIK_POSTGRES_PASSWORD_STATUS")"
     aligned_status_line "Bootstrap email" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_EMAIL_STATUS")" "$(prep_value_color "$AUTHENTIK_BOOTSTRAP_EMAIL_STATUS")"
@@ -2368,7 +2377,7 @@ function inspect_authentik_automation_preflight() {
 
 function show_automation_preflight() {
     section "AUTHENTIK AUTOMATION PREFLIGHT"
-    aligned_status_line "Deployment" "detected"
+    aligned_status_line "Deployment" "completed"
     aligned_status_line "Compose config" "$AUTHENTIK_COMPOSE_CONFIG_STATUS" "$(status_color_for_value "$AUTHENTIK_COMPOSE_CONFIG_STATUS")"
     aligned_status_line "Automation mode" "$SCRIPT63_AUTOMATION_MODE" "$(rerun_ui_color "$SCRIPT63_AUTOMATION_MODE")"
     aligned_status_line "PostgreSQL" "$AUTHENTIK_POSTGRES_STATUS" "$(status_color_for_value "$AUTHENTIK_POSTGRES_STATUS")"
