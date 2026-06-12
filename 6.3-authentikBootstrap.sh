@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.4"
+SCRIPT_VERSION="v1.0.5"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-deploy-readiness"
+SCRIPT_BUILD="authentik-compose-file-permissions"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -132,6 +132,9 @@ AUTHENTIK_RAW_COMPOSE_URL="https://raw.githubusercontent.com/Orik999/circl8/refs
 AUTHENTIK_COMPOSE_RUNTIME_PATH=""
 AUTHENTIK_COMPOSE_SOURCE_STATUS="unknown"
 AUTHENTIK_COMPOSE_CONFIG_STATUS="unknown"
+AUTHENTIK_COMPOSE_FILE_OWNER_GROUP="unknown"
+AUTHENTIK_COMPOSE_FILE_MODE="unknown"
+AUTHENTIK_COMPOSE_FILE_READABLE="no"
 DOCKER_READINESS_STATUS="unknown"
 DOCKER_DAEMON_READINESS_STATUS="unknown"
 DOCKER_COMPOSE_READINESS_STATUS="unknown"
@@ -565,6 +568,9 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_RUNTIME_PATH=${AUTHENTIK_COMPOSE_RUNTIME_PATH}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_STATUS=${AUTHENTIK_COMPOSE_SOURCE_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_CONFIG=${AUTHENTIK_COMPOSE_CONFIG_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_FILE_OWNER=${AUTHENTIK_COMPOSE_FILE_OWNER_GROUP}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_FILE_MODE=${AUTHENTIK_COMPOSE_FILE_MODE}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_FILE_READABLE=${AUTHENTIK_COMPOSE_FILE_READABLE}"
         printf '%s\n' "SCRIPT63_TRAEFIK_AUTHENTIK_REFERENCES=${TRAEFIK_AUTHENTIK_REFERENCES}"
         printf '%s\n' "SCRIPT63_ENV_STATUS=${ENV_STATUS}"
         printf '%s\n' "SCRIPT63_ENV_BACKUP=${ENV_BACKUP_STATUS}"
@@ -639,6 +645,80 @@ function root_copy_regular_file() {
     fi
 }
 
+function root_set_path_owner_group() {
+    local path="$1" owner_group="$2"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" chown "$owner_group" "$path"
+    else
+        chown "$owner_group" "$path"
+    fi
+}
+
+function root_set_path_mode() {
+    local path="$1" mode="$2"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" chmod "$mode" "$path"
+    else
+        chmod "$mode" "$path"
+    fi
+}
+
+function resolve_compose_file_owner_group() {
+    local owner_group=""
+    owner_group="$(root_stat_owner_group "$COMPOSE_DIR")"
+    if [ -z "$owner_group" ] || [ "$owner_group" == ":" ]; then
+        owner_group="$(root_stat_owner_group "$DOCKER_DIR")"
+    fi
+    if [ -z "$owner_group" ] || [ "$owner_group" == ":" ]; then
+        append_deploy_log "Runtime compose file owner/group could not be resolved from compose/docker directory."
+        return 1
+    fi
+    AUTHENTIK_COMPOSE_FILE_OWNER_GROUP="$owner_group"
+    return 0
+}
+
+function verify_runtime_compose_file_access() {
+    local current_owner_group="" current_mode=""
+    AUTHENTIK_COMPOSE_FILE_READABLE="no"
+    if ! root_file_not_empty "$AUTHENTIK_COMPOSE_RUNTIME_PATH"; then
+        append_deploy_log "Runtime Authentik compose file is missing or empty after install."
+        return 1
+    fi
+
+    current_owner_group="$(root_stat_owner_group "$AUTHENTIK_COMPOSE_RUNTIME_PATH")"
+    current_mode="$(root_stat_mode "$AUTHENTIK_COMPOSE_RUNTIME_PATH")"
+    AUTHENTIK_COMPOSE_FILE_OWNER_GROUP="$current_owner_group"
+    AUTHENTIK_COMPOSE_FILE_MODE="$current_mode"
+
+    if [ "$current_mode" != "644" ]; then
+        append_deploy_log "Runtime Authentik compose mode is ${current_mode}; expected 644."
+        return 1
+    fi
+
+    # Mode 644 with the project owner/group makes the file readable by the Docker project user
+    # and prevents root-only 600 files from breaking docker compose config on rerun.
+    AUTHENTIK_COMPOSE_FILE_READABLE="yes"
+    return 0
+}
+
+function repair_runtime_compose_file_permissions() {
+    local desired_owner_group="" current_owner_group="" current_mode=""
+    resolve_compose_file_owner_group || return 1
+    desired_owner_group="$AUTHENTIK_COMPOSE_FILE_OWNER_GROUP"
+
+    current_owner_group="$(root_stat_owner_group "$AUTHENTIK_COMPOSE_RUNTIME_PATH")"
+    if [ "$current_owner_group" != "$desired_owner_group" ]; then
+        root_set_path_owner_group "$AUTHENTIK_COMPOSE_RUNTIME_PATH" "$desired_owner_group" || return 1
+    fi
+
+    current_mode="$(root_stat_mode "$AUTHENTIK_COMPOSE_RUNTIME_PATH")"
+    if [ "$current_mode" != "644" ]; then
+        root_set_path_mode "$AUTHENTIK_COMPOSE_RUNTIME_PATH" 644 || return 1
+    fi
+
+    verify_runtime_compose_file_access
+}
+
 function root_download_url_to_file() {
     local url="$1" dest="$2" tmp=""
     tmp="$(mktemp /tmp/circl8-authentik-compose.XXXXXX)"
@@ -655,6 +735,11 @@ function root_download_url_to_file() {
     else
         rm -f "$tmp"
         append_deploy_log "Neither curl nor wget is available for compose download."
+        return 1
+    fi
+    if ! [ -s "$tmp" ]; then
+        rm -f "$tmp"
+        append_deploy_log "Downloaded Authentik compose temporary file is empty."
         return 1
     fi
     root_copy_regular_file "$tmp" "$dest"
@@ -1491,29 +1576,46 @@ function confirm_or_exit() {
 }
 
 function install_authentik_compose_file() {
-    local local_source="./docker/${AUTHENTIK_COMPOSE_FILE}"
+    local local_source="./docker/${AUTHENTIK_COMPOSE_FILE}" tmp_file=""
     AUTHENTIK_COMPOSE_RUNTIME_PATH="${COMPOSE_DIR}/${AUTHENTIK_COMPOSE_FILE}"
     init_deploy_output_log
 
+    tmp_file="$(mktemp /tmp/circl8-authentik-compose-install.XXXXXX)"
     if [ -f "$local_source" ]; then
         append_deploy_log "Installing Authentik compose from repo-local source: ${local_source}"
-        if root_copy_regular_file "$local_source" "$AUTHENTIK_COMPOSE_RUNTIME_PATH" && root_file_not_empty "$AUTHENTIK_COMPOSE_RUNTIME_PATH"; then
-            AUTHENTIK_COMPOSE_SOURCE_STATUS="installed"
-            AUTHENTIK_COMPOSE_STATUS="present"
-            AUTHENTIK_COMPOSE_LOCATION="$AUTHENTIK_COMPOSE_RUNTIME_PATH"
-            return 0
+        if ! cp -f "$local_source" "$tmp_file"; then
+            rm -f "$tmp_file"
+            AUTHENTIK_COMPOSE_SOURCE_STATUS="failed"
+            fail_with_failure_log "Authentik compose file could not be installed."
         fi
     else
         append_deploy_log "Repo-local Authentik compose source not found; downloading from GitHub raw URL."
-        if root_download_url_to_file "$AUTHENTIK_RAW_COMPOSE_URL" "$AUTHENTIK_COMPOSE_RUNTIME_PATH" && root_file_not_empty "$AUTHENTIK_COMPOSE_RUNTIME_PATH"; then
-            AUTHENTIK_COMPOSE_SOURCE_STATUS="installed"
-            AUTHENTIK_COMPOSE_STATUS="present"
-            AUTHENTIK_COMPOSE_LOCATION="$AUTHENTIK_COMPOSE_RUNTIME_PATH"
-            return 0
+        if ! root_download_url_to_file "$AUTHENTIK_RAW_COMPOSE_URL" "$tmp_file"; then
+            rm -f "$tmp_file"
+            AUTHENTIK_COMPOSE_SOURCE_STATUS="failed"
+            fail_with_failure_log "Authentik compose file could not be installed."
         fi
     fi
 
+    if ! [ -s "$tmp_file" ]; then
+        rm -f "$tmp_file"
+        AUTHENTIK_COMPOSE_SOURCE_STATUS="failed"
+        fail_with_failure_log "Authentik compose file could not be installed."
+    fi
+
+    if root_copy_regular_file "$tmp_file" "$AUTHENTIK_COMPOSE_RUNTIME_PATH" \
+        && root_file_not_empty "$AUTHENTIK_COMPOSE_RUNTIME_PATH" \
+        && repair_runtime_compose_file_permissions; then
+        rm -f "$tmp_file"
+        AUTHENTIK_COMPOSE_SOURCE_STATUS="installed"
+        AUTHENTIK_COMPOSE_STATUS="present"
+        AUTHENTIK_COMPOSE_LOCATION="$AUTHENTIK_COMPOSE_RUNTIME_PATH"
+        return 0
+    fi
+
+    rm -f "$tmp_file"
     AUTHENTIK_COMPOSE_SOURCE_STATUS="failed"
+    AUTHENTIK_COMPOSE_FILE_READABLE="no"
     fail_with_failure_log "Authentik compose file could not be installed."
 }
 
@@ -1525,7 +1627,8 @@ function run_docker_readiness_gate() {
         if docker_cmd info >/dev/null 2>&1 \
             && docker_cmd compose version >/dev/null 2>&1 \
             && docker_cmd network inspect t2_proxy >/dev/null 2>&1 \
-            && root_file_not_empty "$ENV_FILE"; then
+            && root_file_not_empty "$ENV_FILE" \
+            && root_file_not_empty "$AUTHENTIK_COMPOSE_RUNTIME_PATH"; then
             ok="yes"
             break
         fi
