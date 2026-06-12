@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.15"
+SCRIPT_VERSION="v1.0.16"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-postgres-init-audit-polish"
+SCRIPT_BUILD="authentik-bootstrap-token-readiness-fix"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -2386,19 +2386,47 @@ def result_items(parsed):
         return parsed
     return []
 
-def validate_token():
+def validate_token(timeout=180, interval=5):
     global selected_token
-    candidates = [("bootstrap", payload.get("bootstrap_token") or ""), ("api", payload.get("api_token") or "")]
-    for source, token in candidates:
-        if not token:
-            continue
-        code, parsed, raw = raw_request("GET", "/api/v3/core/users/me/", token=token)
-        if code == 200:
-            selected_token = token
-            emit("AUTHENTIK_API_ACCESS_STATUS", "valid")
-            emit("AUTHENTIK_API_TOKEN_SOURCE", source)
-            return
-    fail("api-token", "No provided Authentik API token returned HTTP 200 for /api/v3/core/users/me/.")
+    candidates = [
+        ("AUTHENTIK_BOOTSTRAP_TOKEN", payload.get("bootstrap_token") or ""),
+        ("AUTHENTIK_API_TOKEN", payload.get("api_token") or ""),
+    ]
+    attempted = []
+    last_status = 0
+    last_error = "none"
+    deadline = time.time() + timeout
+
+    while time.time() <= deadline:
+        for source, token in candidates:
+            if not token:
+                descriptor = f"{source}(length=0)"
+                if descriptor not in attempted:
+                    attempted.append(descriptor)
+                continue
+            descriptor = f"{source}(length={len(token)})"
+            if descriptor not in attempted:
+                attempted.append(descriptor)
+            code, parsed, raw = raw_request("GET", "/api/v3/core/users/me/", token=token, timeout=8)
+            last_status = code
+            if code == 200:
+                selected_token = token
+                emit("AUTHENTIK_API_ACCESS_STATUS", "ready")
+                emit("AUTHENTIK_API_TOKEN_SOURCE", source)
+                return
+            if code in (0, 401, 403, 500, 502, 503, 504):
+                last_error = f"HTTP {code}" if code else sanitize(raw or "connection failure")
+                continue
+            last_error = f"HTTP {code}"
+        time.sleep(interval)
+
+    emit("AUTHENTIK_API_ACCESS_STATUS", "failed")
+    fail(
+        "api-token",
+        "Authentik API token did not become valid before timeout. "
+        f"Attempted sources: {', '.join(attempted) or 'none'}; "
+        f"last HTTP status: {last_status}; last error: {sanitize(last_error)}"
+    )
 
 REQUIRED_FLOWS = [
     ("default-authentication-flow", "AUTHENTIK_AUTHENTICATION_FLOW_STATUS"),
@@ -2723,7 +2751,7 @@ function apply_automation_result_file() {
 
 function automation_failure_message() {
     case "${AUTHENTIK_AUTOMATION_ERROR_STAGE:-unknown}" in
-        api-token) printf 'Authentik API token validation failed.' ;;
+        api-token) printf 'Authentik API token did not become valid before timeout.' ;;
         flow) printf 'Required Authentik default flows were not ready before timeout.' ;;
         provider) printf 'Authentik ForwardAuth provider configuration failed.' ;;
         application) printf 'Authentik application configuration failed.' ;;
@@ -2731,6 +2759,27 @@ function automation_failure_message() {
         forwardauth) printf 'ForwardAuth endpoint returned an infrastructure failure.' ;;
         *) printf 'Authentik automation failed.' ;;
     esac
+}
+
+function append_authentik_bootstrap_token_failure_diagnostics() {
+    local boot_token="" api_token="" log_file="" since_value="" bootstrap_hint="no" password_hint="no"
+    boot_token="$(env_value AUTHENTIK_BOOTSTRAP_TOKEN)"
+    api_token="$(env_value AUTHENTIK_API_TOKEN)"
+    append_deploy_log "Authentik bootstrap token readiness diagnostics:"
+    append_deploy_log "Token source attempted: AUTHENTIK_BOOTSTRAP_TOKEN length=${#boot_token}"
+    append_deploy_log "Token source attempted: AUTHENTIK_API_TOKEN length=${#api_token}"
+    log_file="$(mktemp /tmp/circl8-authentik-bootstrap-token.XXXXXX)"
+    since_value="${AUTHENTIK_DEPLOY_STARTED_AT:-${SCRIPT_RUN_STARTED_AT:-10m}}"
+    docker_cmd logs --since "$since_value" authentik-server >"$log_file" 2>&1 || true
+    if grep -q 'Configuring authentik through bootstrap environment variables' "$log_file"; then
+        bootstrap_hint="yes"
+    fi
+    if grep -q 'password_set' "$log_file"; then
+        password_hint="yes"
+    fi
+    append_deploy_log "Bootstrap env setup log hint seen: ${bootstrap_hint}"
+    append_deploy_log "Bootstrap password_set log hint seen: ${password_hint}"
+    rm -f "$log_file"
 }
 
 function run_authentik_python_action() {
@@ -2750,6 +2799,9 @@ function run_authentik_python_action() {
     append_file_to_deploy_log_sanitized "$err_file"
     append_deploy_log "Authentik automation result, sanitized:"
     append_file_to_deploy_log_sanitized "$out_file"
+    if [ "${AUTHENTIK_AUTOMATION_ERROR_STAGE:-}" == "api-token" ]; then
+        append_authentik_bootstrap_token_failure_diagnostics
+    fi
     rm -f "$out_file" "$err_file"
     return 1
 }
@@ -2788,7 +2840,7 @@ function inspect_authentik_automation_preflight() {
     fi
     validate_authentik_compose_config
     if run_authentik_python_action inspect; then
-        AUTHENTIK_API_ACCESS_STATUS="valid"
+        AUTHENTIK_API_ACCESS_STATUS="ready"
         return 0
     fi
     fail_with_failure_log "$(automation_failure_message)"
@@ -2814,10 +2866,13 @@ function configure_authentik_forwardauth() {
     section "CONFIGURE AUTHENTIK"
 
     mini_header_compact "API access"
+    progress_line "Waiting for Authentik bootstrap token"
     if ! run_authentik_python_action validate; then
-        deploy_error_line "API token" "failed" "$RD"
+        clear_progress_line
+        deploy_error_line "API token" "not ready" "$RD"
         fail_with_failure_log "$(automation_failure_message)"
     fi
+    clear_progress_line
     deploy_status_line "API token" "valid" "$GN"
 
     mini_header "Flow lookup"
