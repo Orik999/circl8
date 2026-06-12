@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.8"
+SCRIPT_VERSION="v1.0.9"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-forwardauth-automation"
+SCRIPT_BUILD="authentik-forwardauth-verification-fix"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -987,7 +987,11 @@ function check_traefik_references() {
     fi
 
     TRAEFIK_DYNAMIC_STATUS="present"
-    if root_read_file "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null | grep -Eq 'chain-authentik|authentik-server|outpost\.goauthentik\.io'; then
+    local dynamic_config=""
+    dynamic_config="$(root_read_file "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null || true)"
+    if printf '%s\n' "$dynamic_config" | grep -q 'chain-authentik' \
+        && printf '%s\n' "$dynamic_config" | grep -q 'authentik-server' \
+        && printf '%s\n' "$dynamic_config" | grep -Eq 'outpost\.goauthentik\.io.*/auth/traefik|outpost\.goauthentik\.io/auth/traefik'; then
         TRAEFIK_AUTHENTIK_REFERENCES="ready"
     else
         TRAEFIK_AUTHENTIK_REFERENCES="missing"
@@ -1977,7 +1981,7 @@ APPLICATION_NAME = "Circl8 Traefik ForwardAuth"
 APPLICATION_SLUG = "circl8-traefik-forwardauth"
 EMBEDDED_OUTPOST_NAME = "authentik Embedded Outpost"
 EMBEDDED_OUTPOST_MANAGED = "goauthentik.io/outposts/embedded"
-FORWARDAUTH_PATH = "/outpost.goauthentik.io/auth/traefik"
+OUTPOST_PING_PATH = "/outpost.goauthentik.io/ping"
 
 payload = json.loads(sys.stdin.read() or "{}")
 selected_token = ""
@@ -2216,11 +2220,11 @@ def configure_outpost(provider_pk):
     emit("AUTHENTIK_OUTPOST_PK", pk)
     return str(pk)
 
-def check_forwardauth_url(hostname="127.0.0.1"):
-    url = f"http://{hostname}:9000{FORWARDAUTH_PATH}"
-    code, parsed, raw = raw_request("GET", FORWARDAUTH_PATH if hostname == "127.0.0.1" else url.replace(BASE_URL, ""), token=None)
-    if hostname != "127.0.0.1":
-        # raw_request is base-url based, so use a direct request for alternate hostnames.
+def check_outpost_ping_url(hostname="127.0.0.1"):
+    url = f"http://{hostname}:9000{OUTPOST_PING_PATH}"
+    if hostname == "127.0.0.1":
+        code, parsed, raw = raw_request("GET", OUTPOST_PING_PATH, token=None)
+    else:
         req = urllib.request.Request(url, method="GET")
         try:
             with opener.open(req, timeout=5) as response:
@@ -2229,7 +2233,7 @@ def check_forwardauth_url(hostname="127.0.0.1"):
             code = error.code
         except Exception:
             code = 0
-    return code in (200, 302, 401, 403), code
+    return code == 204, code
 
 def wait_for_outpost(provider_pk):
     deadline = time.time() + 90
@@ -2237,14 +2241,14 @@ def wait_for_outpost(provider_pk):
     while time.time() <= deadline:
         outpost = find_embedded_outpost()
         if provider_pk in provider_ids_from_outpost(outpost):
-            ok, code = check_forwardauth_url("127.0.0.1")
+            ok, code = check_outpost_ping_url("127.0.0.1")
             last_code = code
             if ok:
                 emit("AUTHENTIK_OUTPOST_READY_STATUS", "ready")
                 emit("INTERNAL_FORWARD_AUTH_STATUS", "ready")
                 return
         time.sleep(5)
-    fail("forwardauth", f"Embedded Outpost did not refresh before timeout. Last internal ForwardAuth HTTP status: {last_code}")
+    fail("forwardauth", f"Embedded Outpost did not refresh before timeout. Last internal outpost ping HTTP status: {last_code}")
 
 def configure():
     auth_flow = lookup_flow("default-authentication-flow", "AUTHENTIK_AUTHENTICATION_FLOW_STATUS")
@@ -2432,22 +2436,36 @@ function configure_authentik_forwardauth() {
     deploy_status_line "Embedded Outpost" "ready" "$GN"
 }
 
-function forwardauth_endpoint_check_once() {
-    local host="$1" py_code="" url="http://${host}:9000/outpost.goauthentik.io/auth/traefik"
+function outpost_ping_check_from_authentik_server() {
+    local py_code="" url="http://127.0.0.1:9000/outpost.goauthentik.io/ping"
     py_code='import sys, urllib.request, urllib.error
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-opener=urllib.request.build_opener(NoRedirect)
 try:
-    response=opener.open(urllib.request.Request(sys.argv[1], method="GET"), timeout=5)
+    response=urllib.request.urlopen(sys.argv[1], timeout=5)
     code=getattr(response, "status", 200)
 except urllib.error.HTTPError as error:
     code=error.code
 except Exception:
     code=0
-sys.exit(0 if code in (200, 302, 401, 403) else 1)'
-    docker_cmd exec authentik-server python -c "$py_code" "$url" >/dev/null 2>&1
+sys.exit(0 if code == 204 else 1)'
+    docker_cmd exec authentik-server python -c "$py_code" "$url" >/dev/null 2>&1 \
+        || docker_cmd exec authentik-server python3 -c "$py_code" "$url" >/dev/null 2>&1
+}
+
+function outpost_ping_check_from_traefik() {
+    local url="http://authentik-server:9000/outpost.goauthentik.io/ping"
+
+    if docker_cmd exec traefik sh -c 'command -v wget >/dev/null 2>&1' >/dev/null 2>&1; then
+        docker_cmd exec traefik sh -c 'url="$1"; code="$(wget -S -O /dev/null "$url" 2>&1 | awk "/^  HTTP\\//{code=\\$2} END{print code}")"; [ "$code" = "204" ]' sh "$url" >/dev/null 2>&1
+        return $?
+    fi
+
+    if docker_cmd exec traefik sh -c 'command -v curl >/dev/null 2>&1' >/dev/null 2>&1; then
+        docker_cmd exec traefik sh -c 'url="$1"; code="$(curl -sS -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || true)"; [ "$code" = "204" ]' sh "$url" >/dev/null 2>&1
+        return $?
+    fi
+
+    append_deploy_log "Traefik container does not have wget or curl available for outpost ping verification. No helper image was pulled."
+    return 1
 }
 
 function verify_traefik_logs_for_forwardauth() {
@@ -2473,22 +2491,22 @@ function verify_forwardauth() {
 
     mini_header "ForwardAuth"
     if [ "$INTERNAL_FORWARD_AUTH_STATUS" != "ready" ]; then
-        if forwardauth_endpoint_check_once "127.0.0.1"; then
+        if outpost_ping_check_from_authentik_server; then
             INTERNAL_FORWARD_AUTH_STATUS="ready"
         else
             INTERNAL_FORWARD_AUTH_STATUS="failed"
             deploy_status_line "Internal ForwardAuth" "failed" "$RD"
-            fail_with_failure_log "ForwardAuth endpoint returned an infrastructure failure."
+            fail_with_failure_log "Authentik Embedded Outpost ping failed internally."
         fi
     fi
     deploy_status_line "Internal ForwardAuth" "$INTERNAL_FORWARD_AUTH_STATUS" "$GN"
 
-    if forwardauth_endpoint_check_once "authentik-server"; then
+    if outpost_ping_check_from_traefik; then
         TRAEFIK_FORWARD_AUTH_STATUS="ready"
     else
         TRAEFIK_FORWARD_AUTH_STATUS="failed"
         deploy_status_line "Traefik endpoint" "failed" "$RD"
-        fail_with_failure_log "Traefik-facing ForwardAuth endpoint returned an infrastructure failure."
+        fail_with_failure_log "Authentik Embedded Outpost ping failed from Traefik network context."
     fi
     deploy_status_line "Traefik endpoint" "$TRAEFIK_FORWARD_AUTH_STATUS" "$GN"
 
