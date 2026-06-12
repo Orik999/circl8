@@ -3,10 +3,10 @@ set -euo pipefail
 shopt -s inherit_errexit nullglob
 
 # =========================================================
-#  Project Circl8 - Script 6.3 Authentik Bootstrap Skeleton
+#  Project Circl8 - Script 6.3 Authentik Prep
 # =========================================================
-# Lane 2 only: hard gate, read-only preflight, UI flow,
-# skeleton verify report scaffold, and no deployment.
+# Lane 3 only: hard gate, read-only preflight, add-only env prep,
+# safe Authentik folder prep, prep verify report, and no deployment.
 
 # --- COLOR VARIABLES ---
 YW="$(printf '\033[33m')"
@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.1"
+SCRIPT_VERSION="v1.0.2"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-skeleton-marker-align"
+SCRIPT_BUILD="authentik-prep-env-folders"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -36,7 +36,6 @@ UI_LABEL_WIDTH="25"
 
 SCRIPT62_MARKER="/root/.circl8-admin-ui-completed"
 SCRIPT63_MARKER="/root/.circl8-authentik-completed"
-SCRIPT63_BOOTSTRAP_CREDENTIALS_FILE="/root/.circl8-authentik-bootstrap-credentials"
 
 LOG_FILE="/var/log/circl8-authentik.log"
 VERIFY_LOG="/var/log/circl8-authentik-verify.log"
@@ -86,9 +85,44 @@ SCRIPT63_SETUP_MODE="fresh-install"
 AUTHENTIK_EXISTING="not detected"
 AUTHENTIK_MARKER_STATUS="not present"
 AUTHENTIK_CONTAINER_STATUS="not detected"
-SCRIPT63_VERIFY_STATUS="SKELETON"
+SCRIPT63_LANE="prep"
+SCRIPT63_STATUS="prepared-not-deployed"
+SCRIPT63_VERIFY_STATUS="PREPARED"
 SCRIPT63_DEPLOYMENT_STATUS="not-run"
 SCRIPT63_MARKER_WRITTEN="no"
+SCRIPT63_SECRET_STORAGE="env-only"
+SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+
+ENV_STATUS="unknown"
+ENV_BACKUP_STATUS="not-needed"
+ENV_BACKUP_PATH=""
+ENV_KEYS_ADDED=0
+ENV_KEYS_PRESERVED=0
+ENV_APPEND_LINES=()
+
+AUTHENTIK_SECRET_KEY_STATUS="unknown"
+AUTHENTIK_POSTGRES_PASSWORD_STATUS="unknown"
+AUTHENTIK_BOOTSTRAP_EMAIL_STATUS="unknown"
+AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS="unknown"
+AUTHENTIK_BOOTSTRAP_TOKEN_STATUS="unknown"
+AUTHENTIK_ROUTE_STATUS="unknown"
+SMTP_STATUS="not-configured"
+
+AUTHENTIK_APPDATA_DIR=""
+AUTHENTIK_POSTGRESQL_DIR=""
+AUTHENTIK_MEDIA_DIR=""
+AUTHENTIK_TEMPLATES_DIR=""
+AUTHENTIK_CERTS_DIR=""
+AUTHENTIK_APPDATA_DIR_STATUS="unknown"
+AUTHENTIK_POSTGRESQL_DIR_STATUS="unknown"
+AUTHENTIK_MEDIA_DIR_STATUS="unknown"
+AUTHENTIK_TEMPLATES_DIR_STATUS="unknown"
+AUTHENTIK_CERTS_DIR_STATUS="unknown"
+AUTHENTIK_APPDATA_DIR_PLAN="unknown"
+AUTHENTIK_POSTGRESQL_DIR_PLAN="unknown"
+AUTHENTIK_MEDIA_DIR_PLAN="unknown"
+AUTHENTIK_TEMPLATES_DIR_PLAN="unknown"
+AUTHENTIK_CERTS_DIR_PLAN="unknown"
 
 # =========================================================
 #  OUTPUT HELPERS
@@ -133,10 +167,10 @@ function mini_header() {
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        ready|present|completed|PASS|yes|running|active|responsive|detected|configured|valid|SKELETON|fresh\ install|fresh-install|rerun/update|rerun-update|not\ written|not\ run|not-run|not\ used|planned|unchanged|stored\ root-only)
+        ready|present|completed|PASS|yes|running|active|responsive|detected|configured|generated|preserved|valid|SKELETON|PREPARED|fresh\ install|fresh-install|rerun/update|rerun-update|not\ written|not\ run|not-run|not\ used|planned|unchanged|stored\ root-only|env\ only|env-only|created|not\ needed|not-needed|reused|partial|will\ create|will-create|will\ generate|will-generate)
             printf '%s' "$GN"
             ;;
-        warning|skipped|unknown|not\ detected|will\ install\ later|not\ present|not\ configured|reuse\ if\ present)
+        warning|skipped|unknown|not\ detected|will\ install\ later|not\ present|not\ configured|reuse\ if\ present|missing|preserve\ in\ later\ lane|planned\ for\ later\ lane)
             printf '%s' "$YW"
             ;;
         fail|FAIL|failed|missing|no|not-ready|not\ ready)
@@ -158,6 +192,11 @@ function ui_display_value() {
         not-present) printf 'not present' ;;
         not-written) printf 'not written' ;;
         will-install-later) printf 'will install later' ;;
+        will-generate) printf 'will generate' ;;
+        will-create) printf 'will create' ;;
+        env-only) printf '.env only' ;;
+        not-needed) printf 'not needed' ;;
+        not-configured) printf 'not configured' ;;
         *) printf '%s' "$value" ;;
     esac
 }
@@ -461,6 +500,19 @@ function timed_yes_no_value_only() {
     echo "$answer"
 }
 
+function tty_read_line_blocking() {
+    local prompt="$1" answer=""
+    flush_input_buffer
+    tty_print "${YW}${prompt}${CL} "
+    if [ -r /dev/tty ]; then
+        IFS= read -r answer < /dev/tty || true
+    else
+        IFS= read -r answer || true
+    fi
+    flush_input_buffer
+    printf '%s' "$answer"
+}
+
 # =========================================================
 #  REPORT / FAILURE HELPERS
 # =========================================================
@@ -475,22 +527,39 @@ function write_text_root_file() {
 
 function write_verify_report() {
     {
-        echo "SCRIPT63_LANE=skeleton"
-        echo "SCRIPT63_STATUS=not-deployed"
-        echo "SCRIPT63_VERSION=${SCRIPT_VERSION}"
-        echo "SCRIPT63_BUILD=${SCRIPT_BUILD}"
-        echo "SCRIPT63_VERIFY_STATUS=${SCRIPT63_VERIFY_STATUS}"
-        echo "SCRIPT63_DEPLOYMENT=${SCRIPT63_DEPLOYMENT_STATUS}"
-        echo "SCRIPT63_MARKER_WRITTEN=${SCRIPT63_MARKER_WRITTEN}"
-        echo "SCRIPT62_STATUS=${SCRIPT62_STATUS}"
-        echo "SCRIPT62_VERIFY_STATUS=${SCRIPT62_VERIFY_STATUS}"
-        echo "SCRIPT62_READY_FOR_SCRIPT63=${SCRIPT62_READY_FOR_SCRIPT63}"
-        echo "SCRIPT63_SETUP_MODE=${SCRIPT63_SETUP_MODE}"
-        echo "SCRIPT63_AUTHENTIK_EXISTING=${AUTHENTIK_EXISTING}"
-        echo "SCRIPT63_AUTHENTIK_COMPOSE=${AUTHENTIK_COMPOSE_STATUS}"
-        echo "SCRIPT63_TRAEFIK_AUTHENTIK_REFERENCES=${TRAEFIK_AUTHENTIK_REFERENCES}"
-        echo "SCRIPT63_COMPLETION_MARKER_PATH=${SCRIPT63_MARKER}"
-        echo "SCRIPT63_COMPLETION_MARKER_NOTE=not written in skeleton lane"
+        printf '%s\n' "SCRIPT63_LANE=${SCRIPT63_LANE}"
+        printf '%s\n' "SCRIPT63_STATUS=${SCRIPT63_STATUS}"
+        printf '%s\n' "SCRIPT63_VERSION=${SCRIPT_VERSION}"
+        printf '%s\n' "SCRIPT63_BUILD=${SCRIPT_BUILD}"
+        printf '%s\n' "SCRIPT63_VERIFY_STATUS=${SCRIPT63_VERIFY_STATUS}"
+        printf '%s\n' "SCRIPT63_DEPLOYMENT=${SCRIPT63_DEPLOYMENT_STATUS}"
+        printf '%s\n' "SCRIPT63_MARKER_WRITTEN=${SCRIPT63_MARKER_WRITTEN}"
+        printf '%s\n' "SCRIPT63_SECRET_STORAGE=${SCRIPT63_SECRET_STORAGE}"
+        printf '%s\n' "SCRIPT62_STATUS=${SCRIPT62_STATUS}"
+        printf '%s\n' "SCRIPT62_VERIFY_STATUS=${SCRIPT62_VERIFY_STATUS}"
+        printf '%s\n' "SCRIPT62_READY_FOR_SCRIPT63=${SCRIPT62_READY_FOR_SCRIPT63}"
+        printf '%s\n' "SCRIPT63_SETUP_MODE=${SCRIPT63_SETUP_MODE}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_EXISTING=${AUTHENTIK_EXISTING}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE=${AUTHENTIK_COMPOSE_STATUS}"
+        printf '%s\n' "SCRIPT63_TRAEFIK_AUTHENTIK_REFERENCES=${TRAEFIK_AUTHENTIK_REFERENCES}"
+        printf '%s\n' "SCRIPT63_ENV_STATUS=${ENV_STATUS}"
+        printf '%s\n' "SCRIPT63_ENV_BACKUP=${ENV_BACKUP_STATUS}"
+        printf '%s\n' "SCRIPT63_ENV_KEYS_ADDED=${ENV_KEYS_ADDED}"
+        printf '%s\n' "SCRIPT63_ENV_KEYS_PRESERVED=${ENV_KEYS_PRESERVED}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_SECRET_KEY=${AUTHENTIK_SECRET_KEY_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_POSTGRES_PASSWORD=${AUTHENTIK_POSTGRES_PASSWORD_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_BOOTSTRAP_EMAIL=${AUTHENTIK_BOOTSTRAP_EMAIL_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_BOOTSTRAP_PASSWORD=${AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_BOOTSTRAP_TOKEN=${AUTHENTIK_BOOTSTRAP_TOKEN_STATUS}"
+        printf '%s\n' "SCRIPT63_SMTP_STATUS=${SMTP_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_APPDATA_DIR=${AUTHENTIK_APPDATA_DIR_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_POSTGRESQL_DIR=${AUTHENTIK_POSTGRESQL_DIR_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_MEDIA_DIR=${AUTHENTIK_MEDIA_DIR_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_TEMPLATES_DIR=${AUTHENTIK_TEMPLATES_DIR_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_CERTS_DIR=${AUTHENTIK_CERTS_DIR_STATUS}"
+        printf '%s\n' "SCRIPT63_READY_FOR_DEPLOYMENT_LANE=${SCRIPT63_READY_FOR_DEPLOYMENT_LANE}"
+        printf '%s\n' "SCRIPT63_COMPLETION_MARKER_PATH=${SCRIPT63_MARKER}"
+        printf '%s\n' "SCRIPT63_COMPLETION_MARKER_NOTE=not written in prep lane"
     } | write_text_root_file "$VERIFY_LOG"
 }
 
@@ -702,6 +771,317 @@ function runtime_preflight() {
     fi
 }
 
+
+# =========================================================
+#  ENV / SECRET / FOLDER PREP HELPERS
+# =========================================================
+function root_dir_has_entries() {
+    local path="$1"
+    if ! root_path_exists "$path"; then
+        return 1
+    fi
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" find "$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .
+    else
+        find "$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .
+    fi
+}
+
+function root_install_dir() {
+    local path="$1" mode="${2:-750}"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" install -d -m "$mode" "$path"
+    else
+        install -d -m "$mode" "$path"
+    fi
+}
+
+function root_write_test_dir() {
+    local path="$1"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" sh -c 't="$1/.circl8-write-test.$$"; : > "$t" && rm -f "$t"' sh "$path"
+    else
+        local test_file="${path}/.circl8-write-test.$$"
+        : > "$test_file" && rm -f "$test_file"
+    fi
+}
+
+function root_copy_preserve() {
+    local src="$1" dest="$2"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp -p "$src" "$dest"
+    else
+        cp -p "$src" "$dest"
+    fi
+}
+
+function root_append_line_to_file() {
+    local path="$1" line="$2"
+    if [ -n "$SUDO_CMD" ]; then
+        printf '%s\n' "$line" | "$SUDO_CMD" sh -c 'cat >> "$1"' sh "$path"
+    else
+        printf '%s\n' "$line" >> "$path"
+    fi
+}
+
+function env_has_nonempty_value() {
+    local key="$1" value=""
+    value="$(env_value "$key")"
+    [ -n "$value" ]
+}
+
+function env_line_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
+
+function queue_env_value() {
+    local key="$1" value="$2" line=""
+    line="${key}=\"$(env_line_escape "$value")\""
+    ENV_APPEND_LINES+=("$line")
+}
+
+function generate_secret_hex() {
+    local bytes="${1:-32}"
+    command -v openssl >/dev/null 2>&1 || return 1
+    openssl rand -hex "$bytes"
+}
+
+function env_key_result() {
+    local key="$1" missing_result="$2" var_name="$3" value=""
+    if env_has_nonempty_value "$key"; then
+        printf -v "$var_name" '%s' "preserved"
+        ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+        return 0
+    fi
+    printf -v "$var_name" '%s' "$missing_result"
+    return 1
+}
+
+function classify_smtp_status() {
+    local host="" from="" any="no"
+    host="$(env_value AUTHENTIK_EMAIL__HOST)"
+    from="$(env_value AUTHENTIK_EMAIL__FROM)"
+
+    for key in AUTHENTIK_EMAIL__HOST AUTHENTIK_EMAIL__PORT AUTHENTIK_EMAIL__USERNAME AUTHENTIK_EMAIL__PASSWORD AUTHENTIK_EMAIL__USE_TLS AUTHENTIK_EMAIL__USE_SSL AUTHENTIK_EMAIL__TIMEOUT AUTHENTIK_EMAIL__FROM; do
+        if env_has_nonempty_value "$key"; then
+            any="yes"
+            break
+        fi
+    done
+
+    if [ -n "$host" ] && [ -n "$from" ]; then
+        SMTP_STATUS="configured"
+    elif [ "$any" == "yes" ]; then
+        SMTP_STATUS="partial"
+    else
+        SMTP_STATUS="not-configured"
+    fi
+}
+
+function prompt_missing_bootstrap_email() {
+    local email=""
+    email="$(tty_read_line_blocking "Enter Authentik bootstrap email:")"
+    email="$(printf '%s' "$email" | trim_shell_value)"
+    if [ -z "$email" ]; then
+        AUTHENTIK_BOOTSTRAP_EMAIL_STATUS="missing"
+        ENV_STATUS="failed"
+        SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+        deploy_status_line "Bootstrap email" "missing" "$RD"
+        fail_with_verify_log "AUTHENTIK_BOOTSTRAP_EMAIL is required before Authentik deployment."
+    fi
+    queue_env_value AUTHENTIK_BOOTSTRAP_EMAIL "$email"
+    AUTHENTIK_BOOTSTRAP_EMAIL_STATUS="configured"
+    ENV_KEYS_ADDED=$((ENV_KEYS_ADDED + 1))
+}
+
+function plan_authentik_env() {
+    local value="" route_host="" generated=""
+    ENV_APPEND_LINES=()
+    ENV_KEYS_ADDED=0
+    ENV_KEYS_PRESERVED=0
+    ENV_STATUS="planned"
+    SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
+
+    DOMAIN_VALUE="$(env_value DOMAIN)"
+    route_host="$(env_value AUTHENTIK_ROUTE_HOST)"
+    if [ -z "$route_host" ]; then
+        if [ -z "$DOMAIN_VALUE" ]; then
+            AUTHENTIK_ROUTE_STATUS="missing"
+            ENV_STATUS="failed"
+            fail_with_verify_log "Authentik route values cannot be derived because DOMAIN is missing."
+        fi
+        route_host="auth.${DOMAIN_VALUE}"
+        queue_env_value AUTHENTIK_ROUTE_HOST "$route_host"
+        ENV_KEYS_ADDED=$((ENV_KEYS_ADDED + 1))
+        AUTHENTIK_ROUTE_STATUS="configured"
+    else
+        AUTHENTIK_ROUTE_STATUS="preserved"
+        ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+    fi
+    AUTHENTIK_ROUTE_HOST="$route_host"
+
+    for key in AUTHENTIK_EXTERNAL_URL AUTHENTIK_HOST AUTHENTIK_HOST_BROWSER AUTHENTIK_HOST_BROWSER_VALUE; do
+        if env_has_nonempty_value "$key"; then
+            ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+        else
+            queue_env_value "$key" "https://${AUTHENTIK_ROUTE_HOST}"
+            ENV_KEYS_ADDED=$((ENV_KEYS_ADDED + 1))
+        fi
+    done
+    AUTHENTIK_EXTERNAL_URL="$(env_value AUTHENTIK_EXTERNAL_URL)"
+    [ -n "$AUTHENTIK_EXTERNAL_URL" ] || AUTHENTIK_EXTERNAL_URL="https://${AUTHENTIK_ROUTE_HOST}"
+
+    if ! env_key_result AUTHENTIK_SECRET_KEY "will-generate" AUTHENTIK_SECRET_KEY_STATUS; then
+        generated="$(generate_secret_hex 48)" || { AUTHENTIK_SECRET_KEY_STATUS="missing"; ENV_STATUS="failed"; fail_with_verify_log "A required Authentik value could not be generated safely."; }
+        queue_env_value AUTHENTIK_SECRET_KEY "$generated"
+        AUTHENTIK_SECRET_KEY_STATUS="generated"
+        ENV_KEYS_ADDED=$((ENV_KEYS_ADDED + 1))
+    fi
+
+    if ! env_key_result AUTHENTIK_POSTGRES_PASSWORD "will-generate" AUTHENTIK_POSTGRES_PASSWORD_STATUS; then
+        generated="$(generate_secret_hex 32)" || { AUTHENTIK_POSTGRES_PASSWORD_STATUS="missing"; ENV_STATUS="failed"; fail_with_verify_log "A required Authentik value could not be generated safely."; }
+        queue_env_value AUTHENTIK_POSTGRES_PASSWORD "$generated"
+        AUTHENTIK_POSTGRES_PASSWORD_STATUS="generated"
+        ENV_KEYS_ADDED=$((ENV_KEYS_ADDED + 1))
+    fi
+
+    if env_has_nonempty_value AUTHENTIK_BOOTSTRAP_EMAIL; then
+        AUTHENTIK_BOOTSTRAP_EMAIL_STATUS="preserved"
+        ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+    else
+        prompt_missing_bootstrap_email
+    fi
+
+    if ! env_key_result AUTHENTIK_BOOTSTRAP_PASSWORD "will-generate" AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS; then
+        generated="$(generate_secret_hex 32)" || { AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS="missing"; ENV_STATUS="failed"; fail_with_verify_log "A required Authentik value could not be generated safely."; }
+        queue_env_value AUTHENTIK_BOOTSTRAP_PASSWORD "$generated"
+        AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS="generated"
+        ENV_KEYS_ADDED=$((ENV_KEYS_ADDED + 1))
+    fi
+
+    if ! env_key_result AUTHENTIK_BOOTSTRAP_TOKEN "will-generate" AUTHENTIK_BOOTSTRAP_TOKEN_STATUS; then
+        generated="$(generate_secret_hex 48)" || { AUTHENTIK_BOOTSTRAP_TOKEN_STATUS="missing"; ENV_STATUS="failed"; fail_with_verify_log "A required Authentik value could not be generated safely."; }
+        queue_env_value AUTHENTIK_BOOTSTRAP_TOKEN "$generated"
+        AUTHENTIK_BOOTSTRAP_TOKEN_STATUS="generated"
+        ENV_KEYS_ADDED=$((ENV_KEYS_ADDED + 1))
+    fi
+
+    classify_smtp_status
+    ENV_STATUS="ready"
+}
+
+function path_plan_status() {
+    local path="$1" pg_mode="${2:-no}"
+    if root_path_exists "$path"; then
+        if [ "$pg_mode" == "yes" ] && root_dir_has_entries "$path"; then
+            printf 'preserved'
+        else
+            printf 'present'
+        fi
+    else
+        printf 'will-create'
+    fi
+}
+
+function plan_authentik_folders() {
+    AUTHENTIK_APPDATA_DIR="${DOCKER_DIR}/appdata/authentik"
+    AUTHENTIK_POSTGRESQL_DIR="${AUTHENTIK_APPDATA_DIR}/postgresql"
+    AUTHENTIK_MEDIA_DIR="${AUTHENTIK_APPDATA_DIR}/media"
+    AUTHENTIK_TEMPLATES_DIR="${AUTHENTIK_APPDATA_DIR}/custom-templates"
+    AUTHENTIK_CERTS_DIR="${AUTHENTIK_APPDATA_DIR}/certs"
+
+    AUTHENTIK_APPDATA_DIR_PLAN="$(path_plan_status "$AUTHENTIK_APPDATA_DIR")"
+    AUTHENTIK_POSTGRESQL_DIR_PLAN="$(path_plan_status "$AUTHENTIK_POSTGRESQL_DIR" yes)"
+    AUTHENTIK_MEDIA_DIR_PLAN="$(path_plan_status "$AUTHENTIK_MEDIA_DIR")"
+    AUTHENTIK_TEMPLATES_DIR_PLAN="$(path_plan_status "$AUTHENTIK_TEMPLATES_DIR")"
+    AUTHENTIK_CERTS_DIR_PLAN="$(path_plan_status "$AUTHENTIK_CERTS_DIR")"
+}
+
+function plan_authentik_prep() {
+    plan_authentik_env
+    plan_authentik_folders
+}
+
+function backup_env_if_needed() {
+    local ts=""
+    if [ "${#ENV_APPEND_LINES[@]}" -eq 0 ]; then
+        ENV_BACKUP_STATUS="not-needed"
+        return 0
+    fi
+    ts="$(date +%Y%m%d-%H%M%S)"
+    ENV_BACKUP_PATH="${ENV_FILE}.bak.script63-lane3-${ts}"
+    if root_copy_preserve "$ENV_FILE" "$ENV_BACKUP_PATH"; then
+        ENV_BACKUP_STATUS="created"
+    else
+        ENV_BACKUP_STATUS="failed"
+        ENV_STATUS="failed"
+        deploy_status_line ".env update" "failed" "$RD"
+        fail_with_verify_log "Authentik .env preparation failed."
+    fi
+}
+
+function append_missing_env_values() {
+    local line=""
+    backup_env_if_needed
+    for line in "${ENV_APPEND_LINES[@]}"; do
+        if ! root_append_line_to_file "$ENV_FILE" "$line"; then
+            ENV_STATUS="failed"
+            deploy_status_line ".env update" "failed" "$RD"
+            fail_with_verify_log "Authentik .env preparation failed."
+        fi
+    done
+    ENV_STATUS="ready"
+}
+
+function ensure_regular_dir() {
+    local path="$1" status_var="$2"
+    if ! root_path_exists "$path"; then
+        if ! root_install_dir "$path" 750; then
+            printf -v "$status_var" '%s' "failed"
+            return 1
+        fi
+    fi
+    if ! root_write_test_dir "$path"; then
+        printf -v "$status_var" '%s' "failed"
+        return 1
+    fi
+    printf -v "$status_var" '%s' "ready"
+    return 0
+}
+
+function ensure_postgresql_dir() {
+    if root_path_exists "$AUTHENTIK_POSTGRESQL_DIR" && root_dir_has_entries "$AUTHENTIK_POSTGRESQL_DIR"; then
+        AUTHENTIK_POSTGRESQL_DIR_STATUS="preserved"
+        return 0
+    fi
+    if ! root_path_exists "$AUTHENTIK_POSTGRESQL_DIR"; then
+        root_install_dir "$AUTHENTIK_POSTGRESQL_DIR" 750 || { AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"; return 1; }
+    fi
+    root_write_test_dir "$AUTHENTIK_POSTGRESQL_DIR" || { AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"; return 1; }
+    AUTHENTIK_POSTGRESQL_DIR_STATUS="ready"
+}
+
+function prepare_authentik_folders() {
+    ensure_regular_dir "$AUTHENTIK_APPDATA_DIR" AUTHENTIK_APPDATA_DIR_STATUS || fail_with_verify_log "Authentik appdata folder could not be prepared safely."
+    ensure_postgresql_dir || fail_with_verify_log "PostgreSQL data folder could not be prepared safely."
+    ensure_regular_dir "$AUTHENTIK_MEDIA_DIR" AUTHENTIK_MEDIA_DIR_STATUS || fail_with_verify_log "Authentik media folder could not be prepared safely."
+    ensure_regular_dir "$AUTHENTIK_TEMPLATES_DIR" AUTHENTIK_TEMPLATES_DIR_STATUS || fail_with_verify_log "Authentik templates folder could not be prepared safely."
+    ensure_regular_dir "$AUTHENTIK_CERTS_DIR" AUTHENTIK_CERTS_DIR_STATUS || fail_with_verify_log "Authentik certs folder could not be prepared safely."
+}
+
+function display_env_plan_status() {
+    case "$1" in
+        generated) printf 'will generate' ;;
+        configured) printf 'configured' ;;
+        preserved) printf 'preserved' ;;
+        missing) printf 'missing' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 # =========================================================
 #  AUTHENTIK PREFLIGHT / DETECTION
 # =========================================================
@@ -765,10 +1145,10 @@ function show_authentik_preflight() {
     aligned_status_line "Public route" "$AUTHENTIK_ROUTE_HOST"
     aligned_status_line "External URL" "$AUTHENTIK_EXTERNAL_URL"
     aligned_status_line "Database" "PostgreSQL 17"
-    aligned_status_line "PostgreSQL data" "planned"
+    aligned_status_line "PostgreSQL data" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'preserve' || printf 'planned')"
     aligned_status_line "Redis" "not used"
-    aligned_status_line "SMTP" "reuse if present"
-    aligned_status_line "Embedded Outpost" "planned"
+    aligned_status_line "SMTP" "$SMTP_STATUS" "$(status_color_for_value "$SMTP_STATUS")"
+    aligned_status_line "Embedded Outpost" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'verify/update later' || printf 'planned')"
     aligned_status_line "Admin UI bootstrap" "unchanged"
 
     if [ "$TRAEFIK_DYNAMIC_STATUS" != "present" ] || [ "$TRAEFIK_AUTHENTIK_REFERENCES" != "ready" ]; then
@@ -776,73 +1156,106 @@ function show_authentik_preflight() {
     fi
 }
 
+function show_authentik_prep_plan() {
+    section "AUTHENTIK PREP"
+
+    mini_header "Environment"
+    aligned_status_line "AUTHENTIK_SECRET_KEY" "$(display_env_plan_status "$AUTHENTIK_SECRET_KEY_STATUS")"
+    aligned_status_line "PostgreSQL password" "$(display_env_plan_status "$AUTHENTIK_POSTGRES_PASSWORD_STATUS")"
+    aligned_status_line "Bootstrap email" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_EMAIL_STATUS")"
+    aligned_status_line "Bootstrap password" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS")"
+    aligned_status_line "Bootstrap token" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_TOKEN_STATUS")"
+    aligned_status_line "SMTP" "$SMTP_STATUS" "$(status_color_for_value "$SMTP_STATUS")"
+    aligned_status_line "Secret storage" "$SCRIPT63_SECRET_STORAGE" "$GN"
+
+    mini_header "Folders"
+    aligned_status_line "Authentik appdata" "$AUTHENTIK_APPDATA_DIR_PLAN"
+    aligned_status_line "PostgreSQL data" "$AUTHENTIK_POSTGRESQL_DIR_PLAN"
+    aligned_status_line "Media" "$AUTHENTIK_MEDIA_DIR_PLAN"
+    aligned_status_line "Templates" "$AUTHENTIK_TEMPLATES_DIR_PLAN"
+    aligned_status_line "Certs" "$AUTHENTIK_CERTS_DIR_PLAN"
+}
+
 # =========================================================
-#  PLAN / CONFIRMATION / SKELETON CHECKS
+#  PLAN / CONFIRMATION / PREP CHECKS
 # =========================================================
 function show_setup_plan() {
     section "SETUP PLAN"
 
     if [ "$SCRIPT63_SETUP_MODE" == "rerun-update" ]; then
-        echo -e "${YW}Rerun/update detected. Authentik data, database, and secrets will be preserved in later lanes.${CL}"
-        echo -e "${YW}This lane only validates gates, preflight, and script flow.${CL}"
+        echo -e "${YW}Rerun/update detected. Authentik data, database, and secrets will be preserved.${CL}"
+        echo -e "${YW}This lane only prepares env, secrets, and folders.${CL}"
     else
-        echo -e "${YW}Script 6.3 skeleton will validate gates and planning only.${CL}"
-        echo -e "${YW}No deployment, folders, secrets, or completion marker will be written in this lane.${CL}"
+        echo -e "${YW}Script 6.3 lane 3 will prepare Authentik env, secrets, and folders only.${CL}"
+        echo -e "${YW}No deployment, API automation, provider, outpost, or completion marker will run.${CL}"
     fi
 
     mini_header "Setup mode"
     aligned_status_line "Mode" "$SCRIPT63_SETUP_MODE"
-    aligned_status_line "Existing Authentik" "$AUTHENTIK_EXISTING" "$(status_color_for_value "$AUTHENTIK_EXISTING")"
-    aligned_status_line "Data/secrets" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'preserve in later lane' || printf 'planned for later lane')"
-    aligned_status_line "Deployment" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'redeploy in later lane' || printf 'planned for later lane')"
-    aligned_status_line "Provider/outpost" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'verify/update in later lane' || printf 'planned for later lane')"
+    aligned_status_line "Data/secrets" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'preserve' || printf 'create missing only')"
+    aligned_status_line "Folders" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'verify/create missing' || printf 'create/verify')"
+    aligned_status_line ".env update" "$([ "${#ENV_APPEND_LINES[@]}" -gt 0 ] && printf 'add missing keys only' || printf 'not needed')"
+    aligned_status_line "SMTP" "reuse if present"
+    aligned_status_line "Secret storage" "$SCRIPT63_SECRET_STORAGE" "$GN"
+    aligned_status_line "Deployment" "not run"
     aligned_status_line "Completion marker" "not written"
 }
 
 function confirm_or_exit() {
     local answer=""
     echo ""
-    answer="$(timed_yes_no_value_only "Apply this Authentik skeleton plan?" "y")"
+    answer="$(timed_yes_no_value_only "Apply this Authentik preparation plan?" "y")"
     if [[ "$answer" =~ ^[Nn]$ ]]; then
-        msg_ok "Authentik skeleton plan cancelled"
+        msg_ok "Authentik preparation plan cancelled"
         exit 0
     fi
-    tty_println "${CM} ${GN}Applying confirmed Authentik skeleton plan.${CL}"
+    tty_println "${CM} ${GN}Applying confirmed Authentik preparation plan.${CL}"
 }
 
-function run_skeleton_checks() {
+function run_authentik_prep() {
     section "PREPARE AUTHENTIK"
 
-    mini_header "Skeleton checks"
-    deploy_status_line "Script 6.2 handoff" "ready" "$GN"
-    deploy_status_line "Runtime preflight" "ready" "$GN"
-    deploy_status_line "Authentik mode" "$SCRIPT63_SETUP_MODE" "$GN"
-    deploy_status_line "Compose availability" "$AUTHENTIK_COMPOSE_STATUS" "$(status_color_for_value "$AUTHENTIK_COMPOSE_STATUS")"
-    deploy_status_line "Traefik prerequisites" "$TRAEFIK_AUTHENTIK_REFERENCES" "$(status_color_for_value "$TRAEFIK_AUTHENTIK_REFERENCES")"
-    deploy_status_line "Completion marker" "not written" "$GN"
+    mini_header "Environment"
+    append_missing_env_values
+    deploy_status_line ".env backup" "$ENV_BACKUP_STATUS" "$(status_color_for_value "$ENV_BACKUP_STATUS")"
+    deploy_status_line "Authentik secret key" "$([ "$AUTHENTIK_SECRET_KEY_STATUS" == "generated" ] && printf 'configured' || printf 'preserved')" "$GN"
+    deploy_status_line "PostgreSQL password" "$([ "$AUTHENTIK_POSTGRES_PASSWORD_STATUS" == "generated" ] && printf 'configured' || printf 'preserved')" "$GN"
+    deploy_status_line "Bootstrap email" "$([ "$AUTHENTIK_BOOTSTRAP_EMAIL_STATUS" == "configured" ] && printf 'configured' || printf 'preserved')" "$GN"
+    deploy_status_line "Bootstrap password" "$([ "$AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS" == "generated" ] && printf 'configured' || printf 'preserved')" "$GN"
+    deploy_status_line "Bootstrap token" "$([ "$AUTHENTIK_BOOTSTRAP_TOKEN_STATUS" == "generated" ] && printf 'configured' || printf 'preserved')" "$GN"
+    deploy_status_line "SMTP" "$([ "$SMTP_STATUS" == "configured" ] && printf 'reused' || printf '%s' "$SMTP_STATUS")" "$(status_color_for_value "$SMTP_STATUS")"
+    deploy_status_line "Secret storage" "$SCRIPT63_SECRET_STORAGE" "$GN"
 
-    if [ "$TRAEFIK_AUTHENTIK_REFERENCES" != "ready" ]; then
-        fail_with_failure_log "Authentik skeleton checks failed."
-    fi
+    mini_header "Folders"
+    prepare_authentik_folders
+    deploy_status_line "Authentik appdata" "$AUTHENTIK_APPDATA_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_APPDATA_DIR_STATUS")"
+    deploy_status_line "PostgreSQL data" "$AUTHENTIK_POSTGRESQL_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_POSTGRESQL_DIR_STATUS")"
+    deploy_status_line "Media" "$AUTHENTIK_MEDIA_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_MEDIA_DIR_STATUS")"
+    deploy_status_line "Templates" "$AUTHENTIK_TEMPLATES_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_TEMPLATES_DIR_STATUS")"
+    deploy_status_line "Certs" "$AUTHENTIK_CERTS_DIR_STATUS" "$(status_color_for_value "$AUTHENTIK_CERTS_DIR_STATUS")"
+
+    SCRIPT63_READY_FOR_DEPLOYMENT_LANE="yes"
 }
 
 function show_verification_marker_scaffold() {
     section "VERIFICATION / MARKER"
     write_verify_report
-    deploy_status_line "Authentik skeleton report" "created" "$GN" 24
+    deploy_status_line "Authentik prep report" "created" "$GN" 24
     deploy_status_line "Completion marker" "not written" "$GN" 24
 }
 
-function show_skeleton_finished() {
-    section_flash_success "SKELETON COMPLETE"
+function show_prep_finished() {
+    section_flash_success "AUTHENTIK PREP COMPLETE"
 
     mini_header "Authentik"
-    final_line "Status" "skeleton ready"
+    final_line "Status" "prepared"
     final_line "Action" "$SCRIPT63_SETUP_MODE"
     [ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && final_line "Existing Authentik" "$AUTHENTIK_EXISTING"
     final_line "Compose file" "$AUTHENTIK_COMPOSE_STATUS" "$(status_color_for_value "$AUTHENTIK_COMPOSE_STATUS")"
     final_line "Database" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'PostgreSQL 17 preserve planned' || printf 'PostgreSQL 17 planned')"
     final_line "Redis" "not used"
+    final_line "SMTP" "$SMTP_STATUS" "$(status_color_for_value "$SMTP_STATUS")"
+    final_line "Secret storage" "$SCRIPT63_SECRET_STORAGE" "$GN"
     final_line "Embedded Outpost" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'verify/update planned' || printf 'planned')"
     final_line "Admin UI bootstrap" "unchanged"
     final_line "Deployment" "not run"
@@ -853,7 +1266,7 @@ function show_skeleton_finished() {
     final_line "Verify log" "$VERIFY_LOG" "$BL"
 
     mini_header "Next Step"
-    echo -e "${GN}Continue Script 6.3 implementation: secrets, env, and folder preparation.${CL}"
+    echo -e "${GN}Continue Script 6.3 implementation: deployment and readiness.${CL}"
 }
 
 function main() {
@@ -861,12 +1274,14 @@ function main() {
     validate_script62_handoff
     runtime_preflight
     detect_authentik_state
+    plan_authentik_prep
     show_authentik_preflight
+    show_authentik_prep_plan
     show_setup_plan
     confirm_or_exit
-    run_skeleton_checks
+    run_authentik_prep
     show_verification_marker_scaffold
-    show_skeleton_finished
+    show_prep_finished
 }
 
 main "$@"
