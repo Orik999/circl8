@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.5"
+SCRIPT_VERSION="v1.0.6"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-compose-file-permissions"
+SCRIPT_BUILD="authentik-deploy-ui-progress"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -268,6 +268,14 @@ function tty_println() {
 
 function clear_transient_line() {
     tty_print "${BFR}"
+}
+
+function progress_line() {
+    tty_print "${BFR}${YW}* $1...${CL}"
+}
+
+function clear_progress_line() {
+    clear_transient_line
 }
 
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
@@ -748,6 +756,7 @@ function root_download_url_to_file() {
 
 function fail_with_verify_log() {
     local message="$1"
+    clear_progress_line || true
     write_verify_report || true
     echo -e "${CROSS} ${RD}${message}${CL}"
     echo -e "  ${BL}Verify log:${CL} ${VERIFY_LOG}"
@@ -756,6 +765,7 @@ function fail_with_verify_log() {
 
 function fail_with_failure_log() {
     local message="$1"
+    clear_progress_line || true
     if [ "${SCRIPT63_LANE:-}" == "deploy" ] && [ "${SCRIPT63_DEPLOYMENT_STATUS:-}" != "completed" ]; then
         SCRIPT63_STATUS="deploy-failed"
         SCRIPT63_VERIFY_STATUS="FAILED"
@@ -1793,15 +1803,25 @@ function run_authentik_deploy() {
     deploy_status_line "Authentik compose" "$AUTHENTIK_COMPOSE_CONFIG_STATUS" "$GN"
 
     mini_header "Authentik"
+    progress_line "Deploying Authentik compose"
     deploy_authentik_compose
+    clear_progress_line
     deploy_status_line "Compose deployment" "$AUTHENTIK_DEPLOYMENT_STATUS" "$GN"
+    progress_line "Waiting for PostgreSQL health"
     wait_for_postgresql_healthy
+    clear_progress_line
     deploy_status_line "PostgreSQL" "$AUTHENTIK_POSTGRES_STATUS" "$GN"
+    progress_line "Waiting for Authentik server"
     wait_for_container_running authentik-server AUTHENTIK_SERVER_STATUS
+    clear_progress_line
     deploy_status_line "Authentik server" "$AUTHENTIK_SERVER_STATUS" "$GN"
+    progress_line "Waiting for Authentik worker"
     wait_for_container_running authentik-worker AUTHENTIK_WORKER_STATUS
+    clear_progress_line
     deploy_status_line "Authentik worker" "$AUTHENTIK_WORKER_STATUS" "$GN"
+    progress_line "Waiting for Internal API readiness"
     wait_for_internal_api_ready
+    clear_progress_line
     deploy_status_line "Internal API" "$AUTHENTIK_INTERNAL_API_STATUS" "$GN"
 
     SCRIPT63_STATUS="deployed-auth-not-configured"
@@ -1813,8 +1833,8 @@ function run_authentik_deploy() {
 function show_verification_marker_scaffold() {
     section "VERIFICATION / MARKER"
     write_verify_report
-    deploy_status_line "Authentik deploy report" "created" "$GN" 24
-    deploy_status_line "Completion marker" "not written" "$GN" 24
+    deploy_status_line "Deploy report" "created" "$GN"
+    deploy_status_line "Completion marker" "not written" "$GN"
 }
 
 function show_deploy_finished() {
