@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.6"
+SCRIPT_VERSION="v1.0.7"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-deploy-ui-progress"
+SCRIPT_BUILD="authentik-deploy-ui-rerun-polish"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -151,12 +151,12 @@ AUTHENTIK_INTERNAL_API_STATUS="unknown"
 function header_info() {
 cat <<'BANNER'
 
- ██████╗██╗██████╗  ██████╗██╗     █████╗  █████╗     █████╗ ██╗   ██╗████████╗██╗  ██╗
-██╔════╝██║██╔══██╗██╔════╝██║    ██╔══██╗██╔══██╗   ██╔══██╗██║   ██║╚══██╔══╝██║  ██║
-██║     ██║██████╔╝██║     ██║    ╚█████╔╝╚█████╔╝   ███████║██║   ██║   ██║   ███████║
-██║     ██║██╔══██╗██║     ██║    ██╔══██╗██╔══██╗   ██╔══██║██║   ██║   ██║   ██╔══██║
-╚██████╗██║██║  ██║╚██████╗███████╗╚█████╔╝╚█████╔╝   ██║  ██║╚██████╔╝   ██║   ██║  ██║
- ╚═════╝╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝ ╚════╝  ╚════╝    ╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝
+ ██████╗    ██████╗      █████╗ ██╗   ██╗████████╗██╗  ██╗███████╗███╗   ██╗████████╗██╗██╗  ██╗
+██╔════╝   ╚════██╗    ██╔══██╗██║   ██║╚══██╔══╝██║  ██║██╔════╝████╗  ██║╚══██╔══╝██║██║ ██╔╝
+███████╗    █████╔╝    ███████║██║   ██║   ██║   ███████║█████╗  ██╔██╗ ██║   ██║   ██║█████╔╝
+██╔═══██╗   ╚═══██╗    ██╔══██║██║   ██║   ██║   ██╔══██║██╔══╝  ██║╚██╗██║   ██║   ██║██╔═██╗
+╚██████╔╝██╗██████╔╝    ██║  ██║╚██████╔╝   ██║   ██║  ██║███████╗██║ ╚████║   ██║   ██║██║  ██╗
+ ╚═════╝ ╚═╝╚═════╝     ╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚═╝  ╚═╝
 
 BANNER
 }
@@ -218,10 +218,32 @@ function ui_display_value() {
         env-only) printf '.env only' ;;
         not-needed) printf 'not needed' ;;
         not-configured) printf 'not configured' ;;
-        pending-lane-5) printf 'pending lane 5' ;;
+        pending-lane-5) printf 'pending next step' ;;
         deployed-auth-not-configured) printf 'deployed, Auth not configured' ;;
         *) printf '%s' "$value" ;;
     esac
+}
+
+function rerun_ui_color() {
+    local value="${1:-unknown}"
+    if [ "${SCRIPT63_SETUP_MODE:-fresh-install}" == "rerun-update" ]; then
+        case "$value" in
+            rerun-update|rerun/update|detected|preserved|preserve|refresh|redeploy\ Authentik\ only)
+                printf '%s' "$YW"
+                return 0
+                ;;
+        esac
+    fi
+    status_color_for_value "$value"
+}
+
+function prep_value_color() {
+    local value="${1:-unknown}"
+    if [ "${SCRIPT63_SETUP_MODE:-fresh-install}" == "rerun-update" ] && [ "$value" == "preserved" ]; then
+        printf '%s' "$YW"
+        return 0
+    fi
+    status_color_for_value "$value"
 }
 
 function aligned_status_line() {
@@ -1511,13 +1533,13 @@ function detect_authentik_state() {
 function show_authentik_preflight() {
     section "AUTHENTIK PREFLIGHT"
 
-    aligned_status_line "Mode" "$SCRIPT63_SETUP_MODE"
-    aligned_status_line "Existing Authentik" "$AUTHENTIK_EXISTING" "$(status_color_for_value "$AUTHENTIK_EXISTING")"
+    aligned_status_line "Mode" "$SCRIPT63_SETUP_MODE" "$(rerun_ui_color "$SCRIPT63_SETUP_MODE")"
+    aligned_status_line "Existing Authentik" "$AUTHENTIK_EXISTING" "$(rerun_ui_color "$AUTHENTIK_EXISTING")"
     aligned_status_line "Authentik compose" "$AUTHENTIK_COMPOSE_STATUS" "$(status_color_for_value "$AUTHENTIK_COMPOSE_STATUS")"
     aligned_status_line "Public route" "$AUTHENTIK_ROUTE_HOST"
     aligned_status_line "External URL" "$AUTHENTIK_EXTERNAL_URL"
     aligned_status_line "Database" "PostgreSQL 17"
-    aligned_status_line "PostgreSQL data" "$AUTHENTIK_POSTGRESQL_DIR_STATUS"
+    aligned_status_line "PostgreSQL data" "$AUTHENTIK_POSTGRESQL_DIR_STATUS" "$(rerun_ui_color "$AUTHENTIK_POSTGRESQL_DIR_STATUS")"
     aligned_status_line "Redis" "not used"
     aligned_status_line "SMTP" "$SMTP_STATUS" "$(status_color_for_value "$SMTP_STATUS")"
     aligned_status_line "Embedded Outpost" "pending-lane-5"
@@ -1532,17 +1554,17 @@ function show_authentik_prep_plan() {
     section "AUTHENTIK PREP"
 
     mini_header "Environment"
-    aligned_status_line "AUTHENTIK_SECRET_KEY" "$(display_env_plan_status "$AUTHENTIK_SECRET_KEY_STATUS")"
-    aligned_status_line "PostgreSQL password" "$(display_env_plan_status "$AUTHENTIK_POSTGRES_PASSWORD_STATUS")"
-    aligned_status_line "Bootstrap email" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_EMAIL_STATUS")"
-    aligned_status_line "Bootstrap password" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS")"
-    aligned_status_line "Bootstrap token" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_TOKEN_STATUS")"
+    aligned_status_line "AUTHENTIK_SECRET_KEY" "$(display_env_plan_status "$AUTHENTIK_SECRET_KEY_STATUS")" "$(prep_value_color "$AUTHENTIK_SECRET_KEY_STATUS")"
+    aligned_status_line "PostgreSQL password" "$(display_env_plan_status "$AUTHENTIK_POSTGRES_PASSWORD_STATUS")" "$(prep_value_color "$AUTHENTIK_POSTGRES_PASSWORD_STATUS")"
+    aligned_status_line "Bootstrap email" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_EMAIL_STATUS")" "$(prep_value_color "$AUTHENTIK_BOOTSTRAP_EMAIL_STATUS")"
+    aligned_status_line "Bootstrap password" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS")" "$(prep_value_color "$AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS")"
+    aligned_status_line "Bootstrap token" "$(display_env_plan_status "$AUTHENTIK_BOOTSTRAP_TOKEN_STATUS")" "$(prep_value_color "$AUTHENTIK_BOOTSTRAP_TOKEN_STATUS")"
     aligned_status_line "SMTP" "$SMTP_STATUS" "$(status_color_for_value "$SMTP_STATUS")"
     aligned_status_line "Secret storage" "$SCRIPT63_SECRET_STORAGE" "$GN"
 
     mini_header "Folders"
     aligned_status_line "Authentik appdata" "$AUTHENTIK_APPDATA_DIR_PLAN"
-    aligned_status_line "PostgreSQL data" "$AUTHENTIK_POSTGRESQL_DIR_PLAN"
+    aligned_status_line "PostgreSQL data" "$AUTHENTIK_POSTGRESQL_DIR_PLAN" "$(rerun_ui_color "$AUTHENTIK_POSTGRESQL_DIR_PLAN")"
     aligned_status_line "Media" "$AUTHENTIK_MEDIA_DIR_PLAN"
     aligned_status_line "Templates" "$AUTHENTIK_TEMPLATES_DIR_PLAN"
     aligned_status_line "Certs" "$AUTHENTIK_CERTS_DIR_PLAN"
@@ -1559,18 +1581,25 @@ function show_setup_plan() {
         echo -e "${YW}This lane refreshes the compose file, redeploys Authentik, and verifies readiness only.${CL}"
     else
         echo -e "${YW}Script 6.3 lane 4 will deploy Authentik containers only.${CL}"
-        echo -e "${YW}Provider, application, Embedded Outpost, and ForwardAuth automation remain pending lane 5.${CL}"
+        echo -e "${YW}Provider, application, Embedded Outpost, and ForwardAuth automation remain pending next step.${CL}"
+    fi
+
+    local compose_action="install/refresh" data_action="prepared" deploy_action="deploy Authentik only"
+    if [ "$SCRIPT63_SETUP_MODE" == "rerun-update" ]; then
+        compose_action="refresh"
+        data_action="preserve"
+        deploy_action="redeploy Authentik only"
     fi
 
     mini_header "Setup mode"
-    aligned_status_line "Mode" "$SCRIPT63_SETUP_MODE"
-    aligned_status_line "Compose file" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'refresh' || printf 'install/refresh')"
-    aligned_status_line "Data/secrets" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'preserve' || printf 'prepared')"
+    aligned_status_line "Mode" "$SCRIPT63_SETUP_MODE" "$(rerun_ui_color "$SCRIPT63_SETUP_MODE")"
+    aligned_status_line "Compose file" "$compose_action" "$(rerun_ui_color "$compose_action")"
+    aligned_status_line "Data/secrets" "$data_action" "$(rerun_ui_color "$data_action")"
     aligned_status_line "Docker networks" "verify/reuse"
     aligned_status_line "Compose config" "validate Authentik only"
-    aligned_status_line "Deployment" "$([ "$SCRIPT63_SETUP_MODE" == "rerun-update" ] && printf 'redeploy Authentik only' || printf 'deploy Authentik only')"
+    aligned_status_line "Deployment" "$deploy_action" "$(rerun_ui_color "$deploy_action")"
     aligned_status_line "Readiness" "PostgreSQL/server/worker/internal API"
-    aligned_status_line "ForwardAuth automation" "pending-lane-5"
+    aligned_status_line "ForwardAuth automation" "pending-lane-5" "$YW"
     aligned_status_line "Completion marker" "not written"
 }
 
@@ -1854,7 +1883,7 @@ function show_deploy_finished() {
     final_line "Verify log" "$VERIFY_LOG" "$BL"
 
     mini_header "Next Step"
-    echo -e "${GN}Continue Script 6.3 implementation: provider, application, Embedded Outpost, and ForwardAuth automation.${CL}"
+    echo -e "${GN}Continue with Authentik automation: provider, application, Embedded Outpost, and ForwardAuth.${CL}"
 }
 
 function main() {
