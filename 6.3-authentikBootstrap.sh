@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.2"
+SCRIPT_VERSION="v1.0.3"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-prep-env-folders"
+SCRIPT_BUILD="authentik-prep-folder-permissions"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -118,6 +118,7 @@ AUTHENTIK_POSTGRESQL_DIR_STATUS="unknown"
 AUTHENTIK_MEDIA_DIR_STATUS="unknown"
 AUTHENTIK_TEMPLATES_DIR_STATUS="unknown"
 AUTHENTIK_CERTS_DIR_STATUS="unknown"
+AUTHENTIK_DIR_OWNER_GROUP="unknown"
 AUTHENTIK_APPDATA_DIR_PLAN="unknown"
 AUTHENTIK_POSTGRESQL_DIR_PLAN="unknown"
 AUTHENTIK_MEDIA_DIR_PLAN="unknown"
@@ -167,7 +168,7 @@ function mini_header() {
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        ready|present|completed|PASS|yes|running|active|responsive|detected|configured|generated|preserved|valid|SKELETON|PREPARED|fresh\ install|fresh-install|rerun/update|rerun-update|not\ written|not\ run|not-run|not\ used|planned|unchanged|stored\ root-only|env\ only|env-only|created|not\ needed|not-needed|reused|partial|will\ create|will-create|will\ generate|will-generate)
+        ready|present|completed|PASS|yes|running|active|responsive|detected|configured|generated|preserved|fixed|valid|SKELETON|PREPARED|fresh\ install|fresh-install|rerun/update|rerun-update|not\ written|not\ run|not-run|not\ used|planned|unchanged|stored\ root-only|env\ only|env-only|created|not\ needed|not-needed|reused|partial|will\ create|will-create|will\ generate|will-generate)
             printf '%s' "$GN"
             ;;
         warning|skipped|unknown|not\ detected|will\ install\ later|not\ present|not\ configured|reuse\ if\ present|missing|preserve\ in\ later\ lane|planned\ for\ later\ lane)
@@ -796,6 +797,49 @@ function root_install_dir() {
     fi
 }
 
+function root_stat_owner_group() {
+    local path="$1"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" stat -c '%U:%G' "$path" 2>/dev/null || true
+    else
+        stat -c '%U:%G' "$path" 2>/dev/null || true
+    fi
+}
+
+function root_stat_mode() {
+    local path="$1"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" stat -c '%a' "$path" 2>/dev/null || true
+    else
+        stat -c '%a' "$path" 2>/dev/null || true
+    fi
+}
+
+function root_set_dir_owner_group() {
+    local path="$1" owner_group="$2"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" chown "$owner_group" "$path"
+    else
+        chown "$owner_group" "$path"
+    fi
+}
+
+function root_set_dir_mode() {
+    local path="$1" mode="$2"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" chmod "$mode" "$path"
+    else
+        chmod "$mode" "$path"
+    fi
+}
+
+function resolve_authentik_dir_owner_group() {
+    AUTHENTIK_DIR_OWNER_GROUP="$(root_stat_owner_group "$DOCKER_DIR")"
+    if [ -z "$AUTHENTIK_DIR_OWNER_GROUP" ] || [ "$AUTHENTIK_DIR_OWNER_GROUP" == ":" ]; then
+        fail_with_verify_log "Docker project directory owner/group could not be detected."
+    fi
+}
+
 function root_write_test_dir() {
     local path="$1"
     if [ -n "$SUDO_CMD" ]; then
@@ -987,6 +1031,9 @@ function path_plan_status() {
 }
 
 function plan_authentik_folders() {
+    AUTHENTIK_DIR_OWNER_GROUP="$(root_stat_owner_group "$DOCKER_DIR")"
+    [ -n "$AUTHENTIK_DIR_OWNER_GROUP" ] || AUTHENTIK_DIR_OWNER_GROUP="unknown"
+
     AUTHENTIK_APPDATA_DIR="${DOCKER_DIR}/appdata/authentik"
     AUTHENTIK_POSTGRESQL_DIR="${AUTHENTIK_APPDATA_DIR}/postgresql"
     AUTHENTIK_MEDIA_DIR="${AUTHENTIK_APPDATA_DIR}/media"
@@ -1036,35 +1083,67 @@ function append_missing_env_values() {
     ENV_STATUS="ready"
 }
 
-function ensure_regular_dir() {
-    local path="$1" status_var="$2"
+function ensure_managed_dir() {
+    local path="$1" status_var="$2" mode="${3:-755}" preserve_if_nonempty="${4:-no}" changed="no" was_nonempty="no" current_owner_group="" current_mode=""
+
     if ! root_path_exists "$path"; then
-        if ! root_install_dir "$path" 750; then
+        if ! root_install_dir "$path" "$mode"; then
             printf -v "$status_var" '%s' "failed"
             return 1
         fi
+        changed="yes"
     fi
+
+    if [ "$preserve_if_nonempty" == "yes" ] && root_dir_has_entries "$path"; then
+        was_nonempty="yes"
+    fi
+
+    current_owner_group="$(root_stat_owner_group "$path")"
+    if [ "$current_owner_group" != "$AUTHENTIK_DIR_OWNER_GROUP" ]; then
+        if ! root_set_dir_owner_group "$path" "$AUTHENTIK_DIR_OWNER_GROUP"; then
+            printf -v "$status_var" '%s' "failed"
+            return 1
+        fi
+        changed="yes"
+    fi
+
+    current_mode="$(root_stat_mode "$path")"
+    if [ "$current_mode" != "$mode" ]; then
+        if ! root_set_dir_mode "$path" "$mode"; then
+            printf -v "$status_var" '%s' "failed"
+            return 1
+        fi
+        changed="yes"
+    fi
+
     if ! root_write_test_dir "$path"; then
         printf -v "$status_var" '%s' "failed"
         return 1
     fi
-    printf -v "$status_var" '%s' "ready"
+
+    if [ "$was_nonempty" == "yes" ] && [ "$changed" == "no" ]; then
+        printf -v "$status_var" '%s' "preserved"
+    elif [ "$changed" == "yes" ]; then
+        printf -v "$status_var" '%s' "fixed"
+    else
+        printf -v "$status_var" '%s' "ready"
+    fi
     return 0
 }
 
+function ensure_regular_dir() {
+    local path="$1" status_var="$2"
+    ensure_managed_dir "$path" "$status_var" 755 no
+}
+
 function ensure_postgresql_dir() {
-    if root_path_exists "$AUTHENTIK_POSTGRESQL_DIR" && root_dir_has_entries "$AUTHENTIK_POSTGRESQL_DIR"; then
-        AUTHENTIK_POSTGRESQL_DIR_STATUS="preserved"
-        return 0
-    fi
-    if ! root_path_exists "$AUTHENTIK_POSTGRESQL_DIR"; then
-        root_install_dir "$AUTHENTIK_POSTGRESQL_DIR" 750 || { AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"; return 1; }
-    fi
-    root_write_test_dir "$AUTHENTIK_POSTGRESQL_DIR" || { AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"; return 1; }
-    AUTHENTIK_POSTGRESQL_DIR_STATUS="ready"
+    # Only the PostgreSQL top-level bind directory is managed here.
+    # Existing data inside it is never deleted, emptied, or recursively chowned/chmodded.
+    ensure_managed_dir "$AUTHENTIK_POSTGRESQL_DIR" AUTHENTIK_POSTGRESQL_DIR_STATUS 750 yes
 }
 
 function prepare_authentik_folders() {
+    resolve_authentik_dir_owner_group
     ensure_regular_dir "$AUTHENTIK_APPDATA_DIR" AUTHENTIK_APPDATA_DIR_STATUS || fail_with_verify_log "Authentik appdata folder could not be prepared safely."
     ensure_postgresql_dir || fail_with_verify_log "PostgreSQL data folder could not be prepared safely."
     ensure_regular_dir "$AUTHENTIK_MEDIA_DIR" AUTHENTIK_MEDIA_DIR_STATUS || fail_with_verify_log "Authentik media folder could not be prepared safely."
