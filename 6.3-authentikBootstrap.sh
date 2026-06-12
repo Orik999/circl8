@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.14"
+SCRIPT_VERSION="v1.0.15"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-fresh-init-race-fix"
+SCRIPT_BUILD="authentik-postgres-init-audit-polish"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -119,6 +119,7 @@ AUTHENTIK_TEMPLATES_DIR=""
 AUTHENTIK_CERTS_DIR=""
 AUTHENTIK_APPDATA_DIR_STATUS="unknown"
 AUTHENTIK_POSTGRESQL_DIR_STATUS="unknown"
+AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="unknown"
 AUTHENTIK_MEDIA_DIR_STATUS="unknown"
 AUTHENTIK_TEMPLATES_DIR_STATUS="unknown"
 AUTHENTIK_CERTS_DIR_STATUS="unknown"
@@ -664,6 +665,7 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT63_SMTP_STATUS=${SMTP_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_APPDATA_DIR=${AUTHENTIK_APPDATA_DIR_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_POSTGRESQL_DIR=${AUTHENTIK_POSTGRESQL_DIR_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_POSTGRESQL_DIR_INITIALIZED=${AUTHENTIK_POSTGRESQL_DIR_INITIALIZED}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_MEDIA_DIR=${AUTHENTIK_MEDIA_DIR_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_TEMPLATES_DIR=${AUTHENTIK_TEMPLATES_DIR_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_CERTS_DIR=${AUTHENTIK_CERTS_DIR_STATUS}"
@@ -885,7 +887,7 @@ function fail_with_failure_log() {
 }
 
 function write_completion_marker() {
-    local tmp_file=""
+    local tmp_file="" secret_status_key="SCRIPT63_AUTHENTIK_SECRET_KEY" secret_status_value="${AUTHENTIK_SECRET_KEY_STATUS}"
     tmp_file="$(mktemp /tmp/circl8-authentik-marker.XXXXXX)"
     {
         printf '%s\n' "SCRIPT63_STATUS=completed"
@@ -895,6 +897,9 @@ function write_completion_marker() {
         printf '%s\n' "SCRIPT63_DEPLOYMENT=completed"
         printf '%s\n' "SCRIPT63_MARKER_WRITTEN=yes"
         printf '%s\n' "SCRIPT63_SECRET_STORAGE=${SCRIPT63_SECRET_STORAGE}"
+        printf '%s\n' "${secret_status_key}=${secret_status_value}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_POSTGRESQL_DIR=${AUTHENTIK_POSTGRESQL_DIR_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_POSTGRESQL_DIR_INITIALIZED=${AUTHENTIK_POSTGRESQL_DIR_INITIALIZED}"
         printf '%s\n' "SCRIPT63_SETUP_MODE=${SCRIPT63_AUTOMATION_MODE}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_CONFIG=${AUTHENTIK_COMPOSE_CONFIG_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_DEPLOYMENT=${AUTHENTIK_DEPLOYMENT_STATUS}"
@@ -1450,16 +1455,36 @@ SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
 }
 
 function path_plan_status() {
-    local path="$1" pg_mode="${2:-no}"
+    local path="$1"
     if root_path_exists "$path"; then
-        if [ "$pg_mode" == "yes" ] && root_dir_has_entries "$path"; then
-            printf 'preserved'
-        else
-            printf 'present'
-        fi
+        printf 'present'
     else
         printf 'will-create'
     fi
+}
+
+function postgresql_dir_has_pg_version() {
+    root_path_exists "${AUTHENTIK_POSTGRESQL_DIR}/PG_VERSION"
+}
+
+function postgresql_dir_plan_status() {
+    if ! root_path_exists "$AUTHENTIK_POSTGRESQL_DIR"; then
+        AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="no"
+        printf 'will-create'
+        return 0
+    fi
+    if postgresql_dir_has_pg_version; then
+        AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="yes"
+        printf 'preserved'
+        return 0
+    fi
+    AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="no"
+    if root_dir_has_entries "$AUTHENTIK_POSTGRESQL_DIR"; then
+        AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="unknown"
+        printf 'failed'
+        return 0
+    fi
+    printf 'present'
 }
 
 function plan_authentik_folders() {
@@ -1473,7 +1498,7 @@ function plan_authentik_folders() {
     AUTHENTIK_CERTS_DIR="${AUTHENTIK_APPDATA_DIR}/certs"
 
     AUTHENTIK_APPDATA_DIR_PLAN="$(path_plan_status "$AUTHENTIK_APPDATA_DIR")"
-    AUTHENTIK_POSTGRESQL_DIR_PLAN="$(path_plan_status "$AUTHENTIK_POSTGRESQL_DIR" yes)"
+    AUTHENTIK_POSTGRESQL_DIR_PLAN="$(postgresql_dir_plan_status)"
     AUTHENTIK_MEDIA_DIR_PLAN="$(path_plan_status "$AUTHENTIK_MEDIA_DIR")"
     AUTHENTIK_TEMPLATES_DIR_PLAN="$(path_plan_status "$AUTHENTIK_TEMPLATES_DIR")"
     AUTHENTIK_CERTS_DIR_PLAN="$(path_plan_status "$AUTHENTIK_CERTS_DIR")"
@@ -1621,8 +1646,45 @@ function ensure_regular_dir() {
 
 function ensure_postgresql_dir() {
     # Only the PostgreSQL top-level bind directory is managed here.
-    # Existing data inside it is never deleted, emptied, or recursively chowned/chmodded.
-    ensure_managed_dir "$AUTHENTIK_POSTGRESQL_DIR" AUTHENTIK_POSTGRESQL_DIR_STATUS 750 yes
+    # Initialized PostgreSQL data is owned/tightened by the container and must not be repaired.
+    if ! root_path_exists "$AUTHENTIK_POSTGRESQL_DIR"; then
+        AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="no"
+        ensure_managed_dir "$AUTHENTIK_POSTGRESQL_DIR" AUTHENTIK_POSTGRESQL_DIR_STATUS 750 no
+        return $?
+    fi
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -d "$AUTHENTIK_POSTGRESQL_DIR" || {
+            AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"
+            AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="unknown"
+            append_folder_prep_diagnostic "$AUTHENTIK_POSTGRESQL_DIR" "$AUTHENTIK_DIR_OWNER_GROUP" "750" "PostgreSQL path exists but is not a directory"
+            return 1
+        }
+    else
+        test -d "$AUTHENTIK_POSTGRESQL_DIR" || {
+            AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"
+            AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="unknown"
+            append_folder_prep_diagnostic "$AUTHENTIK_POSTGRESQL_DIR" "$AUTHENTIK_DIR_OWNER_GROUP" "750" "PostgreSQL path exists but is not a directory"
+            return 1
+        }
+    fi
+
+    if postgresql_dir_has_pg_version; then
+        AUTHENTIK_POSTGRESQL_DIR_STATUS="preserved"
+        AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="yes"
+        append_deploy_log "Initialized PostgreSQL data detected by PG_VERSION; ownership and mode are preserved."
+        return 0
+    fi
+
+    if root_dir_has_entries "$AUTHENTIK_POSTGRESQL_DIR"; then
+        AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"
+        AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="unknown"
+        append_folder_prep_diagnostic "$AUTHENTIK_POSTGRESQL_DIR" "$AUTHENTIK_DIR_OWNER_GROUP" "750" "non-empty PostgreSQL directory does not contain PG_VERSION"
+        return 1
+    fi
+
+    AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="no"
+    ensure_managed_dir "$AUTHENTIK_POSTGRESQL_DIR" AUTHENTIK_POSTGRESQL_DIR_STATUS 750 no
 }
 
 function prepare_authentik_folders() {
@@ -1732,6 +1794,44 @@ function preserve_success_folder_status() {
     esac
 }
 
+function preserve_postgresql_folder_status() {
+    local current_value=""
+    if ! root_path_exists "$AUTHENTIK_POSTGRESQL_DIR"; then
+        AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"
+        AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="no"
+        return 0
+    fi
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -d "$AUTHENTIK_POSTGRESQL_DIR" || {
+            AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"
+            AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="unknown"
+            return 0
+        }
+    else
+        test -d "$AUTHENTIK_POSTGRESQL_DIR" || {
+            AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"
+            AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="unknown"
+            return 0
+        }
+    fi
+    if postgresql_dir_has_pg_version; then
+        AUTHENTIK_POSTGRESQL_DIR_STATUS="preserved"
+        AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="yes"
+        return 0
+    fi
+    if root_dir_has_entries "$AUTHENTIK_POSTGRESQL_DIR"; then
+        AUTHENTIK_POSTGRESQL_DIR_STATUS="failed"
+        AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="unknown"
+        return 0
+    fi
+    AUTHENTIK_POSTGRESQL_DIR_INITIALIZED="no"
+    current_value="${AUTHENTIK_POSTGRESQL_DIR_STATUS:-unknown}"
+    case "$current_value" in
+        ready|created|fixed) return 0 ;;
+        *) AUTHENTIK_POSTGRESQL_DIR_STATUS="ready" ;;
+    esac
+}
+
 function inspect_folders_required_for_deploy() {
     AUTHENTIK_APPDATA_DIR="${DOCKER_DIR}/appdata/authentik"
     AUTHENTIK_POSTGRESQL_DIR="${AUTHENTIK_APPDATA_DIR}/postgresql"
@@ -1740,7 +1840,7 @@ function inspect_folders_required_for_deploy() {
     AUTHENTIK_CERTS_DIR="${AUTHENTIK_APPDATA_DIR}/certs"
 
     preserve_success_folder_status AUTHENTIK_APPDATA_DIR_STATUS "$AUTHENTIK_APPDATA_DIR"
-    preserve_success_folder_status AUTHENTIK_POSTGRESQL_DIR_STATUS "$AUTHENTIK_POSTGRESQL_DIR"
+    preserve_postgresql_folder_status
     preserve_success_folder_status AUTHENTIK_MEDIA_DIR_STATUS "$AUTHENTIK_MEDIA_DIR"
     preserve_success_folder_status AUTHENTIK_TEMPLATES_DIR_STATUS "$AUTHENTIK_TEMPLATES_DIR"
     preserve_success_folder_status AUTHENTIK_CERTS_DIR_STATUS "$AUTHENTIK_CERTS_DIR"
