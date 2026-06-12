@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.9"
+SCRIPT_VERSION="v1.0.10"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-forwardauth-verification-fix"
+SCRIPT_BUILD="authentik-traefik-ping-parser-fix"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -2451,20 +2451,58 @@ sys.exit(0 if code == 204 else 1)'
         || docker_cmd exec authentik-server python3 -c "$py_code" "$url" >/dev/null 2>&1
 }
 
+function append_traefik_ping_failure_diagnostics() {
+    local method="$1" url="$2" parsed_status="${3:-none}" output="${4:-}"
+    init_deploy_output_log
+    append_deploy_log "Traefik outpost ping verification failed."
+    append_deploy_log "Traefik ping method: ${method}"
+    append_deploy_log "Traefik ping target: ${url}"
+    append_deploy_log "Traefik ping parsed HTTP status: ${parsed_status:-none}"
+    append_deploy_log "Traefik ping command output, sanitized excerpt:"
+    if [ -n "$output" ]; then
+        printf '%s\n' "$output" \
+            | sed -E '/(PASSWORD|TOKEN|SECRET_KEY|AUTHENTIK_EMAIL__PASSWORD|AUTHENTIK_POSTGRES_PASSWORD|AUTHENTIK_BOOTSTRAP)/Id' \
+            | head -40 >> "$DEPLOY_OUTPUT_LOG" || true
+    else
+        printf '%s\n' "<no output captured>" >> "$DEPLOY_OUTPUT_LOG"
+    fi
+}
+
+function parse_http_status_from_headers() {
+    awk '/HTTP\/[0-9.]+[[:space:]]+[0-9][0-9][0-9]/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9][0-9][0-9]$/) code = $i } END { print code }'
+}
+
+function parse_http_status_from_curl_output() {
+    awk 'NF { line=$0 } END { gsub(/[^0-9]/, "", line); if (length(line) >= 3) print substr(line, length(line)-2, 3) }'
+}
+
 function outpost_ping_check_from_traefik() {
-    local url="http://authentik-server:9000/outpost.goauthentik.io/ping"
+    local url="http://authentik-server:9000/outpost.goauthentik.io/ping" output="" code=""
 
     if docker_cmd exec traefik sh -c 'command -v wget >/dev/null 2>&1' >/dev/null 2>&1; then
-        docker_cmd exec traefik sh -c 'url="$1"; code="$(wget -S -O /dev/null "$url" 2>&1 | awk "/^  HTTP\\//{code=\\$2} END{print code}")"; [ "$code" = "204" ]' sh "$url" >/dev/null 2>&1
-        return $?
+        output="$(docker_cmd exec traefik sh -lc 'url="$1"; wget -S -O /dev/null "$url" 2>&1' sh "$url" 2>&1 || true)"
+        code="$(printf '%s\n' "$output" | parse_http_status_from_headers)"
+        if [ "$code" = "204" ]; then
+            return 0
+        fi
+        append_traefik_ping_failure_diagnostics "wget" "$url" "${code:-none}" "$output"
+        return 1
     fi
 
     if docker_cmd exec traefik sh -c 'command -v curl >/dev/null 2>&1' >/dev/null 2>&1; then
-        docker_cmd exec traefik sh -c 'url="$1"; code="$(curl -sS -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || true)"; [ "$code" = "204" ]' sh "$url" >/dev/null 2>&1
-        return $?
+        output="$(docker_cmd exec traefik sh -lc 'url="$1"; curl -sS -o /dev/null -w "%{http_code}" "$url" 2>&1 || true' sh "$url" 2>&1 || true)"
+        code="$(printf '%s\n' "$output" | parse_http_status_from_curl_output)"
+        if [ "$code" = "204" ]; then
+            return 0
+        fi
+        append_traefik_ping_failure_diagnostics "curl" "$url" "${code:-none}" "$output"
+        return 1
     fi
 
-    append_deploy_log "Traefik container does not have wget or curl available for outpost ping verification. No helper image was pulled."
+    append_deploy_log "Traefik outpost ping verification failed."
+    append_deploy_log "Traefik ping method: unavailable"
+    append_deploy_log "Traefik ping target: ${url}"
+    append_deploy_log "Traefik container has no wget/curl for endpoint verification. No helper image was pulled."
     return 1
 }
 
