@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.10"
+SCRIPT_VERSION="v1.0.11"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-traefik-ping-parser-fix"
+SCRIPT_BUILD="authentik-final-ui-report-polish"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -203,6 +203,10 @@ function section_flash_success() {
 
 function mini_header() {
     echo ""
+    echo -e "${YW}$1:${CL}"
+}
+
+function mini_header_compact() {
     echo -e "${YW}$1:${CL}"
 }
 
@@ -1657,7 +1661,8 @@ function show_setup_plan() {
     section "SETUP PLAN"
 
     if [ "$SCRIPT63_AUTOMATION_MODE" == "rerun-update" ]; then
-        echo -e "${YW}Rerun/update detected. Existing Authentik provider, application, and Embedded Outpost attachment will be verified and updated idempotently.${CL}"
+        echo -e "${YW}Rerun/update detected.${CL}"
+        echo -e "${YW}Existing Authentik automation will be verified and updated idempotently.${CL}"
     else
         echo -e "${YW}Script 6.3 will configure Authentik ForwardAuth and write the completion marker only after checks pass.${CL}"
     fi
@@ -2353,6 +2358,7 @@ function inspect_existing_authentik_deployment() {
 
 function inspect_authentik_automation_preflight() {
     inspect_existing_authentik_deployment || fail_with_failure_log "Authentik deployment readiness is required before automation."
+    validate_authentik_compose_config
     if run_authentik_python_action inspect; then
         AUTHENTIK_API_ACCESS_STATUS="valid"
         return 0
@@ -2363,6 +2369,7 @@ function inspect_authentik_automation_preflight() {
 function show_automation_preflight() {
     section "AUTHENTIK AUTOMATION PREFLIGHT"
     aligned_status_line "Deployment" "detected"
+    aligned_status_line "Compose config" "$AUTHENTIK_COMPOSE_CONFIG_STATUS" "$(status_color_for_value "$AUTHENTIK_COMPOSE_CONFIG_STATUS")"
     aligned_status_line "Automation mode" "$SCRIPT63_AUTOMATION_MODE" "$(rerun_ui_color "$SCRIPT63_AUTOMATION_MODE")"
     aligned_status_line "PostgreSQL" "$AUTHENTIK_POSTGRES_STATUS" "$(status_color_for_value "$AUTHENTIK_POSTGRES_STATUS")"
     aligned_status_line "Server" "$AUTHENTIK_SERVER_STATUS" "$(status_color_for_value "$AUTHENTIK_SERVER_STATUS")"
@@ -2377,17 +2384,16 @@ function show_automation_preflight() {
 
 function configure_authentik_forwardauth() {
     section "CONFIGURE AUTHENTIK"
-
     progress_line "Configuring Authentik ForwardAuth"
     if ! run_authentik_python_action configure; then
         clear_progress_line
         case "${AUTHENTIK_AUTOMATION_ERROR_STAGE:-unknown}" in
             api-token)
-                mini_header "API access"
+                mini_header_compact "API access"
                 deploy_status_line "API token" "failed" "$RD"
                 ;;
             flow)
-                mini_header "API access"
+                mini_header_compact "API access"
                 deploy_status_line "API token" "valid" "$GN"
                 mini_header "Flow lookup"
                 [ "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS" != "not-run" ] && deploy_status_line "Authentication flow" "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS" "$(status_color_for_value "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS")"
@@ -2407,7 +2413,7 @@ function configure_authentik_forwardauth() {
                 deploy_status_line "Embedded Outpost" "failed" "$RD"
                 ;;
             *)
-                mini_header "API access"
+                mini_header_compact "API access"
                 deploy_status_line "API token" "failed" "$RD"
                 ;;
         esac
@@ -2415,7 +2421,7 @@ function configure_authentik_forwardauth() {
     fi
     clear_progress_line
 
-    mini_header "API access"
+    mini_header_compact "API access"
     deploy_status_line "API token" "valid" "$GN"
 
     mini_header "Flow lookup"
@@ -2526,8 +2532,7 @@ function verify_traefik_logs_for_forwardauth() {
 
 function verify_forwardauth() {
     section "VERIFY FORWARDAUTH"
-
-    mini_header "ForwardAuth"
+    mini_header_compact "ForwardAuth"
     if [ "$INTERNAL_FORWARD_AUTH_STATUS" != "ready" ]; then
         if outpost_ping_check_from_authentik_server; then
             INTERNAL_FORWARD_AUTH_STATUS="ready"
@@ -2566,6 +2571,7 @@ function verify_forwardauth() {
 
 function show_verification_marker_scaffold() {
     section "VERIFICATION / MARKER"
+    validate_authentik_compose_config
     SCRIPT63_STATUS="completed"
     SCRIPT63_VERIFY_STATUS="PASS"
     SCRIPT63_DEPLOYMENT_STATUS="completed"
@@ -2578,8 +2584,7 @@ function show_verification_marker_scaffold() {
 
 function show_deploy_finished() {
     section_flash_success "FINISHED"
-
-    mini_header "Authentik"
+    mini_header_compact "Authentik"
     final_line "Status" "completed"
     final_line "Deployment" "$AUTHENTIK_DEPLOYMENT_STATUS" "$(status_color_for_value "$AUTHENTIK_DEPLOYMENT_STATUS")"
     final_line "PostgreSQL" "$AUTHENTIK_POSTGRES_STATUS" "$(status_color_for_value "$AUTHENTIK_POSTGRES_STATUS")"
