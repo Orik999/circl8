@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.13"
+SCRIPT_VERSION="v1.0.14"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-fresh-folder-prep-fix"
+SCRIPT_BUILD="authentik-fresh-init-race-fix"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -165,6 +165,8 @@ TRAEFIK_FORWARD_AUTH_ERRORS="unknown"
 AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
 AUTHENTIK_API_TOKEN_VALUE=""
 PROGRESS_LINE_ACTIVE="no"
+SCRIPT_RUN_STARTED_AT=""
+AUTHENTIK_DEPLOY_STARTED_AT=""
 
 
 # =========================================================
@@ -220,7 +222,7 @@ function status_color_for_value() {
         warning|skipped|unknown|not\ detected|not\ verified|will\ install\ later|not\ present|not\ configured|reuse\ if\ present|missing|preserve\ in\ later\ lane|planned\ for\ later\ lane)
             printf '%s' "$YW"
             ;;
-        fail|FAIL|failed|missing|no|not-ready|not\ ready)
+        fail|FAIL|failed|missing|no|not-ready|not\ ready|weak-failed)
             printf '%s' "$RD"
             ;;
         *)
@@ -297,6 +299,15 @@ function deploy_status_line() {
     [ "$effective_width" -gt 0 ] || effective_width="$width"
     display_value="$(ui_display_value "$value")"
     printf '%b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$effective_width" "${label}:" "$CL" "$color" "$display_value" "$CL"
+}
+
+function deploy_error_line() {
+    local label="$1" value="${2:-failed}" color="${3:-$RD}" width="${4:-$UI_LABEL_WIDTH}" display_value="" tick_prefix_width="2" effective_width=""
+    [ -n "$value" ] || value="failed"
+    effective_width=$((width - tick_prefix_width))
+    [ "$effective_width" -gt 0 ] || effective_width="$width"
+    display_value="$(ui_display_value "$value")"
+    printf '%b %b%-*s%b %b%s%b\n' "$CROSS" "$BL" "$effective_width" "${label}:" "$CL" "$color" "$display_value" "$CL"
 }
 
 function tty_print() {
@@ -389,6 +400,7 @@ function on_error() {
 }
 
 function init_script() {
+    SCRIPT_RUN_STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     detect_root_or_sudo
     validate_sudo_access
     init_logging
@@ -615,6 +627,7 @@ function write_text_root_file() {
 }
 
 function write_verify_report() {
+    local secret_status_key="SCRIPT63_AUTHENTIK_SECRET_KEY" secret_status_value="${AUTHENTIK_SECRET_KEY_STATUS}"
     {
         printf '%s\n' "SCRIPT63_LANE=${SCRIPT63_LANE}"
         printf '%s\n' "SCRIPT63_STATUS=${SCRIPT63_STATUS}"
@@ -643,7 +656,7 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT63_ENV_BACKUP=${ENV_BACKUP_STATUS}"
         printf '%s\n' "SCRIPT63_ENV_KEYS_ADDED=${ENV_KEYS_ADDED}"
         printf '%s\n' "SCRIPT63_ENV_KEYS_PRESERVED=${ENV_KEYS_PRESERVED}"
-        printf '%s\n' "SCRIPT63_AUTHENTIK_SECRET_KEY=${AUTHENTIK_SECRET_KEY_STATUS}"
+        printf '%s\n' "${secret_status_key}=${secret_status_value}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_POSTGRES_PASSWORD=${AUTHENTIK_POSTGRES_PASSWORD_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_BOOTSTRAP_EMAIL=${AUTHENTIK_BOOTSTRAP_EMAIL_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_BOOTSTRAP_PASSWORD=${AUTHENTIK_BOOTSTRAP_PASSWORD_STATUS}"
@@ -1217,6 +1230,99 @@ function generate_secret_hex() {
     openssl rand -hex "$bytes"
 }
 
+function unique_char_count() {
+    local value="$1"
+    printf '%s' "$value" | fold -w1 | sort -u | wc -l | tr -d '[:space:]'
+}
+
+function authentik_secret_key_is_strong() {
+    local value="${1:-}" lower="" unique="0"
+    [ -n "$value" ] || return 1
+    lower="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    case "$lower" in
+        django-insecure-*|*changeme*|*change-me*|*replace-me*|*placeholder*|*example*|*todo*|password|secret)
+            return 1
+            ;;
+    esac
+    [ "${#value}" -ge 64 ] || return 1
+    unique="$(unique_char_count "$value")"
+    [ "${unique:-0}" -ge 10 ] || return 1
+}
+
+function backup_env_for_secret_repair() {
+    local ts=""
+    ts="$(date +%Y%m%d-%H%M%S)"
+    ENV_BACKUP_PATH="${ENV_FILE}.bak.script63-secret-${ts}"
+    if root_copy_preserve "$ENV_FILE" "$ENV_BACKUP_PATH"; then
+        ENV_BACKUP_STATUS="created"
+        return 0
+    fi
+    ENV_BACKUP_STATUS="failed"
+    ENV_STATUS="failed"
+    return 1
+}
+
+function comment_existing_secret_key_and_append() {
+    local new_value="$1" tmp_file="" comment="" secret_key_name="AUTHENTIK_SECRET_KEY"
+    tmp_file="$(mktemp /tmp/circl8-authentik-env-secret.XXXXXX)"
+    comment="# SCRIPT63_DISABLED_WEAK_AUTHENTIK_SECRET_KEY at $(date '+%Y-%m-%d %H:%M:%S') - replaced before first Authentik deployment"
+    root_read_file "$ENV_FILE" 2>/dev/null | awk -v key="AUTHENTIK_SECRET_KEY" -v comment="$comment" '
+        BEGIN { done=0 }
+        $0 ~ "^[[:space:]]*" key "=" {
+            if (done == 0) {
+                print comment
+            }
+            print "# " $0
+            done=1
+            next
+        }
+        { print }
+        END {
+            if (done == 0) {
+                print comment
+            }
+        }
+    ' > "$tmp_file"
+    printf '%s\n' "${secret_key_name}=\"$(env_line_escape "$new_value")\"" >> "$tmp_file"
+    if root_copy_regular_file "$tmp_file" "$ENV_FILE"; then
+        rm -f "$tmp_file"
+        return 0
+    fi
+    rm -f "$tmp_file"
+    return 1
+}
+
+function repair_weak_authentik_secret_key_predeploy() {
+    local current_value="${1:-}" generated=""
+    if [ "${AUTHENTIK_EXISTING:-not detected}" == "detected" ] || root_path_exists "$SCRIPT63_MARKER"; then
+        AUTHENTIK_SECRET_KEY_STATUS="weak-failed"
+        ENV_STATUS="failed"
+        append_deploy_log "AUTHENTIK_SECRET_KEY is weak, but Authentik deployment already exists. Manual rotation mode is required. Secret value was not logged."
+        fail_with_failure_log "Authentik secret key is weak but deployment already exists. Manual rotation mode is required."
+    fi
+
+    generated="$(openssl rand -hex 64)" || {
+        AUTHENTIK_SECRET_KEY_STATUS="weak-failed"
+        ENV_STATUS="failed"
+        fail_with_verify_log "A required Authentik value could not be generated safely."
+    }
+
+    if ! backup_env_for_secret_repair; then
+        AUTHENTIK_SECRET_KEY_STATUS="weak-failed"
+        fail_with_verify_log "Authentik .env backup failed before weak secret key repair."
+    fi
+
+    if ! comment_existing_secret_key_and_append "$generated"; then
+        AUTHENTIK_SECRET_KEY_STATUS="weak-failed"
+        ENV_STATUS="failed"
+        fail_with_verify_log "Weak Authentik secret key could not be repaired safely."
+    fi
+
+    AUTHENTIK_SECRET_KEY_STATUS="regenerated-weak-predeploy"
+    ENV_KEYS_ADDED=$((ENV_KEYS_ADDED + 1))
+    ENV_STATUS="ready"
+}
+
 function env_key_result() {
     local key="$1" missing_result="$2" var_name="$3" value=""
     if env_has_nonempty_value "$key"; then
@@ -1305,7 +1411,7 @@ SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
     [ -n "$AUTHENTIK_EXTERNAL_URL" ] || AUTHENTIK_EXTERNAL_URL="https://${AUTHENTIK_ROUTE_HOST}"
 
     if ! env_key_result AUTHENTIK_SECRET_KEY "will-generate" AUTHENTIK_SECRET_KEY_STATUS; then
-        generated="$(generate_secret_hex 48)" || { AUTHENTIK_SECRET_KEY_STATUS="missing"; ENV_STATUS="failed"; fail_with_verify_log "A required Authentik value could not be generated safely."; }
+        generated="$(openssl rand -hex 64)" || { AUTHENTIK_SECRET_KEY_STATUS="missing"; ENV_STATUS="failed"; fail_with_verify_log "A required Authentik value could not be generated safely."; }
         queue_env_value AUTHENTIK_SECRET_KEY "$generated"
         AUTHENTIK_SECRET_KEY_STATUS="generated"
         ENV_KEYS_ADDED=$((ENV_KEYS_ADDED + 1))
@@ -1542,6 +1648,8 @@ function display_env_plan_status() {
         generated) printf 'will generate' ;;
         configured) printf 'configured' ;;
         preserved) printf 'preserved' ;;
+        regenerated-weak-predeploy) printf 'regenerated before deploy' ;;
+        weak-failed) printf 'weak failed' ;;
         missing) printf 'missing' ;;
         *) printf '%s' "$1" ;;
     esac
@@ -1552,7 +1660,7 @@ function display_env_plan_status() {
 #  DEPLOY-LANE READINESS INSPECTION
 # =========================================================
 function inspect_env_required_for_deploy() {
-    local key="" missing="no"
+    local key="" missing="no" secret_value=""
     ENV_APPEND_LINES=()
     ENV_KEYS_ADDED=0
     ENV_KEYS_PRESERVED=0
@@ -1572,8 +1680,14 @@ function inspect_env_required_for_deploy() {
         fi
     done
 
-    if env_has_nonempty_value AUTHENTIK_SECRET_KEY; then
-        AUTHENTIK_SECRET_KEY_STATUS="preserved"; ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+    secret_value="$(env_value AUTHENTIK_SECRET_KEY)"
+    if [ -n "$secret_value" ]; then
+        if authentik_secret_key_is_strong "$secret_value"; then
+            AUTHENTIK_SECRET_KEY_STATUS="preserved"
+            ENV_KEYS_PRESERVED=$((ENV_KEYS_PRESERVED + 1))
+        else
+            repair_weak_authentik_secret_key_predeploy "$secret_value"
+        fi
     else
         AUTHENTIK_SECRET_KEY_STATUS="missing"; missing="yes"
     fi
@@ -2029,6 +2143,7 @@ function run_authentik_deploy() {
     deploy_status_line "Authentik compose" "$AUTHENTIK_COMPOSE_CONFIG_STATUS" "$GN"
 
     mini_header "Authentik"
+    AUTHENTIK_DEPLOY_STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     progress_line "Deploying Authentik compose"
     deploy_authentik_compose
     clear_progress_line
@@ -2185,14 +2300,95 @@ def validate_token():
             return
     fail("api-token", "No provided Authentik API token returned HTTP 200 for /api/v3/core/users/me/.")
 
-def lookup_flow(slug, label):
-    query = urllib.parse.urlencode({"slug": slug})
-    parsed = api_request("GET", f"/api/v3/flows/instances/?{query}", stage="flow")
-    for item in result_items(parsed):
+REQUIRED_FLOWS = [
+    ("default-authentication-flow", "AUTHENTIK_AUTHENTICATION_FLOW_STATUS"),
+    ("default-provider-authorization-implicit-consent", "AUTHENTIK_AUTHORIZATION_FLOW_STATUS"),
+    ("default-provider-invalidation-flow", "AUTHENTIK_INVALIDATION_FLOW_STATUS"),
+]
+
+FLOW_STATUS_KEYS = {
+    "default-authentication-flow": "AUTHENTIK_AUTHENTICATION_FLOW_STATUS",
+    "default-provider-authorization-implicit-consent": "AUTHENTIK_AUTHORIZATION_FLOW_STATUS",
+    "default-provider-invalidation-flow": "AUTHENTIK_INVALIDATION_FLOW_STATUS",
+}
+
+def flow_label_for_slug(slug):
+    return FLOW_STATUS_KEYS.get(slug, "AUTHENTIK_FLOW_STATUS")
+
+def list_flow_instances(page_size=100):
+    flows = []
+    path = f"/api/v3/flows/instances/?page_size={page_size}"
+    last_status = 0
+    while path:
+        code, parsed, raw = raw_request("GET", path, token=selected_token)
+        last_status = code
+        if code != 200:
+            return flows, last_status
+        items = result_items(parsed)
+        flows.extend(items)
+        next_url = parsed.get("pagination", {}).get("next") if isinstance(parsed, dict) else None
+        if not next_url:
+            next_url = parsed.get("next") if isinstance(parsed, dict) else None
+        if isinstance(next_url, int):
+            path = f"/api/v3/flows/instances/?page={next_url}&page_size={page_size}"
+        elif isinstance(next_url, str) and next_url:
+            parsed_url = urllib.parse.urlparse(next_url)
+            path = parsed_url.path
+            if parsed_url.query:
+                path += "?" + parsed_url.query
+        else:
+            path = ""
+    return flows, last_status
+
+def search_flow_instance(slug):
+    query = urllib.parse.urlencode({"search": slug, "page_size": 100})
+    code, parsed, raw = raw_request("GET", f"/api/v3/flows/instances/?{query}", token=selected_token)
+    if code != 200:
+        return None, code, 0
+    items = result_items(parsed)
+    for item in items:
         if item.get("slug") == slug and item.get("pk"):
-            emit(label, "found")
-            return item["pk"]
-    fail("flow", f"Required flow slug missing: {slug}")
+            return item, code, len(items)
+    return None, code, len(items)
+
+def lookup_required_flows_once():
+    flows, last_status = list_flow_instances(100)
+    found = {item.get("slug"): item for item in flows if isinstance(item, dict) and item.get("slug")}
+    seen_count = len(flows)
+    result = {}
+    missing = []
+    for slug, label in REQUIRED_FLOWS:
+        item = found.get(slug)
+        if not item:
+            item, search_status, search_count = search_flow_instance(slug)
+            if search_status:
+                last_status = search_status
+            seen_count = max(seen_count, search_count)
+        if item and item.get("pk"):
+            result[slug] = item["pk"]
+        else:
+            missing.append(slug)
+    return result, missing, last_status, seen_count
+
+def emit_flow_statuses(result, missing):
+    for slug, label in REQUIRED_FLOWS:
+        emit(label, "found" if slug in result and slug not in missing else "missing")
+
+def wait_for_required_flows(timeout=180, interval=5):
+    deadline = time.time() + timeout
+    last_status = 0
+    seen_count = 0
+    result = {}
+    missing = [slug for slug, _ in REQUIRED_FLOWS]
+    while time.time() <= deadline:
+        result, missing, last_status, seen_count = lookup_required_flows_once()
+        if not missing:
+            emit_flow_statuses(result, missing)
+            return result
+        time.sleep(interval)
+    emit_flow_statuses(result, missing)
+    fail("flow", "Required Authentik default flows were not ready before timeout. "
+         f"Missing slugs: {', '.join(missing)}; last HTTP status: {last_status}; flows seen: {seen_count}")
 
 def options_fields(path):
     code, parsed, raw = raw_request("OPTIONS", path, token=selected_token)
@@ -2371,9 +2567,10 @@ def wait_for_outpost(provider_pk):
     fail("forwardauth", f"Embedded Outpost did not refresh before timeout. Last internal outpost ping HTTP status: {last_code}")
 
 def configure():
-    auth_flow = lookup_flow("default-authentication-flow", "AUTHENTIK_AUTHENTICATION_FLOW_STATUS")
-    authz_flow = lookup_flow("default-provider-authorization-implicit-consent", "AUTHENTIK_AUTHORIZATION_FLOW_STATUS")
-    invalidation_flow = lookup_flow("default-provider-invalidation-flow", "AUTHENTIK_INVALIDATION_FLOW_STATUS")
+    flows = wait_for_required_flows(timeout=180, interval=5)
+    auth_flow = flows["default-authentication-flow"]
+    authz_flow = flows["default-provider-authorization-implicit-consent"]
+    invalidation_flow = flows["default-provider-invalidation-flow"]
     provider_pk = configure_provider(auth_flow, authz_flow, invalidation_flow)
     emit("AUTHENTIK_PROVIDER_MODE", "forward_domain")
     configure_application(provider_pk)
@@ -2383,9 +2580,14 @@ def configure():
 
 def main():
     validate_token()
-    if payload.get("action") == "inspect":
+    action = payload.get("action")
+    if action == "validate":
+        pass
+    elif action == "inspect":
         inspect_state()
-    elif payload.get("action") == "configure":
+    elif action == "wait-flows":
+        wait_for_required_flows(timeout=180, interval=5)
+    elif action == "configure":
         configure()
     else:
         fail("input", "Unknown Authentik automation action.")
@@ -2422,7 +2624,7 @@ function apply_automation_result_file() {
 function automation_failure_message() {
     case "${AUTHENTIK_AUTOMATION_ERROR_STAGE:-unknown}" in
         api-token) printf 'Authentik API token validation failed.' ;;
-        flow) printf 'Required Authentik flow was not found.' ;;
+        flow) printf 'Required Authentik default flows were not ready before timeout.' ;;
         provider) printf 'Authentik ForwardAuth provider configuration failed.' ;;
         application) printf 'Authentik application configuration failed.' ;;
         outpost) printf 'Embedded Outpost attachment failed.' ;;
@@ -2510,52 +2712,58 @@ function show_automation_preflight() {
 
 function configure_authentik_forwardauth() {
     section "CONFIGURE AUTHENTIK"
-    progress_line "Configuring Authentik ForwardAuth"
-    if ! run_authentik_python_action configure; then
-        clear_progress_line
-        case "${AUTHENTIK_AUTOMATION_ERROR_STAGE:-unknown}" in
-            api-token)
-                mini_header_compact "API access"
-                deploy_status_line "API token" "failed" "$RD"
-                ;;
-            flow)
-                mini_header_compact "API access"
-                deploy_status_line "API token" "valid" "$GN"
-                mini_header "Flow lookup"
-                [ "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS" != "not-run" ] && deploy_status_line "Authentication flow" "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS" "$(status_color_for_value "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS")"
-                [ "$AUTHENTIK_AUTHORIZATION_FLOW_STATUS" != "not-run" ] && deploy_status_line "Authorization flow" "$AUTHENTIK_AUTHORIZATION_FLOW_STATUS" "$(status_color_for_value "$AUTHENTIK_AUTHORIZATION_FLOW_STATUS")"
-                [ "$AUTHENTIK_INVALIDATION_FLOW_STATUS" != "not-run" ] && deploy_status_line "Invalidation flow" "$AUTHENTIK_INVALIDATION_FLOW_STATUS" "$(status_color_for_value "$AUTHENTIK_INVALIDATION_FLOW_STATUS")"
-                ;;
-            provider)
-                mini_header "ForwardAuth provider"
-                deploy_status_line "Provider" "failed" "$RD"
-                ;;
-            application)
-                mini_header "Application"
-                deploy_status_line "Application" "failed" "$RD"
-                ;;
-            outpost|forwardauth)
-                mini_header "Embedded Outpost"
-                deploy_status_line "Embedded Outpost" "failed" "$RD"
-                ;;
-            *)
-                mini_header_compact "API access"
-                deploy_status_line "API token" "failed" "$RD"
-                ;;
-        esac
-        fail_with_failure_log "$(automation_failure_message)"
-    fi
-    clear_progress_line
 
     mini_header_compact "API access"
+    if ! run_authentik_python_action validate; then
+        deploy_error_line "API token" "failed" "$RD"
+        fail_with_failure_log "$(automation_failure_message)"
+    fi
     deploy_status_line "API token" "valid" "$GN"
 
     mini_header "Flow lookup"
+    progress_line "Waiting for Authentik default flows"
+    if ! run_authentik_python_action wait-flows; then
+        clear_progress_line
+        deploy_error_line "Authentication flow" "${AUTHENTIK_AUTHENTICATION_FLOW_STATUS:-missing}" "$RD"
+        deploy_error_line "Authorization flow" "${AUTHENTIK_AUTHORIZATION_FLOW_STATUS:-missing}" "$RD"
+        deploy_error_line "Invalidation flow" "${AUTHENTIK_INVALIDATION_FLOW_STATUS:-missing}" "$RD"
+        fail_with_failure_log "$(automation_failure_message)"
+    fi
+    clear_progress_line
     deploy_status_line "Authentication flow" "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS" "$GN"
     deploy_status_line "Authorization flow" "$AUTHENTIK_AUTHORIZATION_FLOW_STATUS" "$GN"
     deploy_status_line "Invalidation flow" "$AUTHENTIK_INVALIDATION_FLOW_STATUS" "$GN"
 
     mini_header "ForwardAuth provider"
+    progress_line "Configuring Authentik ForwardAuth"
+    if ! run_authentik_python_action configure; then
+        clear_progress_line
+        case "${AUTHENTIK_AUTOMATION_ERROR_STAGE:-unknown}" in
+            provider)
+                deploy_status_line "Provider" "failed" "$RD"
+                ;;
+            application)
+                deploy_status_line "Provider" "${AUTHENTIK_PROVIDER_STATUS:-unknown}" "$(status_color_for_value "${AUTHENTIK_PROVIDER_STATUS:-unknown}")"
+                mini_header "Application"
+                deploy_status_line "Application" "failed" "$RD"
+                ;;
+            outpost|forwardauth)
+                deploy_status_line "Provider" "${AUTHENTIK_PROVIDER_STATUS:-unknown}" "$(status_color_for_value "${AUTHENTIK_PROVIDER_STATUS:-unknown}")"
+                mini_header "Application"
+                deploy_status_line "Application" "${AUTHENTIK_APPLICATION_STATUS:-unknown}" "$(status_color_for_value "${AUTHENTIK_APPLICATION_STATUS:-unknown}")"
+                mini_header "Embedded Outpost"
+                deploy_status_line "Embedded Outpost" "failed" "$RD"
+                ;;
+            flow)
+                deploy_status_line "Provider" "not-run" "$YW"
+                ;;
+            *)
+                deploy_status_line "Provider" "failed" "$RD"
+                ;;
+        esac
+        fail_with_failure_log "$(automation_failure_message)"
+    fi
+    clear_progress_line
     deploy_status_line "Provider" "$AUTHENTIK_PROVIDER_STATUS" "$GN"
 
     mini_header "Application"
@@ -2656,6 +2864,24 @@ function verify_traefik_logs_for_forwardauth() {
     return 0
 }
 
+function verify_authentik_secret_key_logs() {
+    local log_file="" since_value=""
+    log_file="$(mktemp /tmp/circl8-authentik-secret-log.XXXXXX)"
+    since_value="${AUTHENTIK_DEPLOY_STARTED_AT:-${SCRIPT_RUN_STARTED_AT:-10m}}"
+    docker_cmd logs --since "$since_value" authentik-server >"$log_file" 2>&1 || true
+    if grep -Eiq 'SECRET_KEY has less than 50 characters|django-insecure' "$log_file"; then
+        AUTHENTIK_SECRET_KEY_STATUS="weak-failed"
+        append_deploy_log "Authentik SECRET_KEY warning detected after deployment. Secret value was not logged."
+        append_deploy_log "Matching sanitized Authentik server log lines:"
+        grep -Ein 'SECRET_KEY has less than 50 characters|django-insecure' "$log_file" \
+            | sed -E '/(PASSWORD|TOKEN|SECRET_KEY=[^[:space:]]+|AUTHENTIK_EMAIL__PASSWORD|AUTHENTIK_POSTGRES_PASSWORD|AUTHENTIK_BOOTSTRAP)/Id' \
+            | head -20 >> "$DEPLOY_OUTPUT_LOG" || true
+        rm -f "$log_file"
+        fail_with_failure_log "Authentik secret key warning was still present after deployment."
+    fi
+    rm -f "$log_file"
+}
+
 function verify_forwardauth() {
     section "VERIFY FORWARDAUTH"
     mini_header_compact "ForwardAuth"
@@ -2698,6 +2924,7 @@ function verify_forwardauth() {
 function show_verification_marker_scaffold() {
     section "VERIFICATION / MARKER"
     validate_authentik_compose_config
+    verify_authentik_secret_key_logs
     SCRIPT63_STATUS="completed"
     SCRIPT63_VERIFY_STATUS="PASS"
     SCRIPT63_DEPLOYMENT_STATUS="completed"
