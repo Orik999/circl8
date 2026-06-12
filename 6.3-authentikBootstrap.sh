@@ -5,9 +5,9 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 #  Project Circl8 - Script 6.3 Authentik Prep
 # =========================================================
-# Lane 4 only: hard gate, preflight, env/folder readiness validation,
-# Authentik compose deployment, container readiness, deploy verify report,
-# and no provider/application/outpost automation.
+# Lane 5: hard gate, preflight, deploy readiness validation,
+# Authentik ForwardAuth provider/application/Embedded Outpost automation,
+# final ForwardAuth verification, verify report, and completion marker.
 
 # --- COLOR VARIABLES ---
 YW="$(printf '\033[33m')"
@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.3-authentikBootstrap.sh"
-SCRIPT_VERSION="v1.0.7"
+SCRIPT_VERSION="v1.0.8"
 SCRIPT_UPDATED="2026-06-11"
-SCRIPT_BUILD="authentik-deploy-ui-rerun-polish"
+SCRIPT_BUILD="authentik-forwardauth-automation"
 
 # --- GLOBAL SETTINGS ---
 T="15"
@@ -86,14 +86,16 @@ SCRIPT63_SETUP_MODE="fresh-install"
 AUTHENTIK_EXISTING="not detected"
 AUTHENTIK_MARKER_STATUS="not present"
 AUTHENTIK_CONTAINER_STATUS="not detected"
-SCRIPT63_LANE="deploy"
-SCRIPT63_STATUS="prepared-not-deployed"
-SCRIPT63_VERIFY_STATUS="PREPARED"
-SCRIPT63_DEPLOYMENT_STATUS="not-run"
+SCRIPT63_LANE="automation"
+SCRIPT63_STATUS="deployed-auth-not-configured"
+SCRIPT63_VERIFY_STATUS="DEPLOYED"
+SCRIPT63_DEPLOYMENT_STATUS="completed"
 SCRIPT63_MARKER_WRITTEN="no"
 SCRIPT63_SECRET_STORAGE="env-only"
 SCRIPT63_READY_FOR_DEPLOYMENT_LANE="no"
 SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
+SCRIPT63_READY_FOR_SCRIPT64="no"
+SCRIPT63_AUTOMATION_MODE="fresh-automation"
 
 ENV_STATUS="unknown"
 ENV_BACKUP_STATUS="not-needed"
@@ -144,6 +146,25 @@ AUTHENTIK_POSTGRES_STATUS="unknown"
 AUTHENTIK_SERVER_STATUS="unknown"
 AUTHENTIK_WORKER_STATUS="unknown"
 AUTHENTIK_INTERNAL_API_STATUS="unknown"
+AUTHENTIK_API_ACCESS_STATUS="unknown"
+AUTHENTIK_AUTHENTICATION_FLOW_STATUS="not-run"
+AUTHENTIK_AUTHORIZATION_FLOW_STATUS="not-run"
+AUTHENTIK_INVALIDATION_FLOW_STATUS="not-run"
+AUTHENTIK_PROVIDER_STATUS="not-run"
+AUTHENTIK_PROVIDER_PK=""
+AUTHENTIK_PROVIDER_MODE="forward_domain"
+AUTHENTIK_APPLICATION_STATUS="not-run"
+AUTHENTIK_APPLICATION_SLUG="circl8-traefik-forwardauth"
+AUTHENTIK_OUTPOST_STATUS="not-run"
+AUTHENTIK_OUTPOST_PK=""
+FORWARD_AUTH_STATUS="not-run"
+INTERNAL_FORWARD_AUTH_STATUS="not-run"
+TRAEFIK_FORWARD_AUTH_STATUS="not-run"
+TRAEFIK_RESOLUTION_STATUS="not-run"
+TRAEFIK_FORWARD_AUTH_ERRORS="unknown"
+AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
+AUTHENTIK_API_TOKEN_VALUE=""
+
 
 # =========================================================
 #  OUTPUT HELPERS
@@ -188,10 +209,10 @@ function mini_header() {
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        ready|present|completed|PASS|yes|running|active|responsive|detected|configured|generated|preserved|fixed|valid|installed|healthy|settled|DEPLOYED|SKELETON|PREPARED|fresh\ install|fresh-install|rerun/update|rerun-update|not\ written|not\ run|not-run|not\ used|planned|unchanged|stored\ root-only|env\ only|env-only|created|not\ needed|not-needed|reused|partial|will\ create|will-create|will\ generate|will-generate)
+        ready|present|completed|PASS|yes|running|active|responsive|detected|configured|updated|attached|generated|preserved|fixed|valid|installed|healthy|settled|written|DEPLOYED|SKELETON|PREPARED|fresh\ install|fresh-install|fresh-automation|rerun/update|rerun-update|not\ written|not\ run|not-run|not\ used|planned|unchanged|stored\ root-only|env\ only|env-only|created|not\ needed|not-needed|reused|partial|will\ create|will-create|will\ generate|will-generate)
             printf '%s' "$GN"
             ;;
-        warning|skipped|unknown|not\ detected|will\ install\ later|not\ present|not\ configured|reuse\ if\ present|missing|preserve\ in\ later\ lane|planned\ for\ later\ lane)
+        warning|skipped|unknown|not\ detected|not\ verified|will\ install\ later|not\ present|not\ configured|reuse\ if\ present|missing|preserve\ in\ later\ lane|planned\ for\ later\ lane)
             printf '%s' "$YW"
             ;;
         fail|FAIL|failed|missing|no|not-ready|not\ ready)
@@ -207,6 +228,7 @@ function ui_display_value() {
     local value="${1:-unknown}"
     case "$value" in
         fresh-install) printf 'fresh install' ;;
+        fresh-automation) printf 'fresh automation' ;;
         rerun-update) printf 'rerun/update' ;;
         not-run) printf 'not run' ;;
         not-detected) printf 'not detected' ;;
@@ -228,7 +250,7 @@ function rerun_ui_color() {
     local value="${1:-unknown}"
     if [ "${SCRIPT63_SETUP_MODE:-fresh-install}" == "rerun-update" ]; then
         case "$value" in
-            rerun-update|rerun/update|detected|preserved|preserve|refresh|redeploy\ Authentik\ only)
+            rerun-update|rerun/update|detected|preserved|preserve|refresh|redeploy\ Authentik\ only|update\ if\ needed|preserve/attach\ provider|refresh\ on\ success)
                 printf '%s' "$YW"
                 return 0
                 ;;
@@ -591,7 +613,8 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT62_STATUS=${SCRIPT62_STATUS}"
         printf '%s\n' "SCRIPT62_VERIFY_STATUS=${SCRIPT62_VERIFY_STATUS}"
         printf '%s\n' "SCRIPT62_READY_FOR_SCRIPT63=${SCRIPT62_READY_FOR_SCRIPT63}"
-        printf '%s\n' "SCRIPT63_SETUP_MODE=${SCRIPT63_SETUP_MODE}"
+        printf '%s\n' "SCRIPT63_SETUP_MODE=${SCRIPT63_AUTOMATION_MODE}"
+        printf '%s\n' "SCRIPT63_DEPLOY_SETUP_MODE=${SCRIPT63_SETUP_MODE}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_EXISTING=${AUTHENTIK_EXISTING}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE=${AUTHENTIK_COMPOSE_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_FILE=${AUTHENTIK_COMPOSE_FILE}"
@@ -625,14 +648,24 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT63_AUTHENTIK_SERVER=${AUTHENTIK_SERVER_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_WORKER=${AUTHENTIK_WORKER_STATUS}"
         printf '%s\n' "SCRIPT63_AUTHENTIK_INTERNAL_API=${AUTHENTIK_INTERNAL_API_STATUS}"
-        printf '%s\n' "SCRIPT63_FORWARD_AUTH_AUTOMATION=pending-lane-5"
-        printf '%s\n' "SCRIPT63_PROVIDER=pending-lane-5"
-        printf '%s\n' "SCRIPT63_APPLICATION=pending-lane-5"
-        printf '%s\n' "SCRIPT63_AUTHENTIK_OUTPOST=pending-lane-5"
-        printf '%s\n' "SCRIPT63_FORWARD_AUTH=pending-lane-5"
-        printf '%s\n' "SCRIPT63_READY_FOR_SCRIPT64=no"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_API_ACCESS=${AUTHENTIK_API_ACCESS_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_AUTHENTICATION_FLOW=${AUTHENTIK_AUTHENTICATION_FLOW_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_AUTHORIZATION_FLOW=${AUTHENTIK_AUTHORIZATION_FLOW_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_INVALIDATION_FLOW=${AUTHENTIK_INVALIDATION_FLOW_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_PROVIDER=${AUTHENTIK_PROVIDER_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_PROVIDER_PK=${AUTHENTIK_PROVIDER_PK}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_PROVIDER_MODE=${AUTHENTIK_PROVIDER_MODE}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_APPLICATION=${AUTHENTIK_APPLICATION_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_APPLICATION_SLUG=${AUTHENTIK_APPLICATION_SLUG}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_OUTPOST=${AUTHENTIK_OUTPOST_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_OUTPOST_PK=${AUTHENTIK_OUTPOST_PK}"
+        printf '%s\n' "SCRIPT63_FORWARD_AUTH=${FORWARD_AUTH_STATUS}"
+        printf '%s\n' "SCRIPT63_INTERNAL_FORWARD_AUTH=${INTERNAL_FORWARD_AUTH_STATUS}"
+        printf '%s\n' "SCRIPT63_TRAEFIK_FORWARD_AUTH=${TRAEFIK_FORWARD_AUTH_STATUS}"
+        printf '%s\n' "SCRIPT63_TRAEFIK_RESOLUTION=${TRAEFIK_RESOLUTION_STATUS}"
+        printf '%s\n' "SCRIPT63_TRAEFIK_FORWARD_AUTH_ERRORS=${TRAEFIK_FORWARD_AUTH_ERRORS}"
+        printf '%s\n' "SCRIPT63_READY_FOR_SCRIPT64=${SCRIPT63_READY_FOR_SCRIPT64}"
         printf '%s\n' "SCRIPT63_COMPLETION_MARKER_PATH=${SCRIPT63_MARKER}"
-        printf '%s\n' "SCRIPT63_COMPLETION_MARKER_NOTE=not written in deploy lane"
     } | write_text_root_file "$VERIFY_LOG"
 }
 
@@ -793,6 +826,11 @@ function fail_with_failure_log() {
         SCRIPT63_VERIFY_STATUS="FAILED"
         SCRIPT63_DEPLOYMENT_STATUS="failed"
         SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
+    elif [ "${SCRIPT63_LANE:-}" == "automation" ]; then
+        SCRIPT63_STATUS="automation-failed"
+        SCRIPT63_VERIFY_STATUS="FAILED"
+        SCRIPT63_MARKER_WRITTEN="no"
+        SCRIPT63_READY_FOR_SCRIPT64="no"
     fi
     preserve_failure_log "$message" || true
     write_verify_report || true
@@ -802,9 +840,47 @@ function fail_with_failure_log() {
     exit 1
 }
 
-# Placeholder for final completion lane. Intentionally not called in lane 4.
 function write_completion_marker() {
-    return 0
+    local tmp_file=""
+    tmp_file="$(mktemp /tmp/circl8-authentik-marker.XXXXXX)"
+    {
+        printf '%s\n' "SCRIPT63_STATUS=completed"
+        printf '%s\n' "SCRIPT63_VERSION=${SCRIPT_VERSION}"
+        printf '%s\n' "SCRIPT63_BUILD=${SCRIPT_BUILD}"
+        printf '%s\n' "SCRIPT63_VERIFY_STATUS=PASS"
+        printf '%s\n' "SCRIPT63_DEPLOYMENT=completed"
+        printf '%s\n' "SCRIPT63_MARKER_WRITTEN=yes"
+        printf '%s\n' "SCRIPT63_SECRET_STORAGE=${SCRIPT63_SECRET_STORAGE}"
+        printf '%s\n' "SCRIPT63_SETUP_MODE=${SCRIPT63_AUTOMATION_MODE}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_COMPOSE_CONFIG=${AUTHENTIK_COMPOSE_CONFIG_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_DEPLOYMENT=${AUTHENTIK_DEPLOYMENT_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_POSTGRES=${AUTHENTIK_POSTGRES_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_SERVER=${AUTHENTIK_SERVER_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_WORKER=${AUTHENTIK_WORKER_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_INTERNAL_API=${AUTHENTIK_INTERNAL_API_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_PROVIDER=${AUTHENTIK_PROVIDER_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_PROVIDER_PK=${AUTHENTIK_PROVIDER_PK}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_PROVIDER_MODE=${AUTHENTIK_PROVIDER_MODE}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_APPLICATION=${AUTHENTIK_APPLICATION_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_APPLICATION_SLUG=${AUTHENTIK_APPLICATION_SLUG}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_OUTPOST=${AUTHENTIK_OUTPOST_STATUS}"
+        printf '%s\n' "SCRIPT63_AUTHENTIK_OUTPOST_PK=${AUTHENTIK_OUTPOST_PK}"
+        printf '%s\n' "SCRIPT63_FORWARD_AUTH=${FORWARD_AUTH_STATUS}"
+        printf '%s\n' "SCRIPT63_INTERNAL_FORWARD_AUTH=${INTERNAL_FORWARD_AUTH_STATUS}"
+        printf '%s\n' "SCRIPT63_TRAEFIK_FORWARD_AUTH=${TRAEFIK_FORWARD_AUTH_STATUS}"
+        printf '%s\n' "SCRIPT63_TRAEFIK_RESOLUTION=${TRAEFIK_RESOLUTION_STATUS}"
+        printf '%s\n' "SCRIPT63_TRAEFIK_FORWARD_AUTH_ERRORS=${TRAEFIK_FORWARD_AUTH_ERRORS}"
+        printf '%s\n' "SCRIPT63_READY_FOR_SCRIPT64=yes"
+    } > "$tmp_file"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" chmod 600 "$tmp_file"
+        "$SUDO_CMD" mv -f "$tmp_file" "$SCRIPT63_MARKER"
+    else
+        chmod 600 "$tmp_file"
+        mv -f "$tmp_file" "$SCRIPT63_MARKER"
+    fi
+    SCRIPT63_MARKER_WRITTEN="yes"
 }
 
 # =========================================================
@@ -1576,42 +1652,39 @@ function show_authentik_prep_plan() {
 function show_setup_plan() {
     section "SETUP PLAN"
 
-    if [ "$SCRIPT63_SETUP_MODE" == "rerun-update" ]; then
-        echo -e "${YW}Rerun/update detected. Authentik data, database, and secrets will be preserved.${CL}"
-        echo -e "${YW}This lane refreshes the compose file, redeploys Authentik, and verifies readiness only.${CL}"
+    if [ "$SCRIPT63_AUTOMATION_MODE" == "rerun-update" ]; then
+        echo -e "${YW}Rerun/update detected. Existing Authentik provider, application, and Embedded Outpost attachment will be verified and updated idempotently.${CL}"
     else
-        echo -e "${YW}Script 6.3 lane 4 will deploy Authentik containers only.${CL}"
-        echo -e "${YW}Provider, application, Embedded Outpost, and ForwardAuth automation remain pending next step.${CL}"
+        echo -e "${YW}Script 6.3 will configure Authentik ForwardAuth and write the completion marker only after checks pass.${CL}"
     fi
 
-    local compose_action="install/refresh" data_action="prepared" deploy_action="deploy Authentik only"
-    if [ "$SCRIPT63_SETUP_MODE" == "rerun-update" ]; then
-        compose_action="refresh"
-        data_action="preserve"
-        deploy_action="redeploy Authentik only"
+    local provider_action="create/update" app_action="create/update" outpost_action="attach provider" marker_action="write on success"
+    if [ "$SCRIPT63_AUTOMATION_MODE" == "rerun-update" ]; then
+        provider_action="update if needed"
+        app_action="update if needed"
+        outpost_action="preserve/attach provider"
+        marker_action="refresh on success"
     fi
 
     mini_header "Setup mode"
-    aligned_status_line "Mode" "$SCRIPT63_SETUP_MODE" "$(rerun_ui_color "$SCRIPT63_SETUP_MODE")"
-    aligned_status_line "Compose file" "$compose_action" "$(rerun_ui_color "$compose_action")"
-    aligned_status_line "Data/secrets" "$data_action" "$(rerun_ui_color "$data_action")"
-    aligned_status_line "Docker networks" "verify/reuse"
-    aligned_status_line "Compose config" "validate Authentik only"
-    aligned_status_line "Deployment" "$deploy_action" "$(rerun_ui_color "$deploy_action")"
-    aligned_status_line "Readiness" "PostgreSQL/server/worker/internal API"
-    aligned_status_line "ForwardAuth automation" "pending-lane-5" "$YW"
-    aligned_status_line "Completion marker" "not written"
+    aligned_status_line "Automation mode" "$SCRIPT63_AUTOMATION_MODE" "$(rerun_ui_color "$SCRIPT63_AUTOMATION_MODE")"
+    aligned_status_line "Provider" "$provider_action" "$(rerun_ui_color "$provider_action")"
+    aligned_status_line "Application" "$app_action" "$(rerun_ui_color "$app_action")"
+    aligned_status_line "Embedded Outpost" "$outpost_action" "$(rerun_ui_color "$outpost_action")"
+    aligned_status_line "ForwardAuth endpoint" "verify"
+    aligned_status_line "Traefik resolution" "verify"
+    aligned_status_line "Completion marker" "$marker_action" "$(rerun_ui_color "$marker_action")"
 }
 
 function confirm_or_exit() {
     local answer=""
     echo ""
-    answer="$(timed_yes_no_value_only "Apply this Authentik deployment plan?" "y")"
+    answer="$(timed_yes_no_value_only "Apply this Authentik automation plan?" "y")"
     if [[ "$answer" =~ ^[Nn]$ ]]; then
         msg_ok "Authentik deployment plan cancelled"
         exit 0
     fi
-    tty_println "${CM} ${GN}Applying confirmed Authentik deployment plan.${CL}"
+    tty_println "${CM} ${GN}Applying confirmed Authentik automation plan.${CL}"
 }
 
 function install_authentik_compose_file() {
@@ -1859,31 +1932,616 @@ function run_authentik_deploy() {
     SCRIPT63_READY_FOR_AUTOMATION_LANE="yes"
 }
 
+# =========================================================
+#  AUTHENTIK AUTOMATION HELPERS
+# =========================================================
+function build_authentik_automation_payload() {
+    local action="$1" marker_present="no"
+    local host_browser=""
+    AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(env_value AUTHENTIK_BOOTSTRAP_TOKEN)"
+    AUTHENTIK_API_TOKEN_VALUE="$(env_value AUTHENTIK_API_TOKEN)"
+    AUTHENTIK_EXTERNAL_URL="$(env_value AUTHENTIK_EXTERNAL_URL)"
+    AUTHENTIK_ROUTE_HOST="$(env_value AUTHENTIK_ROUTE_HOST)"
+    DOMAIN_VALUE="$(env_value DOMAIN)"
+    host_browser="$(env_value AUTHENTIK_HOST_BROWSER)"
+    [ -n "$host_browser" ] || host_browser="$(env_value AUTHENTIK_HOST_BROWSER_VALUE)"
+    [ -n "$host_browser" ] || host_browser="$AUTHENTIK_EXTERNAL_URL"
+    root_path_exists "$SCRIPT63_MARKER" && marker_present="yes"
+
+    python3 -c 'import json, sys
+keys = [
+    "action", "bootstrap_token", "api_token", "external_url", "host_browser", "route_host", "domain", "marker_present"
+]
+values = sys.stdin.read().splitlines()
+while len(values) < len(keys):
+    values.append("")
+print(json.dumps(dict(zip(keys, values))))' <<PAYLOAD
+${action}
+${AUTHENTIK_BOOTSTRAP_TOKEN_VALUE}
+${AUTHENTIK_API_TOKEN_VALUE}
+${AUTHENTIK_EXTERNAL_URL}
+${host_browser}
+${AUTHENTIK_ROUTE_HOST}
+${DOMAIN_VALUE}
+${marker_present}
+PAYLOAD
+}
+
+function authentik_python_code() {
+cat <<'PYCODE'
+import json, sys, urllib.request, urllib.error, urllib.parse, time, re
+
+BASE_URL = "http://127.0.0.1:9000"
+PROVIDER_NAME = "Circl8 Traefik ForwardAuth"
+APPLICATION_NAME = "Circl8 Traefik ForwardAuth"
+APPLICATION_SLUG = "circl8-traefik-forwardauth"
+EMBEDDED_OUTPOST_NAME = "authentik Embedded Outpost"
+EMBEDDED_OUTPOST_MANAGED = "goauthentik.io/outposts/embedded"
+FORWARDAUTH_PATH = "/outpost.goauthentik.io/auth/traefik"
+
+payload = json.loads(sys.stdin.read() or "{}")
+selected_token = ""
+
+def sanitize(text):
+    text = str(text or "")
+    for key in ("bootstrap_token", "api_token"):
+        value = payload.get(key) or ""
+        if value:
+            text = text.replace(value, "[redacted]")
+    text = re.sub(r'(?i)(password|token|secret)[^\\n]{0,160}', '[redacted]', text)
+    return text[:800]
+
+def emit(key, value):
+    value = "" if value is None else str(value)
+    value = value.replace("\n", " ").replace("\r", " ")
+    print(f"{key}={value}")
+
+def fail(stage, message):
+    emit("RESULT", "failed")
+    emit("ERROR_STAGE", stage)
+    emit("ERROR_MESSAGE", sanitize(message))
+    sys.exit(2)
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = urllib.request.build_opener(NoRedirect)
+
+def raw_request(method, path, body=None, token=None, timeout=15, follow_redirect=False):
+    url = BASE_URL + path
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    handler = urllib.request.urlopen if follow_redirect else opener.open
+    try:
+        with handler(req, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", "replace")
+            code = getattr(response, "status", 200)
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8", "replace")
+        code = error.code
+    except Exception as error:
+        return 0, None, sanitize(error)
+    try:
+        parsed = json.loads(raw) if raw else None
+    except Exception:
+        parsed = None
+    return code, parsed, raw
+
+def api_request(method, path, body=None, expected=(200,), stage="api"):
+    code, parsed, raw = raw_request(method, path, body=body, token=selected_token)
+    if code not in expected:
+        fail(stage, f"{method} {path} returned HTTP {code}: {sanitize(raw)}")
+    return parsed
+
+def result_items(parsed):
+    if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
+        return parsed["results"]
+    if isinstance(parsed, list):
+        return parsed
+    return []
+
+def validate_token():
+    global selected_token
+    candidates = [("bootstrap", payload.get("bootstrap_token") or ""), ("api", payload.get("api_token") or "")]
+    for source, token in candidates:
+        if not token:
+            continue
+        code, parsed, raw = raw_request("GET", "/api/v3/core/users/me/", token=token)
+        if code == 200:
+            selected_token = token
+            emit("AUTHENTIK_API_ACCESS_STATUS", "valid")
+            emit("AUTHENTIK_API_TOKEN_SOURCE", source)
+            return
+    fail("api-token", "No provided Authentik API token returned HTTP 200 for /api/v3/core/users/me/.")
+
+def lookup_flow(slug, label):
+    query = urllib.parse.urlencode({"slug": slug})
+    parsed = api_request("GET", f"/api/v3/flows/instances/?{query}", stage="flow")
+    for item in result_items(parsed):
+        if item.get("slug") == slug and item.get("pk"):
+            emit(label, "found")
+            return item["pk"]
+    fail("flow", f"Required flow slug missing: {slug}")
+
+def options_fields(path):
+    code, parsed, raw = raw_request("OPTIONS", path, token=selected_token)
+    if code != 200 or not isinstance(parsed, dict):
+        return set()
+    actions = parsed.get("actions") or {}
+    post = actions.get("POST") or {}
+    if isinstance(post, dict):
+        return set(post.keys())
+    return set()
+
+def find_provider():
+    query = urllib.parse.urlencode({"search": PROVIDER_NAME})
+    parsed = api_request("GET", f"/api/v3/providers/proxy/?{query}", stage="provider")
+    for item in result_items(parsed):
+        if item.get("name") == PROVIDER_NAME:
+            return item
+    return None
+
+def find_application():
+    query = urllib.parse.urlencode({"slug": APPLICATION_SLUG})
+    parsed = api_request("GET", f"/api/v3/core/applications/?{query}", stage="application")
+    for item in result_items(parsed):
+        if item.get("slug") == APPLICATION_SLUG:
+            return item
+    return None
+
+def find_embedded_outpost():
+    parsed = api_request("GET", "/api/v3/outposts/instances/", stage="outpost")
+    for item in result_items(parsed):
+        if item.get("name") == EMBEDDED_OUTPOST_NAME and item.get("managed") == EMBEDDED_OUTPOST_MANAGED and item.get("type") == "proxy":
+            return item
+    fail("outpost", "Embedded Outpost was not found.")
+
+def provider_ids_from_outpost(outpost):
+    ids = []
+    for provider in outpost.get("providers") or []:
+        if isinstance(provider, dict):
+            pk = provider.get("pk")
+        else:
+            pk = provider
+        if pk and str(pk) not in ids:
+            ids.append(str(pk))
+    return ids
+
+def automation_mode(provider, application, outpost):
+    providers = provider_ids_from_outpost(outpost) if outpost else []
+    provider_pk = str(provider.get("pk")) if provider and provider.get("pk") else ""
+    if payload.get("marker_present") == "yes" or provider or application or (provider_pk and provider_pk in providers):
+        return "rerun-update"
+    return "fresh-automation"
+
+def inspect_state():
+    provider = find_provider()
+    application = find_application()
+    outpost = find_embedded_outpost()
+    mode = automation_mode(provider, application, outpost)
+    emit("SCRIPT63_AUTOMATION_MODE", mode)
+    if provider:
+        emit("AUTHENTIK_PROVIDER_STATUS", "configured")
+        emit("AUTHENTIK_PROVIDER_PK", provider.get("pk", ""))
+    else:
+        emit("AUTHENTIK_PROVIDER_STATUS", "not configured")
+    if application:
+        emit("AUTHENTIK_APPLICATION_STATUS", "configured")
+    else:
+        emit("AUTHENTIK_APPLICATION_STATUS", "not configured")
+    if outpost:
+        emit("AUTHENTIK_OUTPOST_STATUS", "detected")
+        emit("AUTHENTIK_OUTPOST_PK", outpost.get("pk", ""))
+        if provider and str(provider.get("pk")) in provider_ids_from_outpost(outpost):
+            emit("AUTHENTIK_OUTPOST_STATUS", "attached")
+    emit("FORWARD_AUTH_STATUS", "ready" if provider and application and outpost and str(provider.get("pk")) in provider_ids_from_outpost(outpost) else "not verified")
+
+def configure_provider(auth_flow, authz_flow, invalidation_flow):
+    fields = options_fields("/api/v3/providers/proxy/")
+    provider = find_provider()
+    body = {
+        "name": PROVIDER_NAME,
+        "mode": "forward_domain",
+        "external_host": payload.get("external_url") or "",
+        "authentication_flow": auth_flow,
+        "authorization_flow": authz_flow,
+        "invalidation_flow": invalidation_flow,
+        "basic_auth_enabled": False,
+        "skip_path_regex": "",
+    }
+    if "cookie_domain" in fields and payload.get("domain"):
+        body["cookie_domain"] = "." + payload["domain"].lstrip(".")
+    if provider and provider.get("pk"):
+        pk = provider["pk"]
+        api_request("PATCH", f"/api/v3/providers/proxy/{pk}/", body=body, expected=(200,), stage="provider")
+        emit("AUTHENTIK_PROVIDER_STATUS", "updated")
+        emit("AUTHENTIK_PROVIDER_PK", pk)
+        return str(pk)
+    parsed = api_request("POST", "/api/v3/providers/proxy/", body=body, expected=(200, 201), stage="provider")
+    pk = parsed.get("pk") if isinstance(parsed, dict) else ""
+    if not pk:
+        fail("provider", "Provider response did not include pk.")
+    emit("AUTHENTIK_PROVIDER_STATUS", "configured")
+    emit("AUTHENTIK_PROVIDER_PK", pk)
+    return str(pk)
+
+def configure_application(provider_pk):
+    application = find_application()
+    body = {
+        "name": APPLICATION_NAME,
+        "slug": APPLICATION_SLUG,
+        "provider": provider_pk,
+        "open_in_new_tab": False,
+        "meta_launch_url": "",
+    }
+    if application:
+        detail = f"/api/v3/core/applications/{APPLICATION_SLUG}/"
+        code, parsed, raw = raw_request("PATCH", detail, body=body, token=selected_token)
+        if code != 200 and application.get("pk"):
+            code, parsed, raw = raw_request("PATCH", f"/api/v3/core/applications/{application['pk']}/", body=body, token=selected_token)
+        if code != 200:
+            fail("application", f"PATCH application returned HTTP {code}: {sanitize(raw)}")
+        emit("AUTHENTIK_APPLICATION_STATUS", "updated")
+        emit("AUTHENTIK_APPLICATION_SLUG", APPLICATION_SLUG)
+        return
+    api_request("POST", "/api/v3/core/applications/", body=body, expected=(200, 201), stage="application")
+    emit("AUTHENTIK_APPLICATION_STATUS", "configured")
+    emit("AUTHENTIK_APPLICATION_SLUG", APPLICATION_SLUG)
+
+def configure_outpost(provider_pk):
+    outpost = find_embedded_outpost()
+    pk = outpost.get("pk")
+    if not pk:
+        fail("outpost", "Embedded Outpost response did not include pk.")
+    providers = provider_ids_from_outpost(outpost)
+    already = provider_pk in providers
+    if not already:
+        providers.append(provider_pk)
+    config = outpost.get("config") if isinstance(outpost.get("config"), dict) else {}
+    config = dict(config)
+    if payload.get("external_url"):
+        config["authentik_host"] = payload["external_url"]
+    if payload.get("host_browser"):
+        config["authentik_host_browser"] = payload["host_browser"]
+    body = {"providers": providers, "config": config}
+    api_request("PATCH", f"/api/v3/outposts/instances/{pk}/", body=body, expected=(200,), stage="outpost")
+    emit("AUTHENTIK_OUTPOST_STATUS", "attached")
+    emit("AUTHENTIK_OUTPOST_PK", pk)
+    return str(pk)
+
+def check_forwardauth_url(hostname="127.0.0.1"):
+    url = f"http://{hostname}:9000{FORWARDAUTH_PATH}"
+    code, parsed, raw = raw_request("GET", FORWARDAUTH_PATH if hostname == "127.0.0.1" else url.replace(BASE_URL, ""), token=None)
+    if hostname != "127.0.0.1":
+        # raw_request is base-url based, so use a direct request for alternate hostnames.
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with opener.open(req, timeout=5) as response:
+                code = getattr(response, "status", 200)
+        except urllib.error.HTTPError as error:
+            code = error.code
+        except Exception:
+            code = 0
+    return code in (200, 302, 401, 403), code
+
+def wait_for_outpost(provider_pk):
+    deadline = time.time() + 90
+    last_code = 0
+    while time.time() <= deadline:
+        outpost = find_embedded_outpost()
+        if provider_pk in provider_ids_from_outpost(outpost):
+            ok, code = check_forwardauth_url("127.0.0.1")
+            last_code = code
+            if ok:
+                emit("AUTHENTIK_OUTPOST_READY_STATUS", "ready")
+                emit("INTERNAL_FORWARD_AUTH_STATUS", "ready")
+                return
+        time.sleep(5)
+    fail("forwardauth", f"Embedded Outpost did not refresh before timeout. Last internal ForwardAuth HTTP status: {last_code}")
+
+def configure():
+    auth_flow = lookup_flow("default-authentication-flow", "AUTHENTIK_AUTHENTICATION_FLOW_STATUS")
+    authz_flow = lookup_flow("default-provider-authorization-implicit-consent", "AUTHENTIK_AUTHORIZATION_FLOW_STATUS")
+    invalidation_flow = lookup_flow("default-provider-invalidation-flow", "AUTHENTIK_INVALIDATION_FLOW_STATUS")
+    provider_pk = configure_provider(auth_flow, authz_flow, invalidation_flow)
+    emit("AUTHENTIK_PROVIDER_MODE", "forward_domain")
+    configure_application(provider_pk)
+    configure_outpost(provider_pk)
+    wait_for_outpost(provider_pk)
+    emit("FORWARD_AUTH_STATUS", "ready")
+
+def main():
+    validate_token()
+    if payload.get("action") == "inspect":
+        inspect_state()
+    elif payload.get("action") == "configure":
+        configure()
+    else:
+        fail("input", "Unknown Authentik automation action.")
+    emit("RESULT", "ok")
+
+main()
+PYCODE
+}
+
+function apply_automation_result_file() {
+    local file="$1" key="" value=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            SCRIPT63_AUTOMATION_MODE) SCRIPT63_AUTOMATION_MODE="$value" ;;
+            AUTHENTIK_API_ACCESS_STATUS) AUTHENTIK_API_ACCESS_STATUS="$value" ;;
+            AUTHENTIK_AUTHENTICATION_FLOW_STATUS) AUTHENTIK_AUTHENTICATION_FLOW_STATUS="$value" ;;
+            AUTHENTIK_AUTHORIZATION_FLOW_STATUS) AUTHENTIK_AUTHORIZATION_FLOW_STATUS="$value" ;;
+            AUTHENTIK_INVALIDATION_FLOW_STATUS) AUTHENTIK_INVALIDATION_FLOW_STATUS="$value" ;;
+            AUTHENTIK_PROVIDER_STATUS) AUTHENTIK_PROVIDER_STATUS="$value" ;;
+            AUTHENTIK_PROVIDER_PK) AUTHENTIK_PROVIDER_PK="$value" ;;
+            AUTHENTIK_PROVIDER_MODE) AUTHENTIK_PROVIDER_MODE="$value" ;;
+            AUTHENTIK_APPLICATION_STATUS) AUTHENTIK_APPLICATION_STATUS="$value" ;;
+            AUTHENTIK_APPLICATION_SLUG) AUTHENTIK_APPLICATION_SLUG="$value" ;;
+            AUTHENTIK_OUTPOST_STATUS) AUTHENTIK_OUTPOST_STATUS="$value" ;;
+            AUTHENTIK_OUTPOST_PK) AUTHENTIK_OUTPOST_PK="$value" ;;
+            FORWARD_AUTH_STATUS) FORWARD_AUTH_STATUS="$value" ;;
+            INTERNAL_FORWARD_AUTH_STATUS) INTERNAL_FORWARD_AUTH_STATUS="$value" ;;
+            ERROR_STAGE) AUTHENTIK_AUTOMATION_ERROR_STAGE="$value" ;;
+            ERROR_MESSAGE) AUTHENTIK_AUTOMATION_ERROR_MESSAGE="$value" ;;
+        esac
+    done < "$file"
+}
+
+function automation_failure_message() {
+    case "${AUTHENTIK_AUTOMATION_ERROR_STAGE:-unknown}" in
+        api-token) printf 'Authentik API token validation failed.' ;;
+        flow) printf 'Required Authentik flow was not found.' ;;
+        provider) printf 'Authentik ForwardAuth provider configuration failed.' ;;
+        application) printf 'Authentik application configuration failed.' ;;
+        outpost) printf 'Embedded Outpost attachment failed.' ;;
+        forwardauth) printf 'ForwardAuth endpoint returned an infrastructure failure.' ;;
+        *) printf 'Authentik automation failed.' ;;
+    esac
+}
+
+function run_authentik_python_action() {
+    local action="$1" py_code="" payload="" out_file="" err_file=""
+    init_deploy_output_log
+    py_code="$(authentik_python_code)"
+    payload="$(build_authentik_automation_payload "$action")"
+    out_file="$(mktemp /tmp/circl8-authentik-api-out.XXXXXX)"
+    err_file="$(mktemp /tmp/circl8-authentik-api-err.XXXXXX)"
+    if printf '%s' "$payload" | docker_cmd exec -i authentik-server python -c "$py_code" >"$out_file" 2>"$err_file"; then
+        apply_automation_result_file "$out_file"
+        rm -f "$out_file" "$err_file"
+        return 0
+    fi
+    apply_automation_result_file "$out_file" || true
+    append_deploy_log "Authentik automation stderr, sanitized:"
+    append_file_to_deploy_log_sanitized "$err_file"
+    append_deploy_log "Authentik automation result, sanitized:"
+    append_file_to_deploy_log_sanitized "$out_file"
+    rm -f "$out_file" "$err_file"
+    return 1
+}
+
+function inspect_existing_authentik_deployment() {
+    local pg_health="" server_state="" worker_state=""
+    pg_health="$(docker_inspect_value '{{.State.Health.Status}}' authentik-postgresql)"
+    [ "$pg_health" == "healthy" ] && AUTHENTIK_POSTGRES_STATUS="healthy" || AUTHENTIK_POSTGRES_STATUS="unknown"
+    server_state="$(docker_inspect_value '{{.State.Running}} {{.State.Restarting}}' authentik-server)"
+    if [ "${server_state%% *}" == "true" ] && [ "${server_state##* }" == "false" ]; then AUTHENTIK_SERVER_STATUS="running"; else AUTHENTIK_SERVER_STATUS="unknown"; fi
+    worker_state="$(docker_inspect_value '{{.State.Running}} {{.State.Restarting}}' authentik-worker)"
+    if [ "${worker_state%% *}" == "true" ] && [ "${worker_state##* }" == "false" ]; then AUTHENTIK_WORKER_STATUS="running"; else AUTHENTIK_WORKER_STATUS="unknown"; fi
+    if authentik_internal_api_check_once; then AUTHENTIK_INTERNAL_API_STATUS="ready"; else AUTHENTIK_INTERNAL_API_STATUS="unknown"; fi
+    if [ "$AUTHENTIK_POSTGRES_STATUS" == "healthy" ] && [ "$AUTHENTIK_SERVER_STATUS" == "running" ] && [ "$AUTHENTIK_WORKER_STATUS" == "running" ] && [ "$AUTHENTIK_INTERNAL_API_STATUS" == "ready" ]; then
+        AUTHENTIK_DEPLOYMENT_STATUS="completed"
+        SCRIPT63_DEPLOYMENT_STATUS="completed"
+        SCRIPT63_READY_FOR_AUTOMATION_LANE="yes"
+        return 0
+    fi
+    SCRIPT63_READY_FOR_AUTOMATION_LANE="no"
+    return 1
+}
+
+function inspect_authentik_automation_preflight() {
+    inspect_existing_authentik_deployment || fail_with_failure_log "Authentik deployment readiness is required before automation."
+    if run_authentik_python_action inspect; then
+        AUTHENTIK_API_ACCESS_STATUS="valid"
+        return 0
+    fi
+    fail_with_failure_log "$(automation_failure_message)"
+}
+
+function show_automation_preflight() {
+    section "AUTHENTIK AUTOMATION PREFLIGHT"
+    aligned_status_line "Deployment" "detected"
+    aligned_status_line "Automation mode" "$SCRIPT63_AUTOMATION_MODE" "$(rerun_ui_color "$SCRIPT63_AUTOMATION_MODE")"
+    aligned_status_line "PostgreSQL" "$AUTHENTIK_POSTGRES_STATUS" "$(status_color_for_value "$AUTHENTIK_POSTGRES_STATUS")"
+    aligned_status_line "Server" "$AUTHENTIK_SERVER_STATUS" "$(status_color_for_value "$AUTHENTIK_SERVER_STATUS")"
+    aligned_status_line "Worker" "$AUTHENTIK_WORKER_STATUS" "$(status_color_for_value "$AUTHENTIK_WORKER_STATUS")"
+    aligned_status_line "Internal API" "$AUTHENTIK_INTERNAL_API_STATUS" "$(status_color_for_value "$AUTHENTIK_INTERNAL_API_STATUS")"
+    aligned_status_line "API token" "ready"
+    aligned_status_line "Provider" "$AUTHENTIK_PROVIDER_STATUS" "$(rerun_ui_color "$AUTHENTIK_PROVIDER_STATUS")"
+    aligned_status_line "Application" "$AUTHENTIK_APPLICATION_STATUS" "$(rerun_ui_color "$AUTHENTIK_APPLICATION_STATUS")"
+    aligned_status_line "Embedded Outpost" "$AUTHENTIK_OUTPOST_STATUS" "$(rerun_ui_color "$AUTHENTIK_OUTPOST_STATUS")"
+    aligned_status_line "ForwardAuth" "$FORWARD_AUTH_STATUS" "$(status_color_for_value "$FORWARD_AUTH_STATUS")"
+}
+
+function configure_authentik_forwardauth() {
+    section "CONFIGURE AUTHENTIK"
+
+    progress_line "Configuring Authentik ForwardAuth"
+    if ! run_authentik_python_action configure; then
+        clear_progress_line
+        case "${AUTHENTIK_AUTOMATION_ERROR_STAGE:-unknown}" in
+            api-token)
+                mini_header "API access"
+                deploy_status_line "API token" "failed" "$RD"
+                ;;
+            flow)
+                mini_header "API access"
+                deploy_status_line "API token" "valid" "$GN"
+                mini_header "Flow lookup"
+                [ "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS" != "not-run" ] && deploy_status_line "Authentication flow" "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS" "$(status_color_for_value "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS")"
+                [ "$AUTHENTIK_AUTHORIZATION_FLOW_STATUS" != "not-run" ] && deploy_status_line "Authorization flow" "$AUTHENTIK_AUTHORIZATION_FLOW_STATUS" "$(status_color_for_value "$AUTHENTIK_AUTHORIZATION_FLOW_STATUS")"
+                [ "$AUTHENTIK_INVALIDATION_FLOW_STATUS" != "not-run" ] && deploy_status_line "Invalidation flow" "$AUTHENTIK_INVALIDATION_FLOW_STATUS" "$(status_color_for_value "$AUTHENTIK_INVALIDATION_FLOW_STATUS")"
+                ;;
+            provider)
+                mini_header "ForwardAuth provider"
+                deploy_status_line "Provider" "failed" "$RD"
+                ;;
+            application)
+                mini_header "Application"
+                deploy_status_line "Application" "failed" "$RD"
+                ;;
+            outpost|forwardauth)
+                mini_header "Embedded Outpost"
+                deploy_status_line "Embedded Outpost" "failed" "$RD"
+                ;;
+            *)
+                mini_header "API access"
+                deploy_status_line "API token" "failed" "$RD"
+                ;;
+        esac
+        fail_with_failure_log "$(automation_failure_message)"
+    fi
+    clear_progress_line
+
+    mini_header "API access"
+    deploy_status_line "API token" "valid" "$GN"
+
+    mini_header "Flow lookup"
+    deploy_status_line "Authentication flow" "$AUTHENTIK_AUTHENTICATION_FLOW_STATUS" "$GN"
+    deploy_status_line "Authorization flow" "$AUTHENTIK_AUTHORIZATION_FLOW_STATUS" "$GN"
+    deploy_status_line "Invalidation flow" "$AUTHENTIK_INVALIDATION_FLOW_STATUS" "$GN"
+
+    mini_header "ForwardAuth provider"
+    deploy_status_line "Provider" "$AUTHENTIK_PROVIDER_STATUS" "$GN"
+
+    mini_header "Application"
+    deploy_status_line "Application" "$AUTHENTIK_APPLICATION_STATUS" "$GN"
+
+    mini_header "Embedded Outpost"
+    progress_line "Waiting for Embedded Outpost refresh"
+    clear_progress_line
+    deploy_status_line "Embedded Outpost" "$AUTHENTIK_OUTPOST_STATUS" "$GN"
+    deploy_status_line "Embedded Outpost" "ready" "$GN"
+}
+
+function forwardauth_endpoint_check_once() {
+    local host="$1" py_code="" url="http://${host}:9000/outpost.goauthentik.io/auth/traefik"
+    py_code='import sys, urllib.request, urllib.error
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+opener=urllib.request.build_opener(NoRedirect)
+try:
+    response=opener.open(urllib.request.Request(sys.argv[1], method="GET"), timeout=5)
+    code=getattr(response, "status", 200)
+except urllib.error.HTTPError as error:
+    code=error.code
+except Exception:
+    code=0
+sys.exit(0 if code in (200, 302, 401, 403) else 1)'
+    docker_cmd exec authentik-server python -c "$py_code" "$url" >/dev/null 2>&1
+}
+
+function verify_traefik_logs_for_forwardauth() {
+    local log_file=""
+    log_file="$(mktemp /tmp/circl8-traefik-authentik-logs.XXXXXX)"
+    docker_cmd logs --since 2m traefik >"$log_file" 2>&1 || true
+    if grep -Eiq 'authentik-server.*(no such host|server misbehaving|connection refused)|forwardAuth.*(500|error)|middleware.*authentik.*error' "$log_file"; then
+        append_deploy_log "Recent Traefik ForwardAuth errors:"
+        append_file_to_deploy_log_sanitized "$log_file"
+        rm -f "$log_file"
+        TRAEFIK_FORWARD_AUTH_ERRORS="detected"
+        TRAEFIK_RESOLUTION_STATUS="failed"
+        return 1
+    fi
+    rm -f "$log_file"
+    TRAEFIK_FORWARD_AUTH_ERRORS="none"
+    TRAEFIK_RESOLUTION_STATUS="ready"
+    return 0
+}
+
+function verify_forwardauth() {
+    section "VERIFY FORWARDAUTH"
+
+    mini_header "ForwardAuth"
+    if [ "$INTERNAL_FORWARD_AUTH_STATUS" != "ready" ]; then
+        if forwardauth_endpoint_check_once "127.0.0.1"; then
+            INTERNAL_FORWARD_AUTH_STATUS="ready"
+        else
+            INTERNAL_FORWARD_AUTH_STATUS="failed"
+            deploy_status_line "Internal ForwardAuth" "failed" "$RD"
+            fail_with_failure_log "ForwardAuth endpoint returned an infrastructure failure."
+        fi
+    fi
+    deploy_status_line "Internal ForwardAuth" "$INTERNAL_FORWARD_AUTH_STATUS" "$GN"
+
+    if forwardauth_endpoint_check_once "authentik-server"; then
+        TRAEFIK_FORWARD_AUTH_STATUS="ready"
+    else
+        TRAEFIK_FORWARD_AUTH_STATUS="failed"
+        deploy_status_line "Traefik endpoint" "failed" "$RD"
+        fail_with_failure_log "Traefik-facing ForwardAuth endpoint returned an infrastructure failure."
+    fi
+    deploy_status_line "Traefik endpoint" "$TRAEFIK_FORWARD_AUTH_STATUS" "$GN"
+
+    if [ "$TRAEFIK_AUTHENTIK_REFERENCES" == "ready" ]; then
+        deploy_status_line "Traefik middleware" "present" "$GN"
+    else
+        deploy_status_line "Traefik middleware" "missing" "$RD"
+        fail_with_failure_log "Traefik Authentik middleware references are missing."
+    fi
+
+    if verify_traefik_logs_for_forwardauth; then
+        deploy_status_line "Traefik resolution" "$TRAEFIK_RESOLUTION_STATUS" "$GN"
+    else
+        deploy_status_line "Traefik resolution" "failed" "$RD"
+        fail_with_failure_log "Traefik reported ForwardAuth infrastructure errors."
+    fi
+    FORWARD_AUTH_STATUS="ready"
+}
+
 function show_verification_marker_scaffold() {
     section "VERIFICATION / MARKER"
+    SCRIPT63_STATUS="completed"
+    SCRIPT63_VERIFY_STATUS="PASS"
+    SCRIPT63_DEPLOYMENT_STATUS="completed"
+    SCRIPT63_READY_FOR_SCRIPT64="yes"
+    write_completion_marker
     write_verify_report
-    deploy_status_line "Deploy report" "created" "$GN"
-    deploy_status_line "Completion marker" "not written" "$GN"
+    deploy_status_line "Verification report" "created" "$GN"
+    deploy_status_line "Completion marker" "written" "$GN"
 }
 
 function show_deploy_finished() {
-    section_flash_success "AUTHENTIK DEPLOY COMPLETE"
+    section_flash_success "FINISHED"
 
     mini_header "Authentik"
-    final_line "Status" "deployed"
+    final_line "Status" "completed"
+    final_line "Deployment" "$AUTHENTIK_DEPLOYMENT_STATUS" "$(status_color_for_value "$AUTHENTIK_DEPLOYMENT_STATUS")"
     final_line "PostgreSQL" "$AUTHENTIK_POSTGRES_STATUS" "$(status_color_for_value "$AUTHENTIK_POSTGRES_STATUS")"
     final_line "Server" "$AUTHENTIK_SERVER_STATUS" "$(status_color_for_value "$AUTHENTIK_SERVER_STATUS")"
     final_line "Worker" "$AUTHENTIK_WORKER_STATUS" "$(status_color_for_value "$AUTHENTIK_WORKER_STATUS")"
     final_line "Internal API" "$AUTHENTIK_INTERNAL_API_STATUS" "$(status_color_for_value "$AUTHENTIK_INTERNAL_API_STATUS")"
-    final_line "ForwardAuth automation" "pending-lane-5" "$YW"
-    final_line "Completion marker" "not written"
+    final_line "Provider" "$AUTHENTIK_PROVIDER_STATUS" "$(status_color_for_value "$AUTHENTIK_PROVIDER_STATUS")"
+    final_line "Application" "$AUTHENTIK_APPLICATION_STATUS" "$(status_color_for_value "$AUTHENTIK_APPLICATION_STATUS")"
+    final_line "Embedded Outpost" "$AUTHENTIK_OUTPOST_STATUS" "$(status_color_for_value "$AUTHENTIK_OUTPOST_STATUS")"
+    final_line "ForwardAuth" "$FORWARD_AUTH_STATUS" "$(status_color_for_value "$FORWARD_AUTH_STATUS")"
+    final_line "Completion marker" "written"
 
     mini_header "Verification"
     final_line "Status" "$SCRIPT63_VERIFY_STATUS"
     final_line "Verify log" "$VERIFY_LOG" "$BL"
 
     mini_header "Next Step"
-    echo -e "${GN}Continue with Authentik automation: provider, application, Embedded Outpost, and ForwardAuth.${CL}"
+    echo -e "${GN}Run Script 6.4.${CL}"
 }
 
 function main() {
@@ -1895,9 +2553,12 @@ function main() {
     show_authentik_preflight
     show_authentik_prep_plan
     validate_prep_ready_for_deploy
+    inspect_authentik_automation_preflight
+    show_automation_preflight
     show_setup_plan
     confirm_or_exit
-    run_authentik_deploy
+    configure_authentik_forwardauth
+    verify_forwardauth
     show_verification_marker_scaffold
     show_deploy_finished
 }
