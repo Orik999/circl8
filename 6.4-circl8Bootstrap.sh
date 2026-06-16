@@ -5,10 +5,12 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 #  Project Circl8 - Script 6.4 Circl8 Template Preflight
 # =========================================================
-# Phase 2 v1.0.1 creates the Circl8 app template/preflight foundation only.
+# Phase 3 v1.1.3 keeps the Circl8 template/preflight foundation and fixes
+# the main run-mode flow before the first confirmed core deployment lane.
 # It prepares .env keys, appdata folders, downloaded/rendered templates,
-# compose file placement, static safety checks and compose config validation.
-# It does not start, stop, pull, prune, or otherwise mutate containers/images.
+# compose file placement, static safety checks and compose config validation
+# before any container start. The deploy lane starts only the Circl8 core
+# project after explicit confirmation or the explicit --deploy run mode.
 
 YW="$(printf '\033[33m')"
 BL="$(printf '\033[36m')"
@@ -25,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.4-circl8Bootstrap.sh"
-SCRIPT_VERSION="v1.0.1"
+SCRIPT_VERSION="v1.1.5"
 SCRIPT_UPDATED="2026-06-16"
-SCRIPT_BUILD="circl8-template-preflight-network-fix"
+SCRIPT_BUILD="circl8-core-temporal-address-fix"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -35,6 +37,9 @@ UI_LABEL_WIDTH="34"
 LOG_FILE="/var/log/circl8-app-bootstrap.log"
 VERIFY_LOG="/var/log/circl8-app-verify.log"
 COMPLETED_MARKER="/root/.circl8-app-template-preflight-completed"
+DEPLOYED_MARKER="/root/.circl8-app-completed"
+FAILURE_LOG=""
+DEPLOY_OUTPUT_LOG=""
 SCRIPT6_MARKER="/root/.docker-env-setup-completed"
 SCRIPT63_MARKER="/root/.circl8-authentik-completed"
 
@@ -44,6 +49,7 @@ RUNTIME_LOG_FILE=""
 SCRIPT_DIR=""
 TEMP_FILES=()
 TEMP_DIRS=()
+SCRIPT64_RUN_MODE="prompt"
 
 RAW_BASE_DEFAULT="https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main"
 CIRCL8_COMPOSE_TEMPLATE_URL="${CIRCL8_COMPOSE_TEMPLATE_URL:-${RAW_BASE_DEFAULT}/docker/06-circl8-compose.yml}"
@@ -90,6 +96,15 @@ SCRIPT64_CIRCL8_COMPOSE_CONFIG="not-run"
 SCRIPT64_CIRCL8_STATIC_SAFETY="not-run"
 SCRIPT64_NETWORK_T2_PROXY="unknown"
 SCRIPT64_NETWORK_DATABASE="unknown"
+SCRIPT64_TEMPLATE_PREFLIGHT_MARKER_WRITTEN="no"
+SCRIPT64_DEPLOYMENT_MARKER_WRITTEN="no"
+SCRIPT64_CIRCL8_POSTGRES="not-run"
+SCRIPT64_CIRCL8_REDIS="not-run"
+SCRIPT64_CIRCL8_TEMPORAL="not-run"
+SCRIPT64_CIRCL8_APP="not-run"
+SCRIPT64_CIRCL8_INTERNAL_HTTP="not-run"
+SCRIPT64_CIRCL8_ROUTE="not-run"
+SCRIPT64_READY_FOR_AUTHENTIK_LANE="no"
 SCRIPT64_READY_FOR_DEPLOYMENT_LANE="no"
 SCRIPT64_READY_FOR_SCRIPT65="no"
 
@@ -126,8 +141,8 @@ function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        PASS|pass|completed|present|ready|yes|valid|downloaded|rendered|synced|created|preserved|not-needed|not\ needed|template-preflight-completed|not-run|not\ run) printf '%s' "$GN" ;;
-        PENDING|pending|unknown|skipped|will-create|will\ create|not-selected|not\ selected) printf '%s' "$YW" ;;
+        PASS|pass|completed|present|ready|yes|valid|downloaded|rendered|synced|created|preserved|healthy|running|protected|not-needed|not\ needed|template-preflight-completed|not-run|not\ run) printf '%s' "$GN" ;;
+        PENDING|pending|unknown|skipped|needs-review|will-create|will\ create|not-selected|not\ selected) printf '%s' "$YW" ;;
         FAIL|FAILED|failed|missing|no|invalid|blocked|unsafe) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
     esac
@@ -139,6 +154,7 @@ function ui_display_value() {
         not-run) printf 'not run' ;;
         not-needed) printf 'not needed' ;;
         template-preflight-completed) printf 'template preflight completed' ;;
+        needs-review) printf 'needs review' ;;
         *) printf '%s' "$value" ;;
     esac
 }
@@ -279,6 +295,221 @@ function download_file() {
     if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" -o "$dest"; else wget -qO "$dest" "$url"; fi
 }
 
+function usage() {
+    printf '%s
+' "Usage: sudo ./6.4-circl8Bootstrap.sh [--preflight-only|--deploy]"
+}
+
+function parse_args() {
+    local arg=""
+    SCRIPT64_RUN_MODE="prompt"
+
+    if [ "$#" -gt 1 ]; then
+        usage >&2
+        exit 2
+    fi
+
+    for arg in "$@"; do
+        case "$arg" in
+            --preflight-only)
+                SCRIPT64_RUN_MODE="preflight-only"
+                ;;
+            --deploy)
+                SCRIPT64_RUN_MODE="deploy"
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+}
+
+function read_yes_no() {
+    local prompt="$1" default="${2:-n}" answer="" label="y/N"
+    [[ "$default" =~ ^[Yy]$ ]] && label="Y/n"
+
+    if [ ! -r /dev/tty ]; then
+        return 2
+    fi
+
+    read -r -p "${prompt} [${label}]: " answer < /dev/tty || answer=""
+    [ -n "$answer" ] || answer="$default"
+    [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+function init_deploy_output_log() {
+    if [ -z "${DEPLOY_OUTPUT_LOG:-}" ]; then
+        DEPLOY_OUTPUT_LOG="$(mktemp /tmp/circl8-app-deploy.XXXXXX)"
+        TEMP_FILES+=("$DEPLOY_OUTPUT_LOG")
+    fi
+    : > "$DEPLOY_OUTPUT_LOG"
+}
+
+function sanitize_diagnostic_stream() {
+    sed -E '/(PASSWORD|PASSWD|SECRET|TOKEN|DATABASE_URL|REDIS_URL|JWT|NEXTAUTH|POSTGRES_PWD|COOKIE|AUTHORIZATION|BEARER)/Id'
+}
+
+function container_state() {
+    local name="$1"
+    docker_cmd inspect -f '{{.State.Status}}' "$name" 2>/dev/null || printf 'missing'
+}
+
+function container_health() {
+    local name="$1"
+    docker_cmd inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$name" 2>/dev/null || printf 'missing'
+}
+
+function wait_for_container_status() {
+    local name="$1" mode="$2" timeout_seconds="${3:-240}" elapsed="0" state="" health=""
+    while [ "$elapsed" -le "$timeout_seconds" ]; do
+        state="$(container_state "$name")"
+        health="$(container_health "$name")"
+        case "$mode" in
+            healthy)
+                [ "$health" = "healthy" ] && return 0
+                ;;
+            healthy-or-running)
+                { [ "$health" = "healthy" ] || { [ "$health" = "none" ] && [ "$state" = "running" ]; } || [ "$state" = "running" ]; } && return 0
+                ;;
+            running)
+                [ "$state" = "running" ] && return 0
+                ;;
+        esac
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    return 1
+}
+
+function wait_for_temporal_api() {
+    local timeout_seconds="${1:-240}" elapsed="0" address=""
+    local temporal_addresses=(
+        "circl8-temporal:7233"
+        "localhost:7233"
+        "127.0.0.1:7233"
+    )
+
+    while [ "$elapsed" -le "$timeout_seconds" ]; do
+        for address in "${temporal_addresses[@]}"; do
+            if docker_cmd exec circl8-temporal temporal operator cluster health --address "$address" >/dev/null 2>&1; then
+                return 0
+            fi
+        done
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    return 1
+}
+
+function wait_for_circl8_internal_http() {
+    local timeout_seconds="${1:-240}" elapsed="0"
+    while [ "$elapsed" -le "$timeout_seconds" ]; do
+        if docker_cmd exec circl8 node -e 'const http=require("http"); const r=http.get("http://127.0.0.1:5000/", res => process.exit(res.statusCode < 500 ? 0 : 1)); r.on("error", () => process.exit(1)); r.setTimeout(5000, () => { r.destroy(); process.exit(1); });' >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    return 1
+}
+
+function traefik_container_name() {
+    local name=""
+    for name in traefik circl8-traefik; do
+        if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$name"; then
+            printf '%s' "$name"
+            return 0
+        fi
+    done
+    docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -E '(^|[-_])traefik($|[-_])' | head -n1 || true
+}
+
+function check_circl8_traefik_labels() {
+    local labels=""
+    labels="$(docker_cmd inspect circl8 --format '{{json .Config.Labels}}' 2>/dev/null || true)"
+    printf '%s\n' "$labels" | grep -q 'app.circl8.co.uk' || return 1
+    printf '%s\n' "$labels" | grep -q 'chain-authentik@file' || return 1
+    printf '%s\n' "$labels" | grep -q 'loadbalancer.server.port' || return 1
+    return 0
+}
+
+function check_traefik_infra_errors() {
+    local traefik_name="" recent=""
+    traefik_name="$(traefik_container_name)"
+    [ -n "$traefik_name" ] || return 1
+    recent="$(docker_cmd logs --since 10m "$traefik_name" 2>&1 | sanitize_diagnostic_stream | grep -Ei 'circl8|app\.circl8|chain-authentik|middleware|router|service' || true)"
+    if printf '%s\n' "$recent" | grep -Eiq 'error|unable|not found|does not exist|cannot|failed'; then
+        return 1
+    fi
+    return 0
+}
+
+function verify_public_route_behavior() {
+    local headers="" status_line="" location_line=""
+    check_circl8_traefik_labels || return 2
+    if command -v curl >/dev/null 2>&1; then
+        headers="$(curl -kIsS --max-time 12 "https://${CIRCL8_HOST}" 2>/dev/null || true)"
+        status_line="$(printf '%s\n' "$headers" | awk 'tolower($0) ~ /^http\// {line=$0} END {print line}')"
+        location_line="$(printf '%s\n' "$headers" | awk 'tolower($0) ~ /^location:/ {print; exit}')"
+        if printf '%s\n%s\n' "$status_line" "$location_line" | grep -Eiq 'HTTP/.*30[1278].*(|$)|authentik|outpost\.goauthentik|authorize|login'; then
+            if printf '%s\n' "$location_line" | grep -Eiq 'authentik|outpost\.goauthentik|authorize|login'; then
+                return 0
+            fi
+        fi
+        if printf '%s\n' "$status_line" | grep -Eq 'HTTP/.* (401|403)'; then
+            return 0
+        fi
+        if [ -n "$status_line" ]; then
+            return 3
+        fi
+    fi
+    return 1
+}
+
+function write_deployment_failure_log() {
+    local reason="${1:-Circl8 deployment failed}" service="" traefik_name="" ts=""
+    ts="$(date +%Y%m%d-%H%M%S)"
+    FAILURE_LOG="/var/log/circl8-app-deploy-failed-${ts}.log"
+    {
+        printf '%s\n' "$reason"
+        printf '%s\n' ""
+        printf '%s\n' "Compose output:"
+        [ -n "${DEPLOY_OUTPUT_LOG:-}" ] && [ -s "$DEPLOY_OUTPUT_LOG" ] && sanitize_diagnostic_stream < "$DEPLOY_OUTPUT_LOG" || true
+        printf '%s\n' ""
+        printf '%s\n' "Circl8 containers:"
+        docker_cmd ps -a --filter "name=circl8" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null | sanitize_diagnostic_stream || true
+        for service in circl8-postgres circl8-redis circl8-temporal circl8; do
+            printf '%s\n' ""
+            printf '%s\n' "Logs: ${service}"
+            docker_cmd logs --tail=160 "$service" 2>&1 | sanitize_diagnostic_stream || true
+        done
+        traefik_name="$(traefik_container_name)"
+        if [ -n "$traefik_name" ]; then
+            printf '%s\n' ""
+            printf '%s\n' "Traefik recent Circl8-related lines:"
+            docker_cmd logs --since 10m "$traefik_name" 2>&1 | sanitize_diagnostic_stream | grep -Ei 'circl8|app\.circl8|chain-authentik|middleware|router|service|error|failed|unable' || true
+        fi
+    } | write_root_file "$FAILURE_LOG"
+}
+
+function fail_deployment() {
+    local message="$1"
+    echo -ne "${BFR}"
+    SCRIPT64_STATUS="deploy-failed"
+    SCRIPT64_VERIFY_STATUS="FAILED"
+    SCRIPT64_DEPLOYMENT="failed"
+    SCRIPT64_DEPLOYMENT_MARKER_WRITTEN="no"
+    SCRIPT64_READY_FOR_AUTHENTIK_LANE="no"
+    SCRIPT64_READY_FOR_SCRIPT65="no"
+    write_deployment_failure_log "$message" || true
+    fail_with_report "$message"
+}
+
 # =========================================================
 #  VALUE / MARKER / ENV HELPERS
 # =========================================================
@@ -359,68 +590,141 @@ function load_docker_project_context() {
 # =========================================================
 function write_verify_report() {
     {
-        printf '%s\n' "SCRIPT64_STATUS=${SCRIPT64_STATUS}"
-        printf '%s\n' "SCRIPT64_VERSION=${SCRIPT_VERSION}"
-        printf '%s\n' "SCRIPT64_BUILD=${SCRIPT_BUILD}"
-        printf '%s\n' "SCRIPT64_VERIFY_STATUS=${SCRIPT64_VERIFY_STATUS}"
-        printf '%s\n' "SCRIPT64_DEPLOYMENT=${SCRIPT64_DEPLOYMENT}"
-        printf '%s\n' "SCRIPT64_MARKER_WRITTEN=${SCRIPT64_MARKER_WRITTEN}"
-        printf '%s\n' "SCRIPT64_SCRIPT63_GATE=${SCRIPT64_SCRIPT63_GATE}"
-        printf '%s\n' "SCRIPT64_NETWORK_T2_PROXY=${SCRIPT64_NETWORK_T2_PROXY}"
-        printf '%s\n' "SCRIPT64_NETWORK_DATABASE=${SCRIPT64_NETWORK_DATABASE}"
-        printf '%s\n' "SCRIPT64_ENV_BACKUP=${SCRIPT64_ENV_BACKUP}"
-        printf '%s\n' "SCRIPT64_ENV_KEYS_ADDED=${SCRIPT64_ENV_KEYS_ADDED}"
-        printf '%s\n' "SCRIPT64_CIRCL8_COMPOSE_TEMPLATE=${SCRIPT64_CIRCL8_COMPOSE_TEMPLATE}"
-        printf '%s\n' "SCRIPT64_CIRCL8_POSTGRES_INIT_TEMPLATE=${SCRIPT64_CIRCL8_POSTGRES_INIT_TEMPLATE}"
-        printf '%s\n' "SCRIPT64_CIRCL8_TEMPORAL_CONFIG_TEMPLATE=${SCRIPT64_CIRCL8_TEMPORAL_CONFIG_TEMPLATE}"
-        printf '%s\n' "SCRIPT64_CIRCL8_COMPOSE_CONFIG=${SCRIPT64_CIRCL8_COMPOSE_CONFIG}"
-        printf '%s\n' "SCRIPT64_CIRCL8_STATIC_SAFETY=${SCRIPT64_CIRCL8_STATIC_SAFETY}"
-        printf '%s\n' "SCRIPT64_READY_FOR_DEPLOYMENT_LANE=${SCRIPT64_READY_FOR_DEPLOYMENT_LANE}"
-        printf '%s\n' "SCRIPT64_READY_FOR_SCRIPT65=${SCRIPT64_READY_FOR_SCRIPT65}"
-        printf '%s\n' "SCRIPT64_DOCKER_DIR=${DOCKER_DIR}"
-        printf '%s\n' "SCRIPT64_COMPOSE_FILE=${CIRCL8_COMPOSE_FILE}"
-        printf '%s\n' "SCRIPT64_DOCKGE_COMPOSE_FILE=${CIRCL8_DOCKGE_COMPOSE_FILE}"
-        printf '%s\n' "SCRIPT64_POSTGRES_INIT_FILE=${CIRCL8_POSTGRES_INIT_FILE}"
-        printf '%s\n' "SCRIPT64_TEMPORAL_DYNAMIC_CONFIG_FILE=${CIRCL8_TEMPORAL_DYNAMIC_CONFIG_FILE}"
-        printf '%s\n' "SCRIPT64_COMPLETION_MARKER_PATH=${COMPLETED_MARKER}"
+        printf '%s
+' "SCRIPT64_STATUS=${SCRIPT64_STATUS}"
+        printf '%s
+' "SCRIPT64_VERSION=${SCRIPT_VERSION}"
+        printf '%s
+' "SCRIPT64_BUILD=${SCRIPT_BUILD}"
+        printf '%s
+' "SCRIPT64_VERIFY_STATUS=${SCRIPT64_VERIFY_STATUS}"
+        printf '%s
+' "SCRIPT64_DEPLOYMENT=${SCRIPT64_DEPLOYMENT}"
+        printf '%s
+' "SCRIPT64_MARKER_WRITTEN=${SCRIPT64_MARKER_WRITTEN}"
+        printf '%s
+' "SCRIPT64_TEMPLATE_PREFLIGHT_MARKER_WRITTEN=${SCRIPT64_TEMPLATE_PREFLIGHT_MARKER_WRITTEN}"
+        printf '%s
+' "SCRIPT64_DEPLOYMENT_MARKER_WRITTEN=${SCRIPT64_DEPLOYMENT_MARKER_WRITTEN}"
+        printf '%s
+' "SCRIPT64_SCRIPT63_GATE=${SCRIPT64_SCRIPT63_GATE}"
+        printf '%s
+' "SCRIPT64_NETWORK_T2_PROXY=${SCRIPT64_NETWORK_T2_PROXY}"
+        printf '%s
+' "SCRIPT64_NETWORK_DATABASE=${SCRIPT64_NETWORK_DATABASE}"
+        printf '%s
+' "SCRIPT64_ENV_BACKUP=${SCRIPT64_ENV_BACKUP}"
+        printf '%s
+' "SCRIPT64_ENV_KEYS_ADDED=${SCRIPT64_ENV_KEYS_ADDED}"
+        printf '%s
+' "SCRIPT64_CIRCL8_COMPOSE_TEMPLATE=${SCRIPT64_CIRCL8_COMPOSE_TEMPLATE}"
+        printf '%s
+' "SCRIPT64_CIRCL8_POSTGRES_INIT_TEMPLATE=${SCRIPT64_CIRCL8_POSTGRES_INIT_TEMPLATE}"
+        printf '%s
+' "SCRIPT64_CIRCL8_TEMPORAL_CONFIG_TEMPLATE=${SCRIPT64_CIRCL8_TEMPORAL_CONFIG_TEMPLATE}"
+        printf '%s
+' "SCRIPT64_CIRCL8_COMPOSE_CONFIG=${SCRIPT64_CIRCL8_COMPOSE_CONFIG}"
+        printf '%s
+' "SCRIPT64_CIRCL8_STATIC_SAFETY=${SCRIPT64_CIRCL8_STATIC_SAFETY}"
+        printf '%s
+' "SCRIPT64_CIRCL8_POSTGRES=${SCRIPT64_CIRCL8_POSTGRES}"
+        printf '%s
+' "SCRIPT64_CIRCL8_REDIS=${SCRIPT64_CIRCL8_REDIS}"
+        printf '%s
+' "SCRIPT64_CIRCL8_TEMPORAL=${SCRIPT64_CIRCL8_TEMPORAL}"
+        printf '%s
+' "SCRIPT64_CIRCL8_APP=${SCRIPT64_CIRCL8_APP}"
+        printf '%s
+' "SCRIPT64_CIRCL8_INTERNAL_HTTP=${SCRIPT64_CIRCL8_INTERNAL_HTTP}"
+        printf '%s
+' "SCRIPT64_CIRCL8_ROUTE=${SCRIPT64_CIRCL8_ROUTE}"
+        printf '%s
+' "SCRIPT64_READY_FOR_DEPLOYMENT_LANE=${SCRIPT64_READY_FOR_DEPLOYMENT_LANE}"
+        printf '%s
+' "SCRIPT64_READY_FOR_AUTHENTIK_LANE=${SCRIPT64_READY_FOR_AUTHENTIK_LANE}"
+        printf '%s
+' "SCRIPT64_READY_FOR_SCRIPT65=${SCRIPT64_READY_FOR_SCRIPT65}"
+        printf '%s
+' "SCRIPT64_DOCKER_DIR=${DOCKER_DIR}"
+        printf '%s
+' "SCRIPT64_COMPOSE_FILE=${CIRCL8_COMPOSE_FILE}"
+        printf '%s
+' "SCRIPT64_DOCKGE_COMPOSE_FILE=${CIRCL8_DOCKGE_COMPOSE_FILE}"
+        printf '%s
+' "SCRIPT64_POSTGRES_INIT_FILE=${CIRCL8_POSTGRES_INIT_FILE}"
+        printf '%s
+' "SCRIPT64_TEMPORAL_DYNAMIC_CONFIG_FILE=${CIRCL8_TEMPORAL_DYNAMIC_CONFIG_FILE}"
+        printf '%s
+' "SCRIPT64_TEMPLATE_PREFLIGHT_MARKER_PATH=${COMPLETED_MARKER}"
+        printf '%s
+' "SCRIPT64_DEPLOYED_MARKER_PATH=${DEPLOYED_MARKER}"
+        [ -n "${FAILURE_LOG:-}" ] && printf '%s
+' "SCRIPT64_FAILURE_LOG=${FAILURE_LOG}" || true
     } | write_root_file "$VERIFY_LOG"
 }
 
 function fail_with_report() {
     local message="$1"
-    SCRIPT64_STATUS="template-preflight-failed"
+    if [ "${SCRIPT64_STATUS:-}" != "deploy-failed" ]; then
+        SCRIPT64_STATUS="template-preflight-failed"
+    fi
     SCRIPT64_VERIFY_STATUS="FAILED"
     SCRIPT64_READY_FOR_DEPLOYMENT_LANE="no"
+    SCRIPT64_READY_FOR_AUTHENTIK_LANE="no"
     SCRIPT64_READY_FOR_SCRIPT65="no"
-    SCRIPT64_MARKER_WRITTEN="no"
     write_verify_report || true
     echo -e "${CROSS} ${RD}${message}${CL}"
     echo -e "  ${BL}Verify log:${CL} ${VERIFY_LOG}"
+    [ -n "${FAILURE_LOG:-}" ] && echo -e "  ${BL}Failure log:${CL} ${FAILURE_LOG}"
     exit 1
 }
 
 function write_completion_marker() {
     local tmp_file=""
-    tmp_file="$(mktemp /tmp/circl8-app-marker.XXXXXX)"
+    tmp_file="$(mktemp /tmp/circl8-app-template-marker.XXXXXX)"
     {
-        printf '%s\n' "SCRIPT64_STATUS=template-preflight-completed"
-        printf '%s\n' "SCRIPT64_VERSION=${SCRIPT_VERSION}"
-        printf '%s\n' "SCRIPT64_BUILD=${SCRIPT_BUILD}"
-        printf '%s\n' "SCRIPT64_VERIFY_STATUS=PASS"
-        printf '%s\n' "SCRIPT64_DEPLOYMENT=not-run"
-        printf '%s\n' "SCRIPT64_MARKER_WRITTEN=yes"
-        printf '%s\n' "SCRIPT64_SCRIPT63_GATE=pass"
-        printf '%s\n' "SCRIPT64_NETWORK_T2_PROXY=${SCRIPT64_NETWORK_T2_PROXY}"
-        printf '%s\n' "SCRIPT64_NETWORK_DATABASE=${SCRIPT64_NETWORK_DATABASE}"
-        printf '%s\n' "SCRIPT64_ENV_BACKUP=${SCRIPT64_ENV_BACKUP}"
-        printf '%s\n' "SCRIPT64_ENV_KEYS_ADDED=${SCRIPT64_ENV_KEYS_ADDED}"
-        printf '%s\n' "SCRIPT64_CIRCL8_COMPOSE_TEMPLATE=downloaded"
-        printf '%s\n' "SCRIPT64_CIRCL8_POSTGRES_INIT_TEMPLATE=downloaded"
-        printf '%s\n' "SCRIPT64_CIRCL8_TEMPORAL_CONFIG_TEMPLATE=downloaded"
-        printf '%s\n' "SCRIPT64_CIRCL8_COMPOSE_CONFIG=valid"
-        printf '%s\n' "SCRIPT64_CIRCL8_STATIC_SAFETY=pass"
-        printf '%s\n' "SCRIPT64_READY_FOR_DEPLOYMENT_LANE=yes"
-        printf '%s\n' "SCRIPT64_READY_FOR_SCRIPT65=no"
+        printf '%s
+' "SCRIPT64_STATUS=template-preflight-completed"
+        printf '%s
+' "SCRIPT64_VERSION=${SCRIPT_VERSION}"
+        printf '%s
+' "SCRIPT64_BUILD=${SCRIPT_BUILD}"
+        printf '%s
+' "SCRIPT64_VERIFY_STATUS=PASS"
+        printf '%s
+' "SCRIPT64_DEPLOYMENT=not-run"
+        printf '%s
+' "SCRIPT64_MARKER_WRITTEN=yes"
+        printf '%s
+' "SCRIPT64_TEMPLATE_PREFLIGHT_MARKER_WRITTEN=yes"
+        printf '%s
+' "SCRIPT64_DEPLOYMENT_MARKER_WRITTEN=no"
+        printf '%s
+' "SCRIPT64_SCRIPT63_GATE=pass"
+        printf '%s
+' "SCRIPT64_NETWORK_T2_PROXY=${SCRIPT64_NETWORK_T2_PROXY}"
+        printf '%s
+' "SCRIPT64_NETWORK_DATABASE=${SCRIPT64_NETWORK_DATABASE}"
+        printf '%s
+' "SCRIPT64_ENV_BACKUP=${SCRIPT64_ENV_BACKUP}"
+        printf '%s
+' "SCRIPT64_ENV_KEYS_ADDED=${SCRIPT64_ENV_KEYS_ADDED}"
+        printf '%s
+' "SCRIPT64_CIRCL8_COMPOSE_TEMPLATE=downloaded"
+        printf '%s
+' "SCRIPT64_CIRCL8_POSTGRES_INIT_TEMPLATE=downloaded"
+        printf '%s
+' "SCRIPT64_CIRCL8_TEMPORAL_CONFIG_TEMPLATE=downloaded"
+        printf '%s
+' "SCRIPT64_CIRCL8_COMPOSE_CONFIG=valid"
+        printf '%s
+' "SCRIPT64_CIRCL8_STATIC_SAFETY=pass"
+        printf '%s
+' "SCRIPT64_READY_FOR_DEPLOYMENT_LANE=yes"
+        printf '%s
+' "SCRIPT64_READY_FOR_AUTHENTIK_LANE=no"
+        printf '%s
+' "SCRIPT64_READY_FOR_SCRIPT65=no"
     } > "$tmp_file"
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" chmod 600 "$tmp_file"
@@ -429,6 +733,63 @@ function write_completion_marker() {
         chmod 600 "$tmp_file"
         mv -f "$tmp_file" "$COMPLETED_MARKER"
     fi
+    SCRIPT64_TEMPLATE_PREFLIGHT_MARKER_WRITTEN="yes"
+    SCRIPT64_MARKER_WRITTEN="yes"
+}
+
+function write_deployment_marker() {
+    local tmp_file=""
+    tmp_file="$(mktemp /tmp/circl8-app-deployed-marker.XXXXXX)"
+    {
+        printf '%s
+' "SCRIPT64_STATUS=completed"
+        printf '%s
+' "SCRIPT64_VERSION=${SCRIPT_VERSION}"
+        printf '%s
+' "SCRIPT64_BUILD=${SCRIPT_BUILD}"
+        printf '%s
+' "SCRIPT64_VERIFY_STATUS=PASS"
+        printf '%s
+' "SCRIPT64_DEPLOYMENT=completed"
+        printf '%s
+' "SCRIPT64_MARKER_WRITTEN=yes"
+        printf '%s
+' "SCRIPT64_TEMPLATE_PREFLIGHT_MARKER_WRITTEN=yes"
+        printf '%s
+' "SCRIPT64_SCRIPT63_GATE=pass"
+        printf '%s
+' "SCRIPT64_NETWORK_T2_PROXY=${SCRIPT64_NETWORK_T2_PROXY}"
+        printf '%s
+' "SCRIPT64_NETWORK_DATABASE=${SCRIPT64_NETWORK_DATABASE}"
+        printf '%s
+' "SCRIPT64_CIRCL8_COMPOSE_CONFIG=valid"
+        printf '%s
+' "SCRIPT64_CIRCL8_STATIC_SAFETY=pass"
+        printf '%s
+' "SCRIPT64_CIRCL8_POSTGRES=${SCRIPT64_CIRCL8_POSTGRES}"
+        printf '%s
+' "SCRIPT64_CIRCL8_REDIS=${SCRIPT64_CIRCL8_REDIS}"
+        printf '%s
+' "SCRIPT64_CIRCL8_TEMPORAL=${SCRIPT64_CIRCL8_TEMPORAL}"
+        printf '%s
+' "SCRIPT64_CIRCL8_APP=${SCRIPT64_CIRCL8_APP}"
+        printf '%s
+' "SCRIPT64_CIRCL8_INTERNAL_HTTP=${SCRIPT64_CIRCL8_INTERNAL_HTTP}"
+        printf '%s
+' "SCRIPT64_CIRCL8_ROUTE=${SCRIPT64_CIRCL8_ROUTE}"
+        printf '%s
+' "SCRIPT64_READY_FOR_AUTHENTIK_LANE=yes"
+        printf '%s
+' "SCRIPT64_READY_FOR_SCRIPT65=no"
+    } > "$tmp_file"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" chmod 600 "$tmp_file"
+        "$SUDO_CMD" mv -f "$tmp_file" "$DEPLOYED_MARKER"
+    else
+        chmod 600 "$tmp_file"
+        mv -f "$tmp_file" "$DEPLOYED_MARKER"
+    fi
+    SCRIPT64_DEPLOYMENT_MARKER_WRITTEN="yes"
     SCRIPT64_MARKER_WRITTEN="yes"
 }
 
@@ -756,7 +1117,7 @@ function require_static_safety() {
     if printf '%s\n' "$noncomment" | grep -qE '^[[:space:]]{2}temporal-elasticsearch:'; then fail_with_report "Rendered compose has active temporal-elasticsearch service."; fi
     if printf '%s\n' "$noncomment" | grep -qE 'ENABLE_ES[[:space:]]*[:=][[:space:]]*true'; then fail_with_report "Rendered compose enables Elasticsearch."; fi
     if printf '%s\n' "$noncomment" | grep -qE '^[[:space:]-]*ES_SEEDS[[:space:]]*[:=]'; then fail_with_report "Rendered compose has active ES_SEEDS."; fi
-    if printf '%s\n' "$noncomment" | grep -qE 'docker\.sock|/var/run/docker\.sock'; then fail_with_report "Rendered compose contains a Docker socket mount/reference."; fi
+    if printf '%s\n' "$noncomment" | grep -qE 'docker[.]sock|/var/run/docker[.]sock'; then fail_with_report "Rendered compose contains a Docker socket mount/reference."; fi
     if printf '%s\n' "$noncomment" | grep -qE '^[[:space:]]+ports:'; then fail_with_report "Rendered compose contains active host ports."; fi
     if printf '%s\n' "$noncomment" | grep -q 'CIRCL8_POSTGRES_PASSWORD'; then fail_with_report "Rendered compose still references legacy CIRCL8_POSTGRES_PASSWORD."; fi
     printf '%s\n' "$noncomment" | grep -q 'image: postgres:17-alpine' || fail_with_report "Rendered compose does not use postgres:17-alpine."
@@ -785,14 +1146,145 @@ function validate_compose_config() {
     fi
 }
 
-function finish_success() {
+function mark_template_preflight_ready() {
     SCRIPT64_STATUS="template-preflight-completed"
     SCRIPT64_VERIFY_STATUS="PASS"
     SCRIPT64_DEPLOYMENT="not-run"
     SCRIPT64_READY_FOR_DEPLOYMENT_LANE="yes"
+    SCRIPT64_READY_FOR_AUTHENTIK_LANE="no"
     SCRIPT64_READY_FOR_SCRIPT65="no"
     write_completion_marker
     write_verify_report
+}
+
+function confirm_deploy_or_finish_preflight() {
+    section "DEPLOY CIRCL8"
+    mini_header "Plan"
+    aligned_status_line "Action" "start core containers" "$YW"
+    aligned_status_line "Project" "circl8" "$GN"
+    aligned_status_line "Services" "circl8-postgres, circl8-redis, circl8-temporal, circl8" "$GN"
+    aligned_status_line "Data reset" "no" "$GN"
+    aligned_status_line "Destructive actions" "none" "$GN"
+    echo ""
+    echo -e "${YW}This will start the Circl8 core containers but will not delete/reset data.${CL}"
+    echo ""
+
+    if [ ! -r /dev/tty ]; then
+        msg_warn "No interactive TTY available; Circl8 deployment skipped. Template preflight remains complete."
+        aligned_status_line "Deployment confirmation" "no" "$YW"
+        return 1
+    fi
+
+    if read_yes_no "Start Circl8 core containers now? This will not delete/reset data." "n"; then
+        aligned_status_line "Deployment confirmation" "yes" "$GN"
+        return 0
+    fi
+
+    aligned_status_line "Deployment confirmation" "no" "$YW"
+    return 1
+}
+
+function write_template_preflight_success() {
+    mark_template_preflight_ready
+}
+
+function write_template_preflight_marker_report() {
+    write_template_preflight_success
+}
+
+function deploy_circl8_core() {
+    SCRIPT64_DEPLOYMENT="running"
+    init_deploy_output_log
+    msg_info "Starting Circl8 core stack"
+    if docker_cmd compose --env-file "$ENV_FILE" -p circl8 -f "$CIRCL8_COMPOSE_FILE" up -d >> "$DEPLOY_OUTPUT_LOG" 2>&1; then
+        msg_ok "CIRCL8 CORE STACK STARTED"
+    else
+        SCRIPT64_DEPLOYMENT="failed"
+        fail_deployment "Circl8 core compose deployment failed."
+    fi
+}
+
+function verify_circl8_core() {
+    section "VERIFY CIRCL8"
+
+    msg_info "Waiting for circl8-postgres"
+    if wait_for_container_status circl8-postgres healthy 240; then
+        SCRIPT64_CIRCL8_POSTGRES="healthy"
+        msg_ok "circl8-postgres healthy"
+    else
+        SCRIPT64_CIRCL8_POSTGRES="failed"
+        fail_deployment "circl8-postgres did not become healthy."
+    fi
+
+    msg_info "Waiting for circl8-redis"
+    if wait_for_container_status circl8-redis healthy-or-running 120; then
+        SCRIPT64_CIRCL8_REDIS="healthy"
+        msg_ok "circl8-redis ready"
+    else
+        SCRIPT64_CIRCL8_REDIS="failed"
+        fail_deployment "circl8-redis did not become ready."
+    fi
+
+    msg_info "Waiting for circl8-temporal"
+    if wait_for_container_status circl8-temporal healthy-or-running 300 && wait_for_temporal_api 240; then
+        SCRIPT64_CIRCL8_TEMPORAL="ready"
+        msg_ok "circl8-temporal ready"
+    else
+        SCRIPT64_CIRCL8_TEMPORAL="failed"
+        fail_deployment "circl8-temporal API did not become ready."
+    fi
+
+    msg_info "Waiting for circl8 app"
+    if wait_for_container_status circl8 healthy-or-running 300; then
+        SCRIPT64_CIRCL8_APP="running"
+        msg_ok "circl8 app running"
+    else
+        SCRIPT64_CIRCL8_APP="failed"
+        fail_deployment "circl8 app container did not become ready."
+    fi
+
+    msg_info "Checking internal app HTTP"
+    if wait_for_circl8_internal_http 240; then
+        SCRIPT64_CIRCL8_INTERNAL_HTTP="ready"
+        msg_ok "Internal app HTTP ready"
+    else
+        SCRIPT64_CIRCL8_INTERNAL_HTTP="failed"
+        fail_deployment "Circl8 internal app HTTP did not respond on expected port."
+    fi
+
+    msg_info "Checking protected public route"
+    if verify_public_route_behavior; then
+        SCRIPT64_CIRCL8_ROUTE="protected"
+        msg_ok "Circl8 route protected"
+    else
+        local route_result="$?"
+        if [ "$route_result" = "2" ]; then
+            SCRIPT64_CIRCL8_ROUTE="failed"
+            fail_deployment "Circl8 Traefik labels are missing or invalid."
+        fi
+        if [ "$route_result" = "3" ]; then
+            SCRIPT64_CIRCL8_ROUTE="failed"
+            fail_deployment "Circl8 public route responded without expected protected behavior."
+        fi
+        if check_traefik_infra_errors; then
+            SCRIPT64_CIRCL8_ROUTE="needs-review"
+            msg_warn "Circl8 public route needs review; internal app is ready and no Traefik infrastructure error was detected."
+        else
+            SCRIPT64_CIRCL8_ROUTE="failed"
+            fail_deployment "Traefik reported Circl8 route infrastructure errors."
+        fi
+    fi
+
+    aligned_status_line "PostgreSQL" "$SCRIPT64_CIRCL8_POSTGRES" "$(status_color_for_value "$SCRIPT64_CIRCL8_POSTGRES")"
+    aligned_status_line "Redis" "$SCRIPT64_CIRCL8_REDIS" "$(status_color_for_value "$SCRIPT64_CIRCL8_REDIS")"
+    aligned_status_line "Temporal" "$SCRIPT64_CIRCL8_TEMPORAL" "$(status_color_for_value "$SCRIPT64_CIRCL8_TEMPORAL")"
+    aligned_status_line "Circl8 app" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
+    aligned_status_line "Internal HTTP" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
+    aligned_status_line "Public route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
+}
+
+function finish_preflight_only_success() {
+    mark_template_preflight_ready
 
     section_flash_success "FINISHED"
     mini_header "Circl8"
@@ -804,9 +1296,75 @@ function finish_success() {
     final_line "Compose config" "$SCRIPT64_CIRCL8_COMPOSE_CONFIG" "$GN"
     final_line "Static safety" "$SCRIPT64_CIRCL8_STATIC_SAFETY" "$GN"
     final_line "Ready for deploy lane" "$SCRIPT64_READY_FOR_DEPLOYMENT_LANE" "$GN"
+    final_line "Ready for Authentik lane" "$SCRIPT64_READY_FOR_AUTHENTIK_LANE" "$YW"
     final_line "Ready for Script 6.5" "$SCRIPT64_READY_FOR_SCRIPT65" "$YW"
     final_line "Verify log" "$VERIFY_LOG" "$BL"
-    final_line "Marker" "$COMPLETED_MARKER" "$BL"
+    final_line "Template marker" "$COMPLETED_MARKER" "$BL"
+}
+
+function finish_deployment_success() {
+    SCRIPT64_STATUS="completed"
+    SCRIPT64_VERIFY_STATUS="PASS"
+    SCRIPT64_DEPLOYMENT="completed"
+    SCRIPT64_READY_FOR_DEPLOYMENT_LANE="yes"
+    SCRIPT64_READY_FOR_AUTHENTIK_LANE="yes"
+    SCRIPT64_READY_FOR_SCRIPT65="no"
+    write_deployment_marker
+    write_verify_report
+
+    section_flash_success "FINISHED"
+    mini_header "Circl8"
+    final_line "Status" "$SCRIPT64_STATUS" "$GN"
+    final_line "Verification" "$SCRIPT64_VERIFY_STATUS" "$GN"
+    final_line "Deployment" "$SCRIPT64_DEPLOYMENT" "$GN"
+    final_line "PostgreSQL" "$SCRIPT64_CIRCL8_POSTGRES" "$(status_color_for_value "$SCRIPT64_CIRCL8_POSTGRES")"
+    final_line "Redis" "$SCRIPT64_CIRCL8_REDIS" "$(status_color_for_value "$SCRIPT64_CIRCL8_REDIS")"
+    final_line "Temporal" "$SCRIPT64_CIRCL8_TEMPORAL" "$(status_color_for_value "$SCRIPT64_CIRCL8_TEMPORAL")"
+    final_line "Circl8 app" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
+    final_line "Internal HTTP" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
+    final_line "Public route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
+    final_line "Ready for Authentik lane" "$SCRIPT64_READY_FOR_AUTHENTIK_LANE" "$GN"
+    final_line "Ready for Script 6.5" "$SCRIPT64_READY_FOR_SCRIPT65" "$YW"
+    final_line "Verify log" "$VERIFY_LOG" "$BL"
+    final_line "Template marker" "$COMPLETED_MARKER" "$BL"
+    final_line "Deploy marker" "$DEPLOYED_MARKER" "$BL"
+}
+
+function run_circl8_deploy_success_path() {
+    deploy_circl8_core
+    verify_circl8_core
+    finish_deployment_success
+}
+
+function run_deploy_decision_or_mode() {
+    case "$SCRIPT64_RUN_MODE" in
+        preflight-only)
+            section "DEPLOY CIRCL8"
+            mini_header "Mode"
+            aligned_status_line "Run mode" "preflight-only" "$YW"
+            aligned_status_line "Deployment" "not-run" "$GN"
+            msg_warn "Preflight-only mode selected; Circl8 deployment skipped."
+            finish_preflight_only_success
+            ;;
+        deploy)
+            section "DEPLOY CIRCL8"
+            mini_header "Mode"
+            aligned_status_line "Run mode" "deploy" "$GN"
+            aligned_status_line "Deployment confirmation" "yes" "$GN"
+            run_circl8_deploy_success_path
+            ;;
+        prompt)
+            if confirm_deploy_or_finish_preflight; then
+                run_circl8_deploy_success_path
+            else
+                finish_preflight_only_success
+            fi
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
 }
 
 function init_script() {
@@ -822,7 +1380,13 @@ function init_script() {
     validate_dependencies
 }
 
+function run_post_compose_flow() {
+    write_template_preflight_success
+    run_deploy_decision_or_mode
+}
+
 function main() {
+    parse_args "$@"
     init_script
     validate_script63_gate
     runtime_preflight
@@ -831,7 +1395,7 @@ function main() {
     download_and_render_templates
     require_static_safety
     validate_compose_config
-    finish_success
+    run_post_compose_flow
 }
 
 main "$@"
