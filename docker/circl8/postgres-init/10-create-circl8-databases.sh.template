@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Circl8 PostgreSQL first-boot initialization.
+# This file is intended for /docker-entrypoint-initdb.d/ and runs only when
+# the PostgreSQL data directory is initialized for the first time.
+# It is written to be safe/idempotent if manually re-run, but it never drops
+# or recreates existing roles/databases and never prints passwords.
+
+: "${POSTGRES_USER:?POSTGRES_USER is required}"
+: "${CIRCL8_APP_POSTGRES_PASSWORD:?CIRCL8_APP_POSTGRES_PASSWORD is required}"
+: "${CIRCL8_TEMPORAL_POSTGRES_PASSWORD:?CIRCL8_TEMPORAL_POSTGRES_PASSWORD is required}"
+
+psql_base=(psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname postgres)
+
+"${psql_base[@]}" \
+  --set=app_password="${CIRCL8_APP_POSTGRES_PASSWORD}" \
+  --set=temporal_password="${CIRCL8_TEMPORAL_POSTGRES_PASSWORD}" <<'EOSQL'
+SELECT format('CREATE ROLE circl8_app_user LOGIN PASSWORD %L', :'app_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'circl8_app_user')
+\gexec
+
+SELECT format('CREATE ROLE circl8_temporal_user LOGIN PASSWORD %L', :'temporal_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'circl8_temporal_user')
+\gexec
+
+ALTER ROLE circl8_app_user WITH LOGIN PASSWORD :'app_password';
+ALTER ROLE circl8_temporal_user WITH LOGIN PASSWORD :'temporal_password';
+
+SELECT 'CREATE DATABASE circl8_app OWNER circl8_app_user'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'circl8_app')
+\gexec
+
+SELECT 'CREATE DATABASE circl8_temporal OWNER circl8_temporal_user'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'circl8_temporal')
+\gexec
+
+SELECT 'CREATE DATABASE circl8_temporal_visibility OWNER circl8_temporal_user'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'circl8_temporal_visibility')
+\gexec
+
+ALTER DATABASE circl8_app OWNER TO circl8_app_user;
+ALTER DATABASE circl8_temporal OWNER TO circl8_temporal_user;
+ALTER DATABASE circl8_temporal_visibility OWNER TO circl8_temporal_user;
+
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+EOSQL
+
+psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname circl8_app <<'EOSQL'
+GRANT CONNECT, TEMPORARY ON DATABASE circl8_app TO circl8_app_user;
+ALTER SCHEMA public OWNER TO circl8_app_user;
+GRANT USAGE, CREATE ON SCHEMA public TO circl8_app_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE circl8_app_user IN SCHEMA public GRANT ALL ON TABLES TO circl8_app_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE circl8_app_user IN SCHEMA public GRANT ALL ON SEQUENCES TO circl8_app_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE circl8_app_user IN SCHEMA public GRANT ALL ON FUNCTIONS TO circl8_app_user;
+EOSQL
+
+psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname circl8_temporal <<'EOSQL'
+GRANT CONNECT, TEMPORARY ON DATABASE circl8_temporal TO circl8_temporal_user;
+ALTER SCHEMA public OWNER TO circl8_temporal_user;
+GRANT USAGE, CREATE ON SCHEMA public TO circl8_temporal_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE circl8_temporal_user IN SCHEMA public GRANT ALL ON TABLES TO circl8_temporal_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE circl8_temporal_user IN SCHEMA public GRANT ALL ON SEQUENCES TO circl8_temporal_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE circl8_temporal_user IN SCHEMA public GRANT ALL ON FUNCTIONS TO circl8_temporal_user;
+EOSQL
+
+psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname circl8_temporal_visibility <<'EOSQL'
+GRANT CONNECT, TEMPORARY ON DATABASE circl8_temporal_visibility TO circl8_temporal_user;
+ALTER SCHEMA public OWNER TO circl8_temporal_user;
+GRANT USAGE, CREATE ON SCHEMA public TO circl8_temporal_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE circl8_temporal_user IN SCHEMA public GRANT ALL ON TABLES TO circl8_temporal_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE circl8_temporal_user IN SCHEMA public GRANT ALL ON SEQUENCES TO circl8_temporal_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE circl8_temporal_user IN SCHEMA public GRANT ALL ON FUNCTIONS TO circl8_temporal_user;
+EOSQL

@@ -1,0 +1,197 @@
+# 06-circl8-compose.yml
+# Project: Circl8
+# Purpose: Circl8 application stack with PostgreSQL, Redis, and Temporal.
+# Phase: Script 6.4 Phase 1 templates only.
+# Notes:
+# - Active runtime services are limited to circl8, circl8-postgres,
+#   circl8-redis, and circl8-temporal.
+# - Temporal uses PostgreSQL persistence and PostgreSQL visibility.
+# - Elasticsearch, admin tools, UI, and debug/spotlight services are omitted
+#   from the active compose file and must not start by default.
+
+name: circl8
+
+services:
+  circl8-postgres:
+    env_file:
+      - ${DOCKER_DIR}/.env
+    image: postgres:17-alpine
+    container_name: circl8-postgres
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - database
+    environment:
+      TZ: ${TZ}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${CIRCL8_POSTGRES_SUPERUSER_PASSWORD}
+      POSTGRES_DB: postgres
+      CIRCL8_APP_POSTGRES_PASSWORD: ${CIRCL8_APP_POSTGRES_PASSWORD}
+      CIRCL8_TEMPORAL_POSTGRES_PASSWORD: ${CIRCL8_TEMPORAL_POSTGRES_PASSWORD}
+    volumes:
+      - ${DOCKER_DIR}/appdata/circl8/postgres:/var/lib/postgresql/data
+      - ${DOCKER_DIR}/appdata/circl8/postgres-init:/docker-entrypoint-initdb.d:ro
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  circl8-redis:
+    env_file:
+      - ${DOCKER_DIR}/.env
+    image: ${CIRCL8_REDIS_IMAGE:-redis:7-alpine}
+    container_name: circl8-redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    networks:
+      - database
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ${DOCKER_DIR}/appdata/circl8/redis:/data
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  circl8-temporal:
+    env_file:
+      - ${DOCKER_DIR}/.env
+    image: ${CIRCL8_TEMPORAL_IMAGE:-temporalio/auto-setup:1.28.1}
+    container_name: circl8-temporal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      circl8-postgres:
+        condition: service_healthy
+    networks:
+      - database
+    environment:
+      TZ: ${TZ}
+      LOG_LEVEL: warn
+      LOG_FORMAT: json
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_SEEDS: circl8-postgres
+      POSTGRES_USER: circl8_temporal_user
+      POSTGRES_PWD: ${CIRCL8_TEMPORAL_POSTGRES_PASSWORD}
+      DBNAME: circl8_temporal
+      VISIBILITY_DBNAME: circl8_temporal_visibility
+      SKIP_DB_CREATE: "true"
+      DEFAULT_NAMESPACE: default
+      TEMPORAL_NAMESPACE: default
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/development-sql.yml
+    volumes:
+      - ${DOCKER_DIR}/appdata/circl8/temporal-dynamicconfig/development-sql.yml:/etc/temporal/config/dynamicconfig/development-sql.yml:ro
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "7233"
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address circl8-temporal:7233 | grep -qi SERVING || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  circl8:
+    env_file:
+      - ${DOCKER_DIR}/.env
+    image: ${CIRCL8_IMAGE:-ghcr.io/gitroomhq/postiz-app:latest}
+    container_name: circl8
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      circl8-postgres:
+        condition: service_healthy
+      circl8-redis:
+        condition: service_healthy
+      circl8-temporal:
+        condition: service_healthy
+    networks:
+      - t2_proxy
+      - database
+    environment:
+      TZ: ${TZ}
+      MAIN_URL: ${CIRCL8_URL}
+      FRONTEND_URL: ${CIRCL8_URL}
+      NEXT_PUBLIC_BACKEND_URL: ${CIRCL8_URL}/api
+      BACKEND_URL: ${CIRCL8_URL}/api
+      BACKEND_INTERNAL_URL: http://127.0.0.1:3000
+      DATABASE_URL: postgresql://circl8_app_user:${CIRCL8_APP_POSTGRES_PASSWORD}@circl8-postgres:5432/circl8_app
+      REDIS_URL: redis://circl8-redis:6379
+      JWT_SECRET: ${CIRCL8_JWT_SECRET}
+      NEXTAUTH_SECRET: ${CIRCL8_NEXTAUTH_SECRET}
+      CIRCL8_SECRET_KEY: ${CIRCL8_SECRET_KEY}
+      TEMPORAL_ADDRESS: circl8-temporal:7233
+      TEMPORAL_NAMESPACE: default
+      STORAGE_PROVIDER: local
+      UPLOAD_DIRECTORY: /uploads
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: /uploads
+      IS_GENERAL: "true"
+      DISABLE_REGISTRATION: "false"
+      RUN_CRON: "true"
+      API_LIMIT: ${CIRCL8_API_LIMIT:-30}
+      CIRCL8_MEDIA_RETENTION_MODE: ${CIRCL8_MEDIA_RETENTION_MODE:-delete-after-publish}
+      CIRCL8_MEDIA_RETRY_RETENTION_HOURS: ${CIRCL8_MEDIA_RETRY_RETENTION_HOURS:-72}
+      CIRCL8_MEDIA_DRAFT_RETENTION_DAYS: ${CIRCL8_MEDIA_DRAFT_RETENTION_DAYS:-30}
+    volumes:
+      - ${DOCKER_DIR}/appdata/circl8/uploads:/uploads
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "const r=require('http').get('http://localhost:5000/',res=>process.exit(res.statusCode<500?0:1));r.on('error',()=>process.exit(1));r.setTimeout(4000,()=>{r.destroy();process.exit(1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: t2_proxy
+      traefik.http.routers.circl8.rule: "Host(`${CIRCL8_HOST}`)"
+      traefik.http.routers.circl8.entrypoints: https
+      traefik.http.routers.circl8.tls: "true"
+      traefik.http.routers.circl8.middlewares: chain-authentik@file
+      traefik.http.routers.circl8.service: circl8
+      traefik.http.services.circl8.loadbalancer.server.port: "5000"
+
+# -----------------------------------------------------------------------------
+# Future services intentionally disabled for Phase 1.
+#
+# These service names are reserved for later phases and are kept comment-only so
+# they do not start by default:
+#   - spotlight
+#   - temporal-elasticsearch
+#   - temporal-admin-tools
+#   - temporal-ui
+#
+# Do not enable Elasticsearch by default. Temporal currently uses PostgreSQL for
+# persistence and PostgreSQL visibility. Later Script 6.4 work can use one-shot
+# temporalio/admin-tools containers for readiness checks instead of keeping
+# temporal-admin-tools running as a permanent service.
+# -----------------------------------------------------------------------------
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true
+
+  database:
+    name: database
+    external: true

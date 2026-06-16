@@ -1,0 +1,16 @@
+# development-sql.yml.template
+# Project: Circl8 Temporal dynamic config
+# Purpose: Internal Temporal dynamic config for PostgreSQL persistence and
+# PostgreSQL visibility. Elasticsearch is intentionally not configured.
+
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true
+    constraints: {}
+
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+
+frontend.enableClientVersionCheck:
+  - value: true
+    constraints: {}
