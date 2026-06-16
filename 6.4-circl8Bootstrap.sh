@@ -5,12 +5,9 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 #  Project Circl8 - Script 6.4 Circl8 Template Preflight
 # =========================================================
-# Phase 3 v1.1.3 keeps the Circl8 template/preflight foundation and fixes
-# the main run-mode flow before the first confirmed core deployment lane.
-# It prepares .env keys, appdata folders, downloaded/rendered templates,
-# compose file placement, static safety checks and compose config validation
-# before any container start. The deploy lane starts only the Circl8 core
-# project after explicit confirmation or the explicit --deploy run mode.
+# Phase 4 v1.2.1 keeps the marker/env-derived Authentik identity lane and
+# fixes policy binding target selection for Authentik versions whose policy
+# binding target expects an object UUID instead of a numeric provider PK.
 
 YW="$(printf '\033[33m')"
 BL="$(printf '\033[36m')"
@@ -27,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.4-circl8Bootstrap.sh"
-SCRIPT_VERSION="v1.1.5"
+SCRIPT_VERSION="v1.2.1"
 SCRIPT_UPDATED="2026-06-16"
-SCRIPT_BUILD="circl8-core-temporal-address-fix"
+SCRIPT_BUILD="authentik-policy-binding-target-fix"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -41,6 +38,8 @@ DEPLOYED_MARKER="/root/.circl8-app-completed"
 FAILURE_LOG=""
 DEPLOY_OUTPUT_LOG=""
 SCRIPT6_MARKER="/root/.docker-env-setup-completed"
+SCRIPT61_MARKER="/root/.circl8-platform-core-completed"
+UBUNTU_SEED_MARKER="/root/.ubuntu-autoinstall-seed-completed"
 SCRIPT63_MARKER="/root/.circl8-authentik-completed"
 
 SUDO_CMD=""
@@ -63,8 +62,8 @@ ENV_FILE=""
 DOMAIN_VALUE=""
 ADMIN_UI=""
 
-CIRCL8_HOST="app.circl8.co.uk"
-CIRCL8_URL="https://app.circl8.co.uk"
+CIRCL8_HOST=""
+CIRCL8_URL=""
 CIRCL8_APPDATA_DIR=""
 CIRCL8_COMPOSE_FILE=""
 CIRCL8_DOCKGE_COMPOSE_FILE=""
@@ -75,6 +74,19 @@ CIRCL8_UPLOADS_DIR=""
 CIRCL8_TEMPORAL_DYNAMIC_CONFIG_DIR=""
 CIRCL8_POSTGRES_INIT_FILE=""
 CIRCL8_TEMPORAL_DYNAMIC_CONFIG_FILE=""
+
+PROJECT_BASE_DOMAIN=""
+PROJECT_SLUG=""
+PROJECT_NAME=""
+PROJECT_APP_PREFIX=""
+PROJECT_APP_HOST=""
+PROJECT_APP_URL=""
+PROJECT_AUTH_PREFIX=""
+PROJECT_AUTH_HOST=""
+PROJECT_AUTH_URL=""
+PROJECT_COOKIE_DOMAIN=""
+SCRIPT63_AUTHENTIK_OUTPOST_PK=""
+SCRIPT63_AUTHENTIK_PROVIDER_PK=""
 
 SCRIPT63_STATUS="unknown"
 SCRIPT63_VERIFY_STATUS="unknown"
@@ -104,6 +116,12 @@ SCRIPT64_CIRCL8_TEMPORAL="not-run"
 SCRIPT64_CIRCL8_APP="not-run"
 SCRIPT64_CIRCL8_INTERNAL_HTTP="not-run"
 SCRIPT64_CIRCL8_ROUTE="not-run"
+SCRIPT64_AUTHENTIK_GROUPS="not-run"
+SCRIPT64_AUTHENTIK_POLICY="not-run"
+SCRIPT64_AUTHENTIK_APPLICATION="not-run"
+SCRIPT64_AUTHENTIK_PROVIDER="not-run"
+SCRIPT64_AUTHENTIK_OUTPOST="not-run"
+SCRIPT64_AUTHENTIK_AKADMIN="not-run"
 SCRIPT64_READY_FOR_AUTHENTIK_LANE="no"
 SCRIPT64_READY_FOR_DEPLOYMENT_LANE="no"
 SCRIPT64_READY_FOR_SCRIPT65="no"
@@ -297,7 +315,7 @@ function download_file() {
 
 function usage() {
     printf '%s
-' "Usage: sudo ./6.4-circl8Bootstrap.sh [--preflight-only|--deploy]"
+' "Usage: sudo ./6.4-circl8Bootstrap.sh [--preflight-only|--deploy|--authentik-only]"
 }
 
 function parse_args() {
@@ -316,6 +334,9 @@ function parse_args() {
                 ;;
             --deploy)
                 SCRIPT64_RUN_MODE="deploy"
+                ;;
+            --authentik-only)
+                SCRIPT64_RUN_MODE="authentik-only"
                 ;;
             -h|--help)
                 usage
@@ -430,9 +451,10 @@ function traefik_container_name() {
 }
 
 function check_circl8_traefik_labels() {
-    local labels=""
+    local labels="" route_host="${PROJECT_APP_HOST:-${CIRCL8_HOST}}"
     labels="$(docker_cmd inspect circl8 --format '{{json .Config.Labels}}' 2>/dev/null || true)"
-    printf '%s\n' "$labels" | grep -q 'app.circl8.co.uk' || return 1
+    [ -n "$route_host" ] || return 1
+    printf '%s\n' "$labels" | grep -q "$route_host" || return 1
     printf '%s\n' "$labels" | grep -q 'chain-authentik@file' || return 1
     printf '%s\n' "$labels" | grep -q 'loadbalancer.server.port' || return 1
     return 0
@@ -453,7 +475,7 @@ function verify_public_route_behavior() {
     local headers="" status_line="" location_line=""
     check_circl8_traefik_labels || return 2
     if command -v curl >/dev/null 2>&1; then
-        headers="$(curl -kIsS --max-time 12 "https://${CIRCL8_HOST}" 2>/dev/null || true)"
+        headers="$(curl -kIsS --max-time 12 "https://${PROJECT_APP_HOST:-${CIRCL8_HOST}}" 2>/dev/null || true)"
         status_line="$(printf '%s\n' "$headers" | awk 'tolower($0) ~ /^http\// {line=$0} END {print line}')"
         location_line="$(printf '%s\n' "$headers" | awk 'tolower($0) ~ /^location:/ {print; exit}')"
         if printf '%s\n%s\n' "$status_line" "$location_line" | grep -Eiq 'HTTP/.*30[1278].*(|$)|authentik|outpost\.goauthentik|authorize|login'; then
@@ -569,9 +591,13 @@ function load_docker_project_context() {
     env_docker_user="$(env_value DOCKER_USER)"
     DOCKER_USER="${marker_user:-${env_docker_user:-$(basename "$(dirname "$DOCKER_DIR")")}}"
     env_domain="$(env_value DOMAIN)"
-    DOMAIN_VALUE="${env_domain:-circl8.co.uk}"
+    DOMAIN_VALUE="${env_domain:-$(marker_file_key_value "$SCRIPT6_MARKER" SCRIPT6_DOMAIN)}"
+    DOMAIN_VALUE="${DOMAIN_VALUE:-$(marker_file_key_value "$SCRIPT61_MARKER" SCRIPT61_DOMAIN)}"
+    DOMAIN_VALUE="${DOMAIN_VALUE:-$(marker_file_key_value "$UBUNTU_SEED_MARKER" PROXMOX_DOMAIN)}"
     env_admin_ui="$(env_value ADMIN_UI)"
     ADMIN_UI="${env_admin_ui:-dockge}"
+    CIRCL8_HOST="$(default_project_app_host)"
+    CIRCL8_URL="https://${CIRCL8_HOST}"
 
     CIRCL8_APPDATA_DIR="${DOCKER_DIR}/appdata/circl8"
     CIRCL8_COMPOSE_FILE="${COMPOSE_DIR}/06-circl8-compose.yml"
@@ -583,6 +609,579 @@ function load_docker_project_context() {
     CIRCL8_TEMPORAL_DYNAMIC_CONFIG_DIR="${CIRCL8_APPDATA_DIR}/temporal-dynamicconfig"
     CIRCL8_POSTGRES_INIT_FILE="${CIRCL8_POSTGRES_INIT_DIR}/10-create-circl8-databases.sh"
     CIRCL8_TEMPORAL_DYNAMIC_CONFIG_FILE="${CIRCL8_TEMPORAL_DYNAMIC_CONFIG_DIR}/development-sql.yml"
+}
+
+
+# =========================================================
+#  PROJECT IDENTITY / AUTHENTIK IDENTITY LANE
+# =========================================================
+function host_from_url() {
+    local value="${1:-}"
+    value="$(printf '%s' "$value" | trim_shell_value)"
+    value="${value#http://}"
+    value="${value#https://}"
+    value="${value%%/*}"
+    value="${value%%:*}"
+    value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    printf '%s' "$value"
+}
+
+function sanitize_slug() {
+    local value="${1:-}"
+    value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+    printf '%s' "$value"
+}
+
+function first_label_from_domain() {
+    local host="${1:-}" base="${2:-}" label=""
+    host="$(host_from_url "$host")"
+    base="$(host_from_url "$base")"
+    if [ -n "$base" ] && [ "$host" != "$base" ]; then
+        label="${host%.${base}}"
+        label="${label%%.*}"
+    else
+        label="${host%%.*}"
+    fi
+    sanitize_slug "$label"
+}
+
+function title_case_slug() {
+    local value="${1:-}"
+    printf '%s' "$value" | awk -F'[-_ ]+' '{out=""; for (i=1; i<=NF; i++) { if ($i != "") out=out (out?" ":"") toupper(substr($i,1,1)) substr($i,2) } print out}'
+}
+
+function default_project_base_domain() {
+    local value=""
+    value="$(env_value DOMAIN)"
+    value="${value:-$(marker_file_key_value "$SCRIPT6_MARKER" SCRIPT6_DOMAIN)}"
+    value="${value:-$(marker_file_key_value "$SCRIPT61_MARKER" SCRIPT61_DOMAIN)}"
+    value="${value:-$(marker_file_key_value "$UBUNTU_SEED_MARKER" PROXMOX_DOMAIN)}"
+    value="$(host_from_url "$value")"
+    printf '%s' "$value"
+}
+
+function default_project_app_host() {
+    local base="" value=""
+    base="$(default_project_base_domain)"
+    value="$(env_value CIRCL8_HOST)"
+    value="${value:-$(env_value POSTIZ_HOST)}"
+    [ -n "$value" ] || value="$(host_from_url "$(env_value CIRCL8_URL)")"
+    [ -n "$value" ] || value="$(host_from_url "$(env_value POSTIZ_URL)")"
+    [ -n "$value" ] || value="app.${base}"
+    value="$(host_from_url "$value")"
+    printf '%s' "$value"
+}
+
+function derive_project_identity() {
+    section "PROJECT IDENTITY"
+    local env_project_slug="" env_app_slug="" env_project_name="" env_app_name="" env_company_name=""
+
+    PROJECT_BASE_DOMAIN="$(default_project_base_domain)"
+    [ -n "$PROJECT_BASE_DOMAIN" ] || fail_with_report "Project base domain could not be derived from .env or markers."
+
+    PROJECT_APP_HOST="$(default_project_app_host)"
+    [ -n "$PROJECT_APP_HOST" ] || fail_with_report "Project app host could not be derived."
+
+    PROJECT_APP_PREFIX="$(first_label_from_domain "$PROJECT_APP_HOST" "$PROJECT_BASE_DOMAIN")"
+    [ -n "$PROJECT_APP_PREFIX" ] || fail_with_report "Project app prefix could not be derived."
+
+    PROJECT_AUTH_HOST="$(env_value AUTHENTIK_ROUTE_HOST)"
+    [ -n "$PROJECT_AUTH_HOST" ] || PROJECT_AUTH_HOST="$(host_from_url "$(env_value AUTHENTIK_EXTERNAL_URL)")"
+    [ -n "$PROJECT_AUTH_HOST" ] || PROJECT_AUTH_HOST="$(host_from_url "$(env_value AUTHENTIK_HOST)")"
+    [ -n "$PROJECT_AUTH_HOST" ] || PROJECT_AUTH_HOST="$(host_from_url "$(env_value AUTHENTIK_HOST_BROWSER)")"
+    [ -n "$PROJECT_AUTH_HOST" ] || PROJECT_AUTH_HOST="auth.${PROJECT_BASE_DOMAIN}"
+    PROJECT_AUTH_HOST="$(host_from_url "$PROJECT_AUTH_HOST")"
+    [ -n "$PROJECT_AUTH_HOST" ] || fail_with_report "Project Authentik host could not be derived."
+
+    PROJECT_AUTH_PREFIX="$(first_label_from_domain "$PROJECT_AUTH_HOST" "$PROJECT_BASE_DOMAIN")"
+    [ -n "$PROJECT_AUTH_PREFIX" ] || fail_with_report "Project Authentik prefix could not be derived."
+
+    env_project_slug="$(env_value PROJECT_SLUG)"
+    env_app_slug="$(env_value APP_SLUG)"
+    PROJECT_SLUG="$(sanitize_slug "${env_project_slug:-${env_app_slug:-${PROJECT_BASE_DOMAIN%%.*}}}")"
+    [ -n "$PROJECT_SLUG" ] || fail_with_report "Project slug could not be derived."
+
+    env_project_name="$(env_value PROJECT_NAME)"
+    env_app_name="$(env_value APP_NAME)"
+    env_company_name="$(env_value COMPANY_NAME)"
+    PROJECT_NAME="${env_project_name:-${env_app_name:-${env_company_name:-$(title_case_slug "$PROJECT_SLUG")}}}"
+    [ -n "$PROJECT_NAME" ] || fail_with_report "Project name could not be derived."
+
+    PROJECT_COOKIE_DOMAIN=".${PROJECT_BASE_DOMAIN}"
+    PROJECT_APP_URL="https://${PROJECT_APP_HOST}"
+    PROJECT_AUTH_URL="https://${PROJECT_AUTH_HOST}"
+    CIRCL8_HOST="$PROJECT_APP_HOST"
+    CIRCL8_URL="$PROJECT_APP_URL"
+
+    SCRIPT63_AUTHENTIK_OUTPOST_PK="$(marker_file_key_value "$SCRIPT63_MARKER" SCRIPT63_AUTHENTIK_OUTPOST_PK)"
+    SCRIPT63_AUTHENTIK_PROVIDER_PK="$(marker_file_key_value "$SCRIPT63_MARKER" SCRIPT63_AUTHENTIK_PROVIDER_PK)"
+    [ -n "$SCRIPT63_AUTHENTIK_OUTPOST_PK" ] || fail_with_report "Script 6.3 Authentik outpost marker key is missing."
+
+    aligned_status_line "Base domain" "$PROJECT_BASE_DOMAIN" "$GN"
+    aligned_status_line "Project slug" "$PROJECT_SLUG" "$GN"
+    aligned_status_line "Project name" "$PROJECT_NAME" "$GN"
+    aligned_status_line "App host" "$PROJECT_APP_HOST" "$GN"
+    aligned_status_line "Authentik host" "$PROJECT_AUTH_HOST" "$GN"
+    aligned_status_line "Cookie domain" "$PROJECT_COOKIE_DOMAIN" "$GN"
+}
+
+function build_authentik_identity_payload() {
+    local bootstrap_token="" api_token=""
+    bootstrap_token="$(env_value AUTHENTIK_BOOTSTRAP_TOKEN)"
+    api_token="$(env_value AUTHENTIK_API_TOKEN)"
+    AUTHENTIK_BOOTSTRAP_TOKEN_PAYLOAD="$bootstrap_token" \
+    AUTHENTIK_API_TOKEN_PAYLOAD="$api_token" \
+    PROJECT_BASE_DOMAIN_PAYLOAD="$PROJECT_BASE_DOMAIN" \
+    PROJECT_SLUG_PAYLOAD="$PROJECT_SLUG" \
+    PROJECT_NAME_PAYLOAD="$PROJECT_NAME" \
+    PROJECT_APP_URL_PAYLOAD="$PROJECT_APP_URL" \
+    PROJECT_AUTH_URL_PAYLOAD="$PROJECT_AUTH_URL" \
+    PROJECT_COOKIE_DOMAIN_PAYLOAD="$PROJECT_COOKIE_DOMAIN" \
+    SCRIPT63_AUTHENTIK_OUTPOST_PK_PAYLOAD="$SCRIPT63_AUTHENTIK_OUTPOST_PK" \
+    python3 - <<'PYCODE'
+import json, os
+keys = {
+    "bootstrap_token": "AUTHENTIK_BOOTSTRAP_TOKEN_PAYLOAD",
+    "api_token": "AUTHENTIK_API_TOKEN_PAYLOAD",
+    "project_base_domain": "PROJECT_BASE_DOMAIN_PAYLOAD",
+    "project_slug": "PROJECT_SLUG_PAYLOAD",
+    "project_name": "PROJECT_NAME_PAYLOAD",
+    "project_app_url": "PROJECT_APP_URL_PAYLOAD",
+    "project_auth_url": "PROJECT_AUTH_URL_PAYLOAD",
+    "project_cookie_domain": "PROJECT_COOKIE_DOMAIN_PAYLOAD",
+    "outpost_pk": "SCRIPT63_AUTHENTIK_OUTPOST_PK_PAYLOAD",
+}
+print(json.dumps({key: os.environ.get(env, "") for key, env in keys.items()}))
+PYCODE
+}
+
+function authentik_identity_python_code() {
+cat <<'PYCODE'
+import json, sys, time, re, urllib.parse, urllib.request, urllib.error
+
+BASE_URL = "http://127.0.0.1:9000"
+payload = json.loads(sys.stdin.read() or "{}")
+selected_token = ""
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = urllib.request.build_opener(NoRedirect)
+
+def sanitize(text):
+    text = str(text or "")
+    for key in ("bootstrap_token", "api_token"):
+        value = payload.get(key) or ""
+        if value:
+            text = text.replace(value, "[redacted]")
+    text = re.sub(r"(?i)(password|token|secret|authorization|bearer)[^\n]{0,160}", "[redacted]", text)
+    return text[:1000]
+
+def emit(key, value):
+    value = "" if value is None else str(value)
+    value = value.replace("\n", " ").replace("\r", " ")
+    print(f"{key}={value}")
+
+def fail(stage, message):
+    emit("RESULT", "failed")
+    emit("ERROR_STAGE", stage)
+    emit("ERROR_MESSAGE", sanitize(message))
+    sys.exit(2)
+
+def raw_request(method, path, body=None, token=None, expected=None, stage="api"):
+    url = BASE_URL + path
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with opener.open(req, timeout=15) as response:
+            raw = response.read().decode("utf-8", "replace")
+            code = getattr(response, "status", 200)
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8", "replace")
+        code = error.code
+    except Exception as error:
+        raw = sanitize(error)
+        code = 0
+    parsed = None
+    try:
+        parsed = json.loads(raw) if raw else None
+    except Exception:
+        parsed = None
+    if expected is not None and code not in expected:
+        fail(stage, f"{method} {path} returned HTTP {code}: {sanitize(raw)}")
+    return code, parsed, raw
+
+def api_request(method, path, body=None, expected=(200,), stage="api"):
+    code, parsed, raw = raw_request(method, path, body=body, token=selected_token, expected=expected, stage=stage)
+    return parsed
+
+def result_items(parsed):
+    if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
+        return parsed["results"]
+    if isinstance(parsed, list):
+        return parsed
+    return []
+
+def validate_token(timeout=180, interval=5):
+    global selected_token
+    candidates = [
+        ("AUTHENTIK_BOOTSTRAP_TOKEN", payload.get("bootstrap_token") or ""),
+        ("AUTHENTIK_API_TOKEN", payload.get("api_token") or ""),
+    ]
+    deadline = time.time() + timeout
+    last_status = 0
+    while time.time() <= deadline:
+        for source, token in candidates:
+            if not token:
+                continue
+            code, parsed, raw = raw_request("GET", "/api/v3/core/users/me/", token=token)
+            last_status = code
+            if code == 200:
+                selected_token = token
+                return
+        time.sleep(interval)
+    fail("api-token", f"Authentik API token did not become valid before timeout; last HTTP status {last_status}")
+
+def urlenc(params):
+    return urllib.parse.urlencode(params)
+
+def find_named(path, name):
+    parsed = api_request("GET", f"{path}?{urlenc({'search': name, 'page_size': 100})}", stage="lookup")
+    for item in result_items(parsed):
+        if item.get("name") == name:
+            return item
+    return None
+
+def find_slugged(path, slug):
+    parsed = api_request("GET", f"{path}?{urlenc({'slug': slug, 'page_size': 100})}", stage="lookup")
+    for item in result_items(parsed):
+        if item.get("slug") == slug:
+            return item
+    return None
+
+def options_fields(path):
+    code, parsed, raw = raw_request("OPTIONS", path, token=selected_token)
+    if code != 200 or not isinstance(parsed, dict):
+        return set()
+    actions = parsed.get("actions") or {}
+    post = actions.get("POST") or {}
+    return set(post.keys()) if isinstance(post, dict) else set()
+
+def get_flow_pk(slug):
+    parsed = api_request("GET", f"/api/v3/flows/instances/?{urlenc({'search': slug, 'page_size': 100})}", stage="flow")
+    for item in result_items(parsed):
+        if item.get("slug") == slug and item.get("pk"):
+            return item["pk"]
+    fail("flow", f"Required Authentik flow not found: {slug}")
+
+def ensure_group(name):
+    item = find_named("/api/v3/core/groups/", name)
+    body = {"name": name}
+    if item and item.get("pk"):
+        api_request("PATCH", f"/api/v3/core/groups/{item['pk']}/", body=body, expected=(200,), stage="group")
+        return str(item["pk"])
+    parsed = api_request("POST", "/api/v3/core/groups/", body=body, expected=(200, 201), stage="group")
+    pk = parsed.get("pk") if isinstance(parsed, dict) else ""
+    if not pk:
+        fail("group", "Group response did not include pk")
+    return str(pk)
+
+def ensure_akadmin_admin(admin_group_pk):
+    parsed = api_request("GET", "/api/v3/core/users/?" + urlenc({"username": "akadmin", "page_size": 100}), stage="akadmin")
+    user = None
+    for item in result_items(parsed):
+        if item.get("username") == "akadmin":
+            user = item
+            break
+    if not user or not user.get("pk"):
+        fail("akadmin", "akadmin user was not found")
+    groups = []
+    for group in user.get("groups") or []:
+        pk = group.get("pk") if isinstance(group, dict) else group
+        if pk and str(pk) not in groups:
+            groups.append(str(pk))
+    if str(admin_group_pk) not in groups:
+        groups.append(str(admin_group_pk))
+        api_request("PATCH", f"/api/v3/core/users/{user['pk']}/", body={"groups": groups}, expected=(200,), stage="akadmin")
+
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+def is_uuid(value):
+    return bool(UUID_RE.match(str(value or "")))
+
+def object_uuid(obj, stage, preferred=("pkuuid", "policy_uuid", "uuid", "pk")):
+    if not isinstance(obj, dict):
+        fail(stage, "Object response was not JSON object while resolving UUID")
+    for key in preferred:
+        value = obj.get(key)
+        if is_uuid(value):
+            return str(value)
+    for key, value in obj.items():
+        if isinstance(value, str) and is_uuid(value):
+            return value
+    fail(stage, "Object response did not expose a UUID target")
+
+def object_num_pk(obj, stage):
+    if not isinstance(obj, dict):
+        fail(stage, "Object response was not JSON object while resolving numeric pk")
+    value = obj.get("pk") or obj.get("num_pk")
+    if value is None or value == "":
+        fail(stage, "Object response did not include numeric pk")
+    return str(value)
+
+def binding_value(value):
+    if isinstance(value, dict):
+        for key in ("pkuuid", "policy_uuid", "uuid", "pk"):
+            if value.get(key) is not None:
+                return str(value.get(key))
+    return str(value or "")
+
+def ensure_policy(policy_name, allow_names):
+    expression = (
+        "allowed_groups = " + repr(allow_names) + "\n"
+        "return any(group.name in allowed_groups for group in request.user.ak_groups.all())\n"
+    )
+    item = find_named("/api/v3/policies/expression/", policy_name)
+    body = {"name": policy_name, "expression": expression}
+    if item and item.get("pk"):
+        updated = api_request("PATCH", f"/api/v3/policies/expression/{item['pk']}/", body=body, expected=(200,), stage="policy")
+        return object_uuid(updated if isinstance(updated, dict) else item, "policy", ("pkuuid", "policy_uuid", "uuid", "pk"))
+    parsed = api_request("POST", "/api/v3/policies/expression/", body=body, expected=(200, 201), stage="policy")
+    return object_uuid(parsed, "policy", ("pkuuid", "policy_uuid", "uuid", "pk"))
+
+def list_policy_bindings(policy_uuid):
+    code, parsed, raw = raw_request("GET", "/api/v3/policies/bindings/?" + urlenc({"policy": policy_uuid, "page_size": 100}), token=selected_token)
+    if code == 200:
+        return result_items(parsed)
+    parsed = api_request("GET", "/api/v3/policies/bindings/?" + urlenc({"page_size": 100}), stage="binding")
+    return result_items(parsed)
+
+def ensure_policy_binding(target_uuid, policy_uuid):
+    if not is_uuid(target_uuid):
+        fail("binding", "Policy binding target is not a UUID")
+    if not is_uuid(policy_uuid):
+        fail("binding", "Policy binding policy is not a UUID")
+    binding = None
+    for item in list_policy_bindings(policy_uuid):
+        if binding_value(item.get("target")) == target_uuid and binding_value(item.get("policy")) == policy_uuid:
+            binding = item
+            break
+    body = {"target": target_uuid, "policy": policy_uuid, "order": 0, "enabled": True, "negate": False, "timeout": 30}
+    if binding and binding.get("pk"):
+        api_request("PATCH", f"/api/v3/policies/bindings/{binding['pk']}/", body=body, expected=(200,), stage="binding")
+    else:
+        api_request("POST", "/api/v3/policies/bindings/", body=body, expected=(200, 201), stage="binding")
+
+def ensure_provider(name, external_host, cookie_domain):
+    auth_flow = get_flow_pk("default-authentication-flow")
+    authz_flow = get_flow_pk("default-provider-authorization-implicit-consent")
+    invalidation_flow = get_flow_pk("default-provider-invalidation-flow")
+    item = find_named("/api/v3/providers/proxy/", name)
+    fields = options_fields("/api/v3/providers/proxy/")
+    body = {
+        "name": name,
+        "mode": "forward_domain",
+        "external_host": external_host,
+        "authentication_flow": auth_flow,
+        "authorization_flow": authz_flow,
+        "invalidation_flow": invalidation_flow,
+        "basic_auth_enabled": False,
+        "skip_path_regex": "",
+    }
+    if "cookie_domain" in fields:
+        body["cookie_domain"] = cookie_domain
+    if item and item.get("pk"):
+        updated = api_request("PATCH", f"/api/v3/providers/proxy/{item['pk']}/", body=body, expected=(200,), stage="provider")
+        return updated if isinstance(updated, dict) else item
+    parsed = api_request("POST", "/api/v3/providers/proxy/", body=body, expected=(200, 201), stage="provider")
+    if not isinstance(parsed, dict) or not parsed.get("pk"):
+        fail("provider", "Provider response did not include pk")
+    return parsed
+
+def ensure_application(name, slug, app_url, provider_pk):
+    item = find_slugged("/api/v3/core/applications/", slug)
+    fields = options_fields("/api/v3/core/applications/")
+    body = {"name": name, "slug": slug, "provider": provider_pk, "open_in_new_tab": False, "meta_launch_url": app_url}
+    if "launch_url" in fields:
+        body["launch_url"] = app_url
+    if item:
+        target = item.get("slug") or item.get("pk")
+        code, parsed, raw = raw_request("PATCH", f"/api/v3/core/applications/{target}/", body=body, token=selected_token)
+        if code != 200 and item.get("pk"):
+            code, parsed, raw = raw_request("PATCH", f"/api/v3/core/applications/{item['pk']}/", body=body, token=selected_token)
+        if code != 200:
+            fail("application", f"PATCH application returned HTTP {code}: {sanitize(raw)}")
+        return parsed if isinstance(parsed, dict) else (find_slugged("/api/v3/core/applications/", slug) or item)
+    parsed = api_request("POST", "/api/v3/core/applications/", body=body, expected=(200, 201), stage="application")
+    if not isinstance(parsed, dict):
+        fail("application", "Application response did not include JSON object")
+    return parsed
+
+def provider_ids_from_outpost(outpost):
+    ids = []
+    for provider in outpost.get("providers") or []:
+        pk = provider.get("pk") if isinstance(provider, dict) else provider
+        if pk and str(pk) not in ids:
+            ids.append(str(pk))
+    return ids
+
+def attach_provider_to_outpost(provider_pk, outpost_pk):
+    if not outpost_pk:
+        fail("outpost", "Script 6.3 outpost marker did not include an outpost pk")
+    outpost = api_request("GET", f"/api/v3/outposts/instances/{outpost_pk}/", stage="outpost")
+    providers = provider_ids_from_outpost(outpost)
+    if str(provider_pk) not in providers:
+        providers.append(str(provider_pk))
+    api_request("PATCH", f"/api/v3/outposts/instances/{outpost_pk}/", body={"providers": providers}, expected=(200,), stage="outpost")
+
+def configure_identity():
+    slug = payload["project_slug"]
+    project_name = payload["project_name"]
+    group_suffixes = [
+        "admins", "staff",
+        "status-trial", "status-active", "status-past-due", "status-cancelled", "status-suspended", "status-deletion-requested",
+        "plan-starter", "plan-growth", "plan-pro",
+    ]
+    group_names = {suffix: f"{slug}-{suffix}" for suffix in group_suffixes}
+    group_pks = {suffix: ensure_group(name) for suffix, name in group_names.items()}
+    emit("SCRIPT64_AUTHENTIK_GROUPS", "ready")
+    ensure_akadmin_admin(group_pks["admins"])
+    emit("SCRIPT64_AUTHENTIK_AKADMIN", group_names["admins"])
+    allow_group_names = [group_names[suffix] for suffix in ("admins", "staff", "status-trial", "status-active")]
+    policy_pk = ensure_policy(f"{project_name} App Access", allow_group_names)
+    emit("SCRIPT64_AUTHENTIK_POLICY", "ready")
+    provider_obj = ensure_provider(f"{project_name} App ForwardAuth", payload["project_auth_url"], payload["project_cookie_domain"])
+    provider_pk = object_num_pk(provider_obj, "provider")
+    emit("SCRIPT64_AUTHENTIK_PROVIDER", "ready")
+    application_obj = ensure_application(f"{project_name} App", f"{slug}-app", payload["project_app_url"], provider_pk)
+    emit("SCRIPT64_AUTHENTIK_APPLICATION", "ready")
+    application_target_uuid = object_uuid(application_obj, "application", ("pkuuid", "uuid", "pk"))
+    ensure_policy_binding(application_target_uuid, policy_pk)
+    attach_provider_to_outpost(provider_pk, payload.get("outpost_pk") or "")
+    emit("SCRIPT64_AUTHENTIK_OUTPOST", "attached")
+
+def main():
+    validate_token()
+    configure_identity()
+    emit("RESULT", "ok")
+
+main()
+PYCODE
+}
+
+function apply_authentik_identity_result_file() {
+    local file="$1" key="" value=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            SCRIPT64_AUTHENTIK_GROUPS) SCRIPT64_AUTHENTIK_GROUPS="$value" ;;
+            SCRIPT64_AUTHENTIK_POLICY) SCRIPT64_AUTHENTIK_POLICY="$value" ;;
+            SCRIPT64_AUTHENTIK_APPLICATION) SCRIPT64_AUTHENTIK_APPLICATION="$value" ;;
+            SCRIPT64_AUTHENTIK_PROVIDER) SCRIPT64_AUTHENTIK_PROVIDER="$value" ;;
+            SCRIPT64_AUTHENTIK_OUTPOST) SCRIPT64_AUTHENTIK_OUTPOST="$value" ;;
+            SCRIPT64_AUTHENTIK_AKADMIN) SCRIPT64_AUTHENTIK_AKADMIN="$value" ;;
+            ERROR_STAGE) AUTHENTIK_IDENTITY_ERROR_STAGE="$value" ;;
+            ERROR_MESSAGE) AUTHENTIK_IDENTITY_ERROR_MESSAGE="$value" ;;
+        esac
+    done < "$file"
+}
+
+function write_authentik_identity_failure_log() {
+    local reason="${1:-Authentik identity lane failed}" ts=""
+    ts="$(date +%Y%m%d-%H%M%S)"
+    FAILURE_LOG="/var/log/circl8-app-authentik-identity-failed-${ts}.log"
+    {
+        printf '%s\n' "$reason"
+        printf '%s\n' "Stage: ${AUTHENTIK_IDENTITY_ERROR_STAGE:-unknown}"
+        printf '%s\n' "Message: ${AUTHENTIK_IDENTITY_ERROR_MESSAGE:-unknown}"
+        printf '%s\n' ""
+        printf '%s\n' "Authentik server recent logs, sanitized:"
+        docker_cmd logs --tail=160 authentik-server 2>&1 | sanitize_diagnostic_stream || true
+    } | write_root_file "$FAILURE_LOG"
+}
+
+function fail_authentik_identity() {
+    local message="$1"
+    echo -ne "${BFR}"
+    SCRIPT64_STATUS="authentik-identity-failed"
+    SCRIPT64_VERIFY_STATUS="FAILED"
+    SCRIPT64_DEPLOYMENT="completed"
+    SCRIPT64_READY_FOR_DEPLOYMENT_LANE="yes"
+    SCRIPT64_READY_FOR_AUTHENTIK_LANE="no"
+    SCRIPT64_READY_FOR_SCRIPT65="no"
+    write_authentik_identity_failure_log "$message" || true
+    fail_with_report "$message"
+}
+
+function run_authentik_identity_lane() {
+    section "AUTHENTIK GROUPS / POLICY"
+    local payload="" py_code="" out_file="" err_file=""
+    payload="$(build_authentik_identity_payload)"
+    py_code="$(authentik_identity_python_code)"
+    out_file="$(mktemp /tmp/circl8-authentik-identity-out.XXXXXX)"
+    err_file="$(mktemp /tmp/circl8-authentik-identity-err.XXXXXX)"
+    TEMP_FILES+=("$out_file" "$err_file")
+
+    msg_info "Configuring derived Authentik identity objects"
+    if printf '%s' "$payload" | docker_cmd exec -i authentik-server python -c "$py_code" >"$out_file" 2>"$err_file"; then
+        apply_authentik_identity_result_file "$out_file"
+        msg_ok "AUTHENTIK IDENTITY OBJECTS READY"
+    else
+        apply_authentik_identity_result_file "$out_file" || true
+        sanitize_diagnostic_stream < "$err_file" >> "${DEPLOY_OUTPUT_LOG:-/tmp/circl8-authentik-identity.err}" 2>/dev/null || true
+        fail_authentik_identity "Authentik identity lane failed."
+    fi
+
+    section "AUTHENTIK APPLICATION / PROVIDER"
+    aligned_status_line "Application" "$SCRIPT64_AUTHENTIK_APPLICATION" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_APPLICATION")"
+    aligned_status_line "Provider" "$SCRIPT64_AUTHENTIK_PROVIDER" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_PROVIDER")"
+    aligned_status_line "Outpost" "$SCRIPT64_AUTHENTIK_OUTPOST" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_OUTPOST")"
+
+    section "VERIFY AUTHENTIK IDENTITY"
+    aligned_status_line "Groups" "$SCRIPT64_AUTHENTIK_GROUPS" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_GROUPS")"
+    aligned_status_line "Policy" "$SCRIPT64_AUTHENTIK_POLICY" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_POLICY")"
+    aligned_status_line "akadmin" "$SCRIPT64_AUTHENTIK_AKADMIN" "$GN"
+
+    [ "$SCRIPT64_AUTHENTIK_GROUPS" = "ready" ] || fail_authentik_identity "Authentik groups were not ready."
+    [ "$SCRIPT64_AUTHENTIK_POLICY" = "ready" ] || fail_authentik_identity "Authentik access policy was not ready."
+    [ "$SCRIPT64_AUTHENTIK_APPLICATION" = "ready" ] || fail_authentik_identity "Authentik application was not ready."
+    [ "$SCRIPT64_AUTHENTIK_PROVIDER" = "ready" ] || fail_authentik_identity "Authentik provider was not ready."
+    [ "$SCRIPT64_AUTHENTIK_OUTPOST" = "attached" ] || fail_authentik_identity "Authentik outpost was not attached."
+    SCRIPT64_READY_FOR_AUTHENTIK_LANE="yes"
+    SCRIPT64_READY_FOR_SCRIPT65="no"
+}
+
+function verify_core_marker_or_stack() {
+    local marker_status="" marker_verify="" marker_deploy="" marker_ready=""
+    marker_status="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_STATUS)"
+    marker_verify="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_VERIFY_STATUS)"
+    marker_deploy="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_DEPLOYMENT)"
+    marker_ready="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_READY_FOR_AUTHENTIK_LANE)"
+    if [ "$marker_status" = "completed" ] && [ "$marker_verify" = "PASS" ] && [ "$marker_deploy" = "completed" ] && [ "$marker_ready" = "yes" ]; then
+        SCRIPT64_STATUS="completed"
+        SCRIPT64_VERIFY_STATUS="PASS"
+        SCRIPT64_DEPLOYMENT="completed"
+        SCRIPT64_CIRCL8_POSTGRES="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_CIRCL8_POSTGRES)"
+        SCRIPT64_CIRCL8_REDIS="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_CIRCL8_REDIS)"
+        SCRIPT64_CIRCL8_TEMPORAL="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_CIRCL8_TEMPORAL)"
+        SCRIPT64_CIRCL8_APP="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_CIRCL8_APP)"
+        SCRIPT64_CIRCL8_INTERNAL_HTTP="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_CIRCL8_INTERNAL_HTTP)"
+        SCRIPT64_CIRCL8_ROUTE="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_CIRCL8_ROUTE)"
+        SCRIPT64_CIRCL8_POSTGRES="${SCRIPT64_CIRCL8_POSTGRES:-healthy}"
+        SCRIPT64_CIRCL8_REDIS="${SCRIPT64_CIRCL8_REDIS:-healthy}"
+        SCRIPT64_CIRCL8_TEMPORAL="${SCRIPT64_CIRCL8_TEMPORAL:-ready}"
+        SCRIPT64_CIRCL8_APP="${SCRIPT64_CIRCL8_APP:-running}"
+        SCRIPT64_CIRCL8_INTERNAL_HTTP="${SCRIPT64_CIRCL8_INTERNAL_HTTP:-ready}"
+        SCRIPT64_CIRCL8_ROUTE="${SCRIPT64_CIRCL8_ROUTE:-protected}"
+        aligned_status_line "Core marker" "ready" "$GN"
+        return 0
+    fi
+    verify_circl8_core
+    SCRIPT64_DEPLOYMENT="completed"
 }
 
 # =========================================================
@@ -639,6 +1238,38 @@ function write_verify_report() {
         printf '%s
 ' "SCRIPT64_CIRCL8_ROUTE=${SCRIPT64_CIRCL8_ROUTE}"
         printf '%s
+' "SCRIPT64_PROJECT_BASE_DOMAIN=${PROJECT_BASE_DOMAIN}"
+        printf '%s
+' "SCRIPT64_PROJECT_SLUG=${PROJECT_SLUG}"
+        printf '%s
+' "SCRIPT64_PROJECT_NAME=${PROJECT_NAME}"
+        printf '%s
+' "SCRIPT64_PROJECT_APP_PREFIX=${PROJECT_APP_PREFIX}"
+        printf '%s
+' "SCRIPT64_PROJECT_APP_HOST=${PROJECT_APP_HOST}"
+        printf '%s
+' "SCRIPT64_PROJECT_APP_URL=${PROJECT_APP_URL}"
+        printf '%s
+' "SCRIPT64_PROJECT_AUTH_PREFIX=${PROJECT_AUTH_PREFIX}"
+        printf '%s
+' "SCRIPT64_PROJECT_AUTH_HOST=${PROJECT_AUTH_HOST}"
+        printf '%s
+' "SCRIPT64_PROJECT_AUTH_URL=${PROJECT_AUTH_URL}"
+        printf '%s
+' "SCRIPT64_PROJECT_COOKIE_DOMAIN=${PROJECT_COOKIE_DOMAIN}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_GROUPS=${SCRIPT64_AUTHENTIK_GROUPS}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_POLICY=${SCRIPT64_AUTHENTIK_POLICY}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_APPLICATION=${SCRIPT64_AUTHENTIK_APPLICATION}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_PROVIDER=${SCRIPT64_AUTHENTIK_PROVIDER}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_OUTPOST=${SCRIPT64_AUTHENTIK_OUTPOST}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_AKADMIN=${SCRIPT64_AUTHENTIK_AKADMIN}"
+        printf '%s
 ' "SCRIPT64_READY_FOR_DEPLOYMENT_LANE=${SCRIPT64_READY_FOR_DEPLOYMENT_LANE}"
         printf '%s
 ' "SCRIPT64_READY_FOR_AUTHENTIK_LANE=${SCRIPT64_READY_FOR_AUTHENTIK_LANE}"
@@ -665,11 +1296,20 @@ function write_verify_report() {
 
 function fail_with_report() {
     local message="$1"
-    if [ "${SCRIPT64_STATUS:-}" != "deploy-failed" ]; then
-        SCRIPT64_STATUS="template-preflight-failed"
-    fi
+    case "${SCRIPT64_STATUS:-}" in
+        deploy-failed)
+            SCRIPT64_READY_FOR_DEPLOYMENT_LANE="no"
+            ;;
+        authentik-identity-failed)
+            SCRIPT64_DEPLOYMENT="completed"
+            SCRIPT64_READY_FOR_DEPLOYMENT_LANE="yes"
+            ;;
+        *)
+            SCRIPT64_STATUS="template-preflight-failed"
+            SCRIPT64_READY_FOR_DEPLOYMENT_LANE="no"
+            ;;
+    esac
     SCRIPT64_VERIFY_STATUS="FAILED"
-    SCRIPT64_READY_FOR_DEPLOYMENT_LANE="no"
     SCRIPT64_READY_FOR_AUTHENTIK_LANE="no"
     SCRIPT64_READY_FOR_SCRIPT65="no"
     write_verify_report || true
@@ -777,6 +1417,38 @@ function write_deployment_marker() {
 ' "SCRIPT64_CIRCL8_INTERNAL_HTTP=${SCRIPT64_CIRCL8_INTERNAL_HTTP}"
         printf '%s
 ' "SCRIPT64_CIRCL8_ROUTE=${SCRIPT64_CIRCL8_ROUTE}"
+        printf '%s
+' "SCRIPT64_PROJECT_BASE_DOMAIN=${PROJECT_BASE_DOMAIN}"
+        printf '%s
+' "SCRIPT64_PROJECT_SLUG=${PROJECT_SLUG}"
+        printf '%s
+' "SCRIPT64_PROJECT_NAME=${PROJECT_NAME}"
+        printf '%s
+' "SCRIPT64_PROJECT_APP_PREFIX=${PROJECT_APP_PREFIX}"
+        printf '%s
+' "SCRIPT64_PROJECT_APP_HOST=${PROJECT_APP_HOST}"
+        printf '%s
+' "SCRIPT64_PROJECT_APP_URL=${PROJECT_APP_URL}"
+        printf '%s
+' "SCRIPT64_PROJECT_AUTH_PREFIX=${PROJECT_AUTH_PREFIX}"
+        printf '%s
+' "SCRIPT64_PROJECT_AUTH_HOST=${PROJECT_AUTH_HOST}"
+        printf '%s
+' "SCRIPT64_PROJECT_AUTH_URL=${PROJECT_AUTH_URL}"
+        printf '%s
+' "SCRIPT64_PROJECT_COOKIE_DOMAIN=${PROJECT_COOKIE_DOMAIN}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_GROUPS=${SCRIPT64_AUTHENTIK_GROUPS}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_POLICY=${SCRIPT64_AUTHENTIK_POLICY}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_APPLICATION=${SCRIPT64_AUTHENTIK_APPLICATION}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_PROVIDER=${SCRIPT64_AUTHENTIK_PROVIDER}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_OUTPOST=${SCRIPT64_AUTHENTIK_OUTPOST}"
+        printf '%s
+' "SCRIPT64_AUTHENTIK_AKADMIN=${SCRIPT64_AUTHENTIK_AKADMIN}"
         printf '%s
 ' "SCRIPT64_READY_FOR_AUTHENTIK_LANE=yes"
         printf '%s
@@ -1323,6 +1995,15 @@ function finish_deployment_success() {
     final_line "Circl8 app" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
     final_line "Internal HTTP" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
     final_line "Public route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
+    final_line "Project slug" "$PROJECT_SLUG" "$GN"
+    final_line "App host" "$PROJECT_APP_HOST" "$GN"
+    final_line "Authentik host" "$PROJECT_AUTH_HOST" "$GN"
+    final_line "Groups" "$SCRIPT64_AUTHENTIK_GROUPS" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_GROUPS")"
+    final_line "Policy" "$SCRIPT64_AUTHENTIK_POLICY" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_POLICY")"
+    final_line "Application" "$SCRIPT64_AUTHENTIK_APPLICATION" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_APPLICATION")"
+    final_line "Provider" "$SCRIPT64_AUTHENTIK_PROVIDER" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_PROVIDER")"
+    final_line "Outpost" "$SCRIPT64_AUTHENTIK_OUTPOST" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_OUTPOST")"
+    final_line "akadmin" "$SCRIPT64_AUTHENTIK_AKADMIN" "$GN"
     final_line "Ready for Authentik lane" "$SCRIPT64_READY_FOR_AUTHENTIK_LANE" "$GN"
     final_line "Ready for Script 6.5" "$SCRIPT64_READY_FOR_SCRIPT65" "$YW"
     final_line "Verify log" "$VERIFY_LOG" "$BL"
@@ -1333,6 +2014,7 @@ function finish_deployment_success() {
 function run_circl8_deploy_success_path() {
     deploy_circl8_core
     verify_circl8_core
+    run_authentik_identity_lane
     finish_deployment_success
 }
 
@@ -1359,6 +2041,15 @@ function run_deploy_decision_or_mode() {
             else
                 finish_preflight_only_success
             fi
+            ;;
+        authentik-only)
+            section "DEPLOY CIRCL8"
+            mini_header "Mode"
+            aligned_status_line "Run mode" "authentik-only" "$GN"
+            aligned_status_line "Core deploy action" "not-run" "$GN"
+            verify_core_marker_or_stack
+            run_authentik_identity_lane
+            finish_deployment_success
             ;;
         *)
             usage >&2
@@ -1390,6 +2081,7 @@ function main() {
     init_script
     validate_script63_gate
     runtime_preflight
+    derive_project_identity
     ensure_circl8_env_keys
     prepare_circl8_directories
     download_and_render_templates
