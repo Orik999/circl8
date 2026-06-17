@@ -5,9 +5,9 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 #  Project Circl8 - Script 6.4 Circl8 Template Preflight
 # =========================================================
-# Phase 4 v1.2.1 keeps the marker/env-derived Authentik identity lane and
-# fixes policy binding target selection for Authentik versions whose policy
-# binding target expects an object UUID instead of a numeric provider PK.
+# Phase 4 v1.2.2 keeps the marker/env-derived Authentik identity lane and
+# polishes interactive rerun/UI flow without changing core deploy or Authentik
+# identity API semantics.
 
 YW="$(printf '\033[33m')"
 BL="$(printf '\033[36m')"
@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.4-circl8Bootstrap.sh"
-SCRIPT_VERSION="v1.2.1"
+SCRIPT_VERSION="v1.2.2"
 SCRIPT_UPDATED="2026-06-16"
-SCRIPT_BUILD="authentik-policy-binding-target-fix"
+SCRIPT_BUILD="ui-rerun-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -49,6 +49,8 @@ SCRIPT_DIR=""
 TEMP_FILES=()
 TEMP_DIRS=()
 SCRIPT64_RUN_MODE="prompt"
+SCRIPT64_AUTHENTIK_LANE_RAN="no"
+SCRIPT64_EXISTING_DEPLOYMENT_STATE="unknown"
 
 RAW_BASE_DEFAULT="https://raw.githubusercontent.com/Orik999/circl8/refs/heads/main"
 CIRCL8_COMPOSE_TEMPLATE_URL="${CIRCL8_COMPOSE_TEMPLATE_URL:-${RAW_BASE_DEFAULT}/docker/06-circl8-compose.yml}"
@@ -159,7 +161,7 @@ function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        PASS|pass|completed|present|ready|yes|valid|downloaded|rendered|synced|created|preserved|healthy|running|protected|not-needed|not\ needed|template-preflight-completed|not-run|not\ run) printf '%s' "$GN" ;;
+        PASS|pass|completed|present|ready|yes|valid|downloaded|rendered|synced|created|preserved|healthy|running|protected|not-needed|not\ needed|template-preflight-completed|render-only-completed|verify-only-completed|not-run|not\ run|preserved) printf '%s' "$GN" ;;
         PENDING|pending|unknown|skipped|needs-review|will-create|will\ create|not-selected|not\ selected) printf '%s' "$YW" ;;
         FAIL|FAILED|failed|missing|no|invalid|blocked|unsafe) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
@@ -172,6 +174,9 @@ function ui_display_value() {
         not-run) printf 'not run' ;;
         not-needed) printf 'not needed' ;;
         template-preflight-completed) printf 'template preflight completed' ;;
+        render-only-completed) printf 'render only completed' ;;
+        verify-only-completed) printf 'verify only completed' ;;
+        deploy-core) printf 'deploy core only' ;;
         needs-review) printf 'needs review' ;;
         *) printf '%s' "$value" ;;
     esac
@@ -187,6 +192,46 @@ function aligned_status_line() {
 
 function final_line() {
     aligned_status_line "$1" "${2:-unknown}" "${3:-}" "$UI_LABEL_WIDTH"
+}
+
+function progress_status_line() {
+    local label="$1" value="${2:-pending}" color="${3:-$YW}"
+    aligned_status_line "$label" "$value" "$color"
+}
+
+function progress_ready_line() {
+    local label="$1" value="${2:-ready}"
+    printf '  %b %b%-*s%b %b%s%b\n' "$CM" "$BL" "$UI_LABEL_WIDTH" "${label}:" "$CL" "$GN" "$(ui_display_value "$value")" "$CL"
+}
+
+function progress_fail_line() {
+    local label="$1" value="${2:-failed}"
+    echo -ne "${BFR}"
+    printf '  %b %b%-*s%b %b%s%b\n' "$CROSS" "$BL" "$UI_LABEL_WIDTH" "${label}:" "$CL" "$RD" "$(ui_display_value "$value")" "$CL"
+}
+
+function tty_print() {
+    if [ -w /dev/tty ]; then
+        echo -ne "$*" > /dev/tty
+    else
+        echo -ne "$*" >&2
+    fi
+}
+
+function tty_println() {
+    if [ -w /dev/tty ]; then
+        echo -e "$*" > /dev/tty
+    else
+        echo -e "$*" >&2
+    fi
+}
+
+function flush_input_buffer() {
+    local junk="" i=""
+    [ -r /dev/tty ] || return 0
+    for i in {1..20}; do
+        IFS= read -rsn1 -t 0.02 junk < /dev/tty || break
+    done
 }
 
 # =========================================================
@@ -315,12 +360,14 @@ function download_file() {
 
 function usage() {
     printf '%s
-' "Usage: sudo ./6.4-circl8Bootstrap.sh [--preflight-only|--deploy|--authentik-only]"
+' "Usage: sudo ./6.4-circl8Bootstrap.sh [--preflight-only|--deploy|--authentik-only|--verify-only|--render-only]"
 }
 
 function parse_args() {
     local arg=""
     SCRIPT64_RUN_MODE="prompt"
+    SCRIPT64_AUTHENTIK_LANE_RAN="no"
+    SCRIPT64_EXISTING_DEPLOYMENT_STATE="unknown"
 
     if [ "$#" -gt 1 ]; then
         usage >&2
@@ -338,6 +385,12 @@ function parse_args() {
             --authentik-only)
                 SCRIPT64_RUN_MODE="authentik-only"
                 ;;
+            --verify-only)
+                SCRIPT64_RUN_MODE="verify-only"
+                ;;
+            --render-only)
+                SCRIPT64_RUN_MODE="render-only"
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -351,15 +404,41 @@ function parse_args() {
 }
 
 function read_yes_no() {
-    local prompt="$1" default="${2:-n}" answer="" label="y/N"
+    local prompt="$1" default="${2:-n}" key="" label="y/N" answer=""
     [[ "$default" =~ ^[Yy]$ ]] && label="Y/n"
 
     if [ ! -r /dev/tty ]; then
         return 2
     fi
 
-    read -r -p "${prompt} [${label}]: " answer < /dev/tty || answer=""
-    [ -n "$answer" ] || answer="$default"
+    flush_input_buffer 2>/dev/null || true
+    while true; do
+        tty_print "${BFR}${YW}${prompt} [${label}]: ${CL}"
+        IFS= read -rsn1 key < /dev/tty || key=""
+        case "$key" in
+            "")
+                answer="$default"
+                break
+                ;;
+            $'\n'|$'\r')
+                answer="$default"
+                break
+                ;;
+            [Yy])
+                answer="y"
+                break
+                ;;
+            [Nn])
+                answer="n"
+                break
+                ;;
+            *)
+                continue
+                ;;
+        esac
+    done
+    tty_print "${BFR}"
+    flush_input_buffer 2>/dev/null || true
     [[ "$answer" =~ ^[Yy]$ ]]
 }
 
@@ -1118,7 +1197,7 @@ function fail_authentik_identity() {
 }
 
 function run_authentik_identity_lane() {
-    section "AUTHENTIK GROUPS / POLICY"
+    section "AUTHENTIK"
     local payload="" py_code="" out_file="" err_file=""
     payload="$(build_authentik_identity_payload)"
     py_code="$(authentik_identity_python_code)"
@@ -1126,13 +1205,17 @@ function run_authentik_identity_lane() {
     err_file="$(mktemp /tmp/circl8-authentik-identity-err.XXXXXX)"
     TEMP_FILES+=("$out_file" "$err_file")
 
+    progress_status_line "Authentik" "configuring" "$YW"
     msg_info "Configuring derived Authentik identity objects"
     if printf '%s' "$payload" | docker_cmd exec -i authentik-server python -c "$py_code" >"$out_file" 2>"$err_file"; then
         apply_authentik_identity_result_file "$out_file"
+        SCRIPT64_AUTHENTIK_LANE_RAN="yes"
         msg_ok "AUTHENTIK IDENTITY OBJECTS READY"
+        progress_ready_line "Authentik" "ready"
     else
         apply_authentik_identity_result_file "$out_file" || true
         sanitize_diagnostic_stream < "$err_file" >> "${DEPLOY_OUTPUT_LOG:-/tmp/circl8-authentik-identity.err}" 2>/dev/null || true
+        progress_fail_line "Authentik" "failed"
         fail_authentik_identity "Authentik identity lane failed."
     fi
 
@@ -1313,6 +1396,7 @@ function fail_with_report() {
     SCRIPT64_READY_FOR_AUTHENTIK_LANE="no"
     SCRIPT64_READY_FOR_SCRIPT65="no"
     write_verify_report || true
+    echo -ne "${BFR}"
     echo -e "${CROSS} ${RD}${message}${CL}"
     echo -e "  ${BL}Verify log:${CL} ${VERIFY_LOG}"
     [ -n "${FAILURE_LOG:-}" ] && echo -e "  ${BL}Failure log:${CL} ${FAILURE_LOG}"
@@ -1377,8 +1461,43 @@ function write_completion_marker() {
     SCRIPT64_MARKER_WRITTEN="yes"
 }
 
+function existing_deployment_marker_completed() {
+    local marker_status="" marker_verify="" marker_deploy=""
+    marker_status="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_STATUS)"
+    marker_verify="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_VERIFY_STATUS)"
+    marker_deploy="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_DEPLOYMENT)"
+    [ "$marker_status" = "completed" ] && [ "$marker_verify" = "PASS" ] && [ "$marker_deploy" = "completed" ]
+}
+
+function preserve_existing_authentik_marker_values() {
+    local value=""
+    if ! existing_deployment_marker_completed; then
+        return 0
+    fi
+    value="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_AUTHENTIK_GROUPS)"
+    [ "$SCRIPT64_AUTHENTIK_GROUPS" = "not-run" ] && [ -n "$value" ] && SCRIPT64_AUTHENTIK_GROUPS="$value"
+    value="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_AUTHENTIK_POLICY)"
+    [ "$SCRIPT64_AUTHENTIK_POLICY" = "not-run" ] && [ -n "$value" ] && SCRIPT64_AUTHENTIK_POLICY="$value"
+    value="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_AUTHENTIK_APPLICATION)"
+    [ "$SCRIPT64_AUTHENTIK_APPLICATION" = "not-run" ] && [ -n "$value" ] && SCRIPT64_AUTHENTIK_APPLICATION="$value"
+    value="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_AUTHENTIK_PROVIDER)"
+    [ "$SCRIPT64_AUTHENTIK_PROVIDER" = "not-run" ] && [ -n "$value" ] && SCRIPT64_AUTHENTIK_PROVIDER="$value"
+    value="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_AUTHENTIK_OUTPOST)"
+    [ "$SCRIPT64_AUTHENTIK_OUTPOST" = "not-run" ] && [ -n "$value" ] && SCRIPT64_AUTHENTIK_OUTPOST="$value"
+    value="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_AUTHENTIK_AKADMIN)"
+    [ "$SCRIPT64_AUTHENTIK_AKADMIN" = "not-run" ] && [ -n "$value" ] && SCRIPT64_AUTHENTIK_AKADMIN="$value"
+    value="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_READY_FOR_AUTHENTIK_LANE)"
+    [ "$SCRIPT64_READY_FOR_AUTHENTIK_LANE" = "no" ] && [ "$value" = "yes" ] && SCRIPT64_READY_FOR_AUTHENTIK_LANE="yes"
+    if [ "$SCRIPT64_AUTHENTIK_GROUPS" = "ready" ]         && [ "$SCRIPT64_AUTHENTIK_POLICY" = "ready" ]         && [ "$SCRIPT64_AUTHENTIK_APPLICATION" = "ready" ]         && [ "$SCRIPT64_AUTHENTIK_PROVIDER" = "ready" ]         && [ "$SCRIPT64_AUTHENTIK_OUTPOST" = "attached" ]; then
+        SCRIPT64_READY_FOR_AUTHENTIK_LANE="yes"
+    fi
+}
+
 function write_deployment_marker() {
     local tmp_file=""
+    if [ "$SCRIPT64_AUTHENTIK_LANE_RAN" != "yes" ]; then
+        preserve_existing_authentik_marker_values
+    fi
     tmp_file="$(mktemp /tmp/circl8-app-deployed-marker.XXXXXX)"
     {
         printf '%s
@@ -1450,7 +1569,7 @@ function write_deployment_marker() {
         printf '%s
 ' "SCRIPT64_AUTHENTIK_AKADMIN=${SCRIPT64_AUTHENTIK_AKADMIN}"
         printf '%s
-' "SCRIPT64_READY_FOR_AUTHENTIK_LANE=yes"
+' "SCRIPT64_READY_FOR_AUTHENTIK_LANE=${SCRIPT64_READY_FOR_AUTHENTIK_LANE}"
         printf '%s
 ' "SCRIPT64_READY_FOR_SCRIPT65=no"
     } > "$tmp_file"
@@ -1580,6 +1699,28 @@ function env_default_for_key() {
     esac
 }
 
+function env_display_label_for_key() {
+    local key="$1"
+    case "$key" in
+        CIRCL8_HOST) printf 'Host' ;;
+        CIRCL8_URL) printf 'URL' ;;
+        CIRCL8_IMAGE) printf 'App image' ;;
+        CIRCL8_REDIS_IMAGE) printf 'Redis image' ;;
+        CIRCL8_TEMPORAL_IMAGE) printf 'Temporal image' ;;
+        CIRCL8_POSTGRES_SUPERUSER_PASSWORD) printf 'Postgres superuser secret' ;;
+        CIRCL8_APP_POSTGRES_PASSWORD) printf 'App DB secret' ;;
+        CIRCL8_TEMPORAL_POSTGRES_PASSWORD) printf 'Temporal DB secret' ;;
+        CIRCL8_JWT_SECRET) printf 'JWT secret' ;;
+        CIRCL8_NEXTAUTH_SECRET) printf 'NextAuth secret' ;;
+        CIRCL8_SECRET_KEY) printf 'App secret' ;;
+        CIRCL8_MEDIA_RETENTION_MODE) printf 'Media mode' ;;
+        CIRCL8_MEDIA_RETRY_RETENTION_HOURS) printf 'Retry retention' ;;
+        CIRCL8_MEDIA_DRAFT_RETENTION_DAYS) printf 'Draft retention' ;;
+        CIRCL8_API_LIMIT) printf 'API limit' ;;
+        *) printf '%s' "$key" ;;
+    esac
+}
+
 function ensure_circl8_env_keys() {
     section "CIRCL8 ENV"
     local keys=(
@@ -1599,7 +1740,7 @@ function ensure_circl8_env_keys() {
         CIRCL8_MEDIA_DRAFT_RETENTION_DAYS
         CIRCL8_API_LIMIT
     )
-    local key="" value="" tmp_append="" backup_path="" ts=""
+    local key="" label="" value="" tmp_append="" backup_path="" ts=""
 
     tmp_append="$(mktemp /tmp/circl8-app-env-append.XXXXXX)"
     TEMP_FILES+=("$tmp_append")
@@ -1607,13 +1748,14 @@ function ensure_circl8_env_keys() {
 
     mini_header "Keys"
     for key in "${keys[@]}"; do
+        label="$(env_display_label_for_key "$key")"
         if env_has_nonempty_value "$key"; then
-            aligned_status_line "$key" "preserved" "$GN"
+            aligned_status_line "$label" "preserved" "$GN"
         else
             value="$(env_default_for_key "$key")"
             append_env_line "$key" "$value" >> "$tmp_append"
             SCRIPT64_ENV_KEYS_ADDED=$((SCRIPT64_ENV_KEYS_ADDED + 1))
-            aligned_status_line "$key" "added" "$ANS"
+            aligned_status_line "$label" "added" "$ANS"
         fi
     done
 
@@ -1833,7 +1975,7 @@ function confirm_deploy_or_finish_preflight() {
     section "DEPLOY CIRCL8"
     mini_header "Plan"
     aligned_status_line "Action" "start core containers" "$YW"
-    aligned_status_line "Project" "circl8" "$GN"
+    aligned_status_line "Project" "${PROJECT_NAME:-${PROJECT_SLUG:-circl8}}" "$GN"
     aligned_status_line "Services" "circl8-postgres, circl8-redis, circl8-temporal, circl8" "$GN"
     aligned_status_line "Data reset" "no" "$GN"
     aligned_status_line "Destructive actions" "none" "$GN"
@@ -1867,10 +2009,15 @@ function write_template_preflight_marker_report() {
 function deploy_circl8_core() {
     SCRIPT64_DEPLOYMENT="running"
     init_deploy_output_log
-    msg_info "Starting Circl8 core stack"
+    mini_header "Images"
+    progress_status_line "Images" "checking" "$YW"
+    mini_header "Compose"
+    progress_status_line "Compose" "applying" "$YW"
     if docker_cmd compose --env-file "$ENV_FILE" -p circl8 -f "$CIRCL8_COMPOSE_FILE" up -d >> "$DEPLOY_OUTPUT_LOG" 2>&1; then
-        msg_ok "CIRCL8 CORE STACK STARTED"
+        progress_ready_line "Images" "ready"
+        progress_ready_line "Compose" "ready"
     else
+        progress_fail_line "Compose" "failed"
         SCRIPT64_DEPLOYMENT="failed"
         fail_deployment "Circl8 core compose deployment failed."
     fi
@@ -1878,6 +2025,8 @@ function deploy_circl8_core() {
 
 function verify_circl8_core() {
     section "VERIFY CIRCL8"
+    mini_header "Containers"
+    progress_status_line "Containers" "waiting" "$YW"
 
     msg_info "Waiting for circl8-postgres"
     if wait_for_container_status circl8-postgres healthy 240; then
@@ -1885,6 +2034,7 @@ function verify_circl8_core() {
         msg_ok "circl8-postgres healthy"
     else
         SCRIPT64_CIRCL8_POSTGRES="failed"
+        progress_fail_line "Containers" "failed"
         fail_deployment "circl8-postgres did not become healthy."
     fi
 
@@ -1894,6 +2044,7 @@ function verify_circl8_core() {
         msg_ok "circl8-redis ready"
     else
         SCRIPT64_CIRCL8_REDIS="failed"
+        progress_fail_line "Containers" "failed"
         fail_deployment "circl8-redis did not become ready."
     fi
 
@@ -1903,6 +2054,7 @@ function verify_circl8_core() {
         msg_ok "circl8-temporal ready"
     else
         SCRIPT64_CIRCL8_TEMPORAL="failed"
+        progress_fail_line "Containers" "failed"
         fail_deployment "circl8-temporal API did not become ready."
     fi
 
@@ -1910,49 +2062,55 @@ function verify_circl8_core() {
     if wait_for_container_status circl8 healthy-or-running 300; then
         SCRIPT64_CIRCL8_APP="running"
         msg_ok "circl8 app running"
+        progress_ready_line "Containers" "ready"
     else
         SCRIPT64_CIRCL8_APP="failed"
+        progress_fail_line "Containers" "failed"
         fail_deployment "circl8 app container did not become ready."
     fi
 
+    mini_header "Services"
+    progress_status_line "Services" "waiting" "$YW"
     msg_info "Checking internal app HTTP"
     if wait_for_circl8_internal_http 240; then
         SCRIPT64_CIRCL8_INTERNAL_HTTP="ready"
         msg_ok "Internal app HTTP ready"
+        progress_ready_line "Services" "ready"
     else
         SCRIPT64_CIRCL8_INTERNAL_HTTP="failed"
+        progress_fail_line "Services" "failed"
         fail_deployment "Circl8 internal app HTTP did not respond on expected port."
     fi
 
+    mini_header "Route"
+    progress_status_line "Route" "checking" "$YW"
     msg_info "Checking protected public route"
     if verify_public_route_behavior; then
         SCRIPT64_CIRCL8_ROUTE="protected"
         msg_ok "Circl8 route protected"
+        progress_ready_line "Route" "protected"
     else
         local route_result="$?"
         if [ "$route_result" = "2" ]; then
             SCRIPT64_CIRCL8_ROUTE="failed"
+            progress_fail_line "Route" "failed"
             fail_deployment "Circl8 Traefik labels are missing or invalid."
         fi
         if [ "$route_result" = "3" ]; then
             SCRIPT64_CIRCL8_ROUTE="failed"
+            progress_fail_line "Route" "failed"
             fail_deployment "Circl8 public route responded without expected protected behavior."
         fi
         if check_traefik_infra_errors; then
             SCRIPT64_CIRCL8_ROUTE="needs-review"
             msg_warn "Circl8 public route needs review; internal app is ready and no Traefik infrastructure error was detected."
+            progress_status_line "Route" "needs-review" "$YW"
         else
             SCRIPT64_CIRCL8_ROUTE="failed"
+            progress_fail_line "Route" "failed"
             fail_deployment "Traefik reported Circl8 route infrastructure errors."
         fi
     fi
-
-    aligned_status_line "PostgreSQL" "$SCRIPT64_CIRCL8_POSTGRES" "$(status_color_for_value "$SCRIPT64_CIRCL8_POSTGRES")"
-    aligned_status_line "Redis" "$SCRIPT64_CIRCL8_REDIS" "$(status_color_for_value "$SCRIPT64_CIRCL8_REDIS")"
-    aligned_status_line "Temporal" "$SCRIPT64_CIRCL8_TEMPORAL" "$(status_color_for_value "$SCRIPT64_CIRCL8_TEMPORAL")"
-    aligned_status_line "Circl8 app" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
-    aligned_status_line "Internal HTTP" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
-    aligned_status_line "Public route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
 }
 
 function finish_preflight_only_success() {
@@ -2011,14 +2169,146 @@ function finish_deployment_success() {
     final_line "Deploy marker" "$DEPLOYED_MARKER" "$BL"
 }
 
+function finish_render_only_success() {
+    SCRIPT64_STATUS="render-only-completed"
+    SCRIPT64_VERIFY_STATUS="PASS"
+    SCRIPT64_READY_FOR_DEPLOYMENT_LANE="yes"
+    SCRIPT64_READY_FOR_SCRIPT65="no"
+    if existing_deployment_marker_completed; then
+        SCRIPT64_EXISTING_DEPLOYMENT_STATE="preserved"
+        SCRIPT64_DEPLOYMENT="completed"
+        SCRIPT64_DEPLOYMENT_MARKER_WRITTEN="no"
+        preserve_existing_authentik_marker_values
+    else
+        SCRIPT64_EXISTING_DEPLOYMENT_STATE="not-present"
+        SCRIPT64_DEPLOYMENT="not-run"
+        SCRIPT64_READY_FOR_AUTHENTIK_LANE="no"
+    fi
+    write_verify_report
+
+    section_flash_success "FINISHED"
+    mini_header "Circl8"
+    final_line "Status" "$SCRIPT64_STATUS" "$GN"
+    final_line "Verification" "$SCRIPT64_VERIFY_STATUS" "$GN"
+    final_line "Deployment" "$SCRIPT64_DEPLOYMENT" "$(status_color_for_value "$SCRIPT64_DEPLOYMENT")"
+    final_line "Existing deploy" "$SCRIPT64_EXISTING_DEPLOYMENT_STATE" "$(status_color_for_value "$SCRIPT64_EXISTING_DEPLOYMENT_STATE")"
+    final_line "Compose config" "$SCRIPT64_CIRCL8_COMPOSE_CONFIG" "$GN"
+    final_line "Static safety" "$SCRIPT64_CIRCL8_STATIC_SAFETY" "$GN"
+    final_line "Ready for Script 6.5" "$SCRIPT64_READY_FOR_SCRIPT65" "$YW"
+    final_line "Verify log" "$VERIFY_LOG" "$BL"
+    final_line "Deploy marker" "$DEPLOYED_MARKER" "$BL"
+}
+
+function finish_verify_only_success() {
+    SCRIPT64_STATUS="verify-only-completed"
+    SCRIPT64_VERIFY_STATUS="PASS"
+    SCRIPT64_DEPLOYMENT="completed"
+    SCRIPT64_READY_FOR_DEPLOYMENT_LANE="yes"
+    SCRIPT64_READY_FOR_SCRIPT65="no"
+    preserve_existing_authentik_marker_values
+    write_verify_report
+
+    section_flash_success "FINISHED"
+    mini_header "Circl8"
+    final_line "Status" "$SCRIPT64_STATUS" "$GN"
+    final_line "Verification" "$SCRIPT64_VERIFY_STATUS" "$GN"
+    final_line "Deployment" "$SCRIPT64_DEPLOYMENT" "$GN"
+    final_line "PostgreSQL" "$SCRIPT64_CIRCL8_POSTGRES" "$(status_color_for_value "$SCRIPT64_CIRCL8_POSTGRES")"
+    final_line "Redis" "$SCRIPT64_CIRCL8_REDIS" "$(status_color_for_value "$SCRIPT64_CIRCL8_REDIS")"
+    final_line "Temporal" "$SCRIPT64_CIRCL8_TEMPORAL" "$(status_color_for_value "$SCRIPT64_CIRCL8_TEMPORAL")"
+    final_line "App" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
+    final_line "Internal HTTP" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
+    final_line "Public route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
+    final_line "Groups" "$SCRIPT64_AUTHENTIK_GROUPS" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_GROUPS")"
+    final_line "Policy" "$SCRIPT64_AUTHENTIK_POLICY" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_POLICY")"
+    final_line "Application" "$SCRIPT64_AUTHENTIK_APPLICATION" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_APPLICATION")"
+    final_line "Provider" "$SCRIPT64_AUTHENTIK_PROVIDER" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_PROVIDER")"
+    final_line "Outpost" "$SCRIPT64_AUTHENTIK_OUTPOST" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_OUTPOST")"
+    final_line "akadmin" "$SCRIPT64_AUTHENTIK_AKADMIN" "$GN"
+    final_line "Ready for Script 6.5" "$SCRIPT64_READY_FOR_SCRIPT65" "$YW"
+    final_line "Verify log" "$VERIFY_LOG" "$BL"
+    final_line "Deploy marker" "$DEPLOYED_MARKER" "$BL"
+}
+
+function finish_clean_exit() {
+    section_flash_success "FINISHED"
+    mini_header "Circl8"
+    final_line "Status" "exit" "$GN"
+    final_line "Action" "no changes requested" "$YW"
+    final_line "Markers" "unchanged" "$GN"
+}
+
+function run_circl8_core_only_success_path() {
+    write_template_preflight_success
+    deploy_circl8_core
+    verify_circl8_core
+    finish_deployment_success
+}
+
 function run_circl8_deploy_success_path() {
+    write_template_preflight_success
     deploy_circl8_core
     verify_circl8_core
     run_authentik_identity_lane
     finish_deployment_success
 }
 
+function rerun_menu_available() {
+    [ "$SCRIPT64_RUN_MODE" = "prompt" ] || return 1
+    [ -r /dev/tty ] || return 1
+    existing_deployment_marker_completed
+}
+
+function numeric_menu_input() {
+    local prompt="$1" default="$2" min_choice="$3" max_choice="$4" raw_choice="" choice=""
+    while true; do
+        flush_input_buffer 2>/dev/null || true
+        tty_print "${YW}${prompt} [default: ${default}]: ${CL}"
+        IFS= read -r raw_choice < /dev/tty || raw_choice=""
+        tty_print "${BFR}"
+        raw_choice="${raw_choice//$'\r'/}"
+        raw_choice="${raw_choice//$'\n'/}"
+        raw_choice="$(printf '%s' "$raw_choice" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+        [ -n "$raw_choice" ] || raw_choice="$default"
+        choice="$(printf '%s' "$raw_choice" | tr -cd '0-9')"
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge "$min_choice" ] && [ "$choice" -le "$max_choice" ]; then
+            printf '%s' "$choice"
+            return 0
+        fi
+        tty_println "${WARN} ${YW}Invalid selection. Choose ${min_choice}-${max_choice}.${CL}"
+    done
+}
+
+function show_rerun_menu() {
+    local choice=""
+    section "SCRIPT 6.4 RERUN OPTIONS"
+    aligned_status_line "Existing deployment" "completed" "$GN"
+    aligned_status_line "Project" "${PROJECT_NAME:-${PROJECT_SLUG:-circl8}}" "$GN"
+    echo ""
+    echo -e "  ${YW}1)${CL} Verify current Circl8 deployment"
+    echo -e "  ${YW}2)${CL} Re-render templates/config only"
+    echo -e "  ${YW}3)${CL} Deploy/redeploy core stack"
+    echo -e "  ${YW}4)${CL} Run Authentik identity lane only"
+    echo -e "  ${YW}5)${CL} Run full core deploy + Authentik identity lane"
+    echo -e "  ${YW}6)${CL} Exit"
+    echo ""
+    choice="$(numeric_menu_input "Select action" "1" "1" "6")"
+    echo ""
+    case "$choice" in
+        1) SCRIPT64_RUN_MODE="verify-only"; msg_ok "Verify current Circl8 deployment selected" ;;
+        2) SCRIPT64_RUN_MODE="render-only"; msg_ok "Re-render templates/config only selected" ;;
+        3) SCRIPT64_RUN_MODE="deploy-core"; msg_ok "Deploy/redeploy core stack selected" ;;
+        4) SCRIPT64_RUN_MODE="authentik-only"; msg_ok "Authentik identity lane only selected" ;;
+        5) SCRIPT64_RUN_MODE="deploy"; msg_ok "Full core deploy + Authentik identity lane selected" ;;
+        6) SCRIPT64_RUN_MODE="exit"; msg_ok "Exit selected" ;;
+    esac
+}
+
 function run_deploy_decision_or_mode() {
+    if rerun_menu_available; then
+        show_rerun_menu
+    fi
+
     case "$SCRIPT64_RUN_MODE" in
         preflight-only)
             section "DEPLOY CIRCL8"
@@ -2027,6 +2317,28 @@ function run_deploy_decision_or_mode() {
             aligned_status_line "Deployment" "not-run" "$GN"
             msg_warn "Preflight-only mode selected; Circl8 deployment skipped."
             finish_preflight_only_success
+            ;;
+        render-only)
+            section "DEPLOY CIRCL8"
+            mini_header "Mode"
+            aligned_status_line "Run mode" "render-only" "$YW"
+            aligned_status_line "Deployment" "not changed" "$GN"
+            finish_render_only_success
+            ;;
+        verify-only)
+            section "DEPLOY CIRCL8"
+            mini_header "Mode"
+            aligned_status_line "Run mode" "verify-only" "$GN"
+            aligned_status_line "Deploy action" "not-run" "$GN"
+            verify_core_marker_or_stack
+            finish_verify_only_success
+            ;;
+        deploy-core)
+            section "DEPLOY CIRCL8"
+            mini_header "Mode"
+            aligned_status_line "Run mode" "deploy-core" "$GN"
+            aligned_status_line "Authentik API writes" "not-run" "$GN"
+            run_circl8_core_only_success_path
             ;;
         deploy)
             section "DEPLOY CIRCL8"
@@ -2047,9 +2359,14 @@ function run_deploy_decision_or_mode() {
             mini_header "Mode"
             aligned_status_line "Run mode" "authentik-only" "$GN"
             aligned_status_line "Core deploy action" "not-run" "$GN"
+            write_template_preflight_success
             verify_core_marker_or_stack
             run_authentik_identity_lane
             finish_deployment_success
+            ;;
+        exit)
+            finish_clean_exit
+            exit 0
             ;;
         *)
             usage >&2
@@ -2072,7 +2389,6 @@ function init_script() {
 }
 
 function run_post_compose_flow() {
-    write_template_preflight_success
     run_deploy_decision_or_mode
 }
 
