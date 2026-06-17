@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.4-circl8Bootstrap.sh"
-SCRIPT_VERSION="v1.2.3"
+SCRIPT_VERSION="v1.2.4"
 SCRIPT_UPDATED="2026-06-17"
-SCRIPT_BUILD="temporal-search-attribute-guard"
+SCRIPT_BUILD="temporal-search-attribute-ui-cleanup"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -548,7 +548,16 @@ function wait_for_circl8_internal_http() {
 
 function temporal_sample_search_attribute_present() {
     local name="$1"
-    docker_cmd exec circl8-temporal sh -lc "temporal operator search-attribute list --address circl8-temporal:7233 --namespace default 2>/dev/null | awk '{print \\$1}' | grep -Fxq '$name'"
+
+    case "$name" in
+        CustomStringField|CustomTextField) ;;
+        *) return 1 ;;
+    esac
+
+    docker_cmd exec -e "SCRIPT64_TEMPORAL_ATTR_NAME=$name" circl8-temporal sh -lc '
+        temporal operator search-attribute list --address circl8-temporal:7233 --namespace default 2>/dev/null \
+            | grep -Eq "^[[:space:]]*${SCRIPT64_TEMPORAL_ATTR_NAME}[[:space:]]"
+    '
 }
 
 function temporal_remove_sample_search_attribute() {
