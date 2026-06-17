@@ -5,9 +5,9 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 #  Project Circl8 - Script 6.4 Circl8 Template Preflight
 # =========================================================
-# Phase 4 v1.2.7 keeps the marker/env-derived Authentik identity lane and
-# adds a late compose startup network guard/retry while preserving core deploy
-# and Authentik identity API semantics.
+# Phase 4 v1.2.8 keeps the marker/env-derived Authentik identity lane and
+# polishes compose startup progress display while preserving the v1.2.7
+# late database network guard/retry and Authentik identity API semantics.
 
 YW="$(printf '\033[33m')"
 BL="$(printf '\033[36m')"
@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.4-circl8Bootstrap.sh"
-SCRIPT_VERSION="v1.2.7"
+SCRIPT_VERSION="v1.2.8"
 SCRIPT_UPDATED="2026-06-17"
-SCRIPT_BUILD="compose-network-startup-retry"
+SCRIPT_BUILD="compose-progress-display-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -2197,23 +2197,20 @@ function deploy_circl8_core() {
     SCRIPT64_DEPLOYMENT="running"
     init_deploy_output_log
 
-    progress_status_line "Images" "download/extract if needed" "$YW"
-    progress_status_line "Compose" "create/start containers" "$YW"
-
+    msg_info "Preparing Circl8 images and compose startup"
     ensure_compose_startup_networks
     if run_circl8_compose_up_once; then
-        progress_ready_line "Images" "ready"
-        progress_ready_line "Compose" "ready"
+        msg_ok "CIRCL8 COMPOSE STARTED"
         return 0
     fi
 
     if compose_startup_output_has_database_network_missing; then
-        progress_status_line "Compose" "database network retry" "$YW"
+        msg_warn "Database network missing during startup; retrying compose once"
         ensure_compose_startup_networks
         printf '%s\n' "Retrying Circl8 compose startup after database network guard" >> "$DEPLOY_OUTPUT_LOG"
+        msg_info "Retrying Circl8 compose startup"
         if run_circl8_compose_up_once; then
-            progress_ready_line "Images" "ready"
-            progress_ready_line "Compose" "ready"
+            msg_ok "CIRCL8 COMPOSE STARTED AFTER DATABASE NETWORK RETRY"
             return 0
         fi
         progress_fail_line "Compose" "failed"
@@ -2225,7 +2222,6 @@ function deploy_circl8_core() {
     SCRIPT64_DEPLOYMENT="failed"
     fail_deployment "$(compose_startup_failure_message)"
 }
-
 
 function verify_circl8_core() {
     section "VERIFY CIRCL8"
