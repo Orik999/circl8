@@ -5,9 +5,9 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 #  Project Circl8 - Script 6.4 Circl8 Template Preflight
 # =========================================================
-# Phase 4 v1.2.2 keeps the marker/env-derived Authentik identity lane and
-# polishes interactive rerun/UI flow without changing core deploy or Authentik
-# identity API semantics.
+# Phase 4 v1.2.7 keeps the marker/env-derived Authentik identity lane and
+# adds a late compose startup network guard/retry while preserving core deploy
+# and Authentik identity API semantics.
 
 YW="$(printf '\033[33m')"
 BL="$(printf '\033[36m')"
@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.4-circl8Bootstrap.sh"
-SCRIPT_VERSION="v1.2.6"
+SCRIPT_VERSION="v1.2.7"
 SCRIPT_UPDATED="2026-06-17"
-SCRIPT_BUILD="terminal-layout-final-polish"
+SCRIPT_BUILD="compose-network-startup-retry"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -2129,7 +2129,7 @@ function confirm_deploy_or_finish_preflight() {
         return 1
     fi
 
-    if read_yes_no "Start Circl8 core containers now? This will not delete/reset data." "n"; then
+    if read_yes_no "Start Circl8 core containers now? This will not delete/reset data." "y"; then
         aligned_status_line "Deployment confirmation" "yes" "$GN"
         return 0
     fi
@@ -2147,19 +2147,83 @@ function write_template_preflight_marker_report() {
 }
 
 
+function ensure_compose_startup_networks() {
+    if ! docker_cmd network inspect t2_proxy >/dev/null 2>&1; then
+        SCRIPT64_NETWORK_T2_PROXY="missing"
+        fail_deployment "Required t2_proxy network missing immediately before Circl8 compose startup."
+    fi
+    SCRIPT64_NETWORK_T2_PROXY="ready"
+
+    if docker_cmd network inspect database >/dev/null 2>&1; then
+        if [ "${SCRIPT64_NETWORK_DATABASE:-unknown}" != "created" ]; then
+            SCRIPT64_NETWORK_DATABASE="preserved"
+        fi
+        return 0
+    fi
+
+    printf '%s\n' "database network missing immediately before compose startup; creating database network" >> "${DEPLOY_OUTPUT_LOG:-/tmp/circl8-app-deploy.log}"
+    docker_cmd network create database >> "${DEPLOY_OUTPUT_LOG:-/tmp/circl8-app-deploy.log}" 2>&1 || true
+
+    if docker_cmd network inspect database >/dev/null 2>&1; then
+        SCRIPT64_NETWORK_DATABASE="created"
+        return 0
+    fi
+
+    SCRIPT64_NETWORK_DATABASE="failed"
+    fail_deployment "Database network missing during startup and could not be created."
+}
+
+function compose_startup_output_has_database_network_missing() {
+    [ -n "${DEPLOY_OUTPUT_LOG:-}" ] && [ -s "$DEPLOY_OUTPUT_LOG" ] && grep -Eiq 'network[[:space:]]+database[[:space:]]+not[[:space:]]+found' "$DEPLOY_OUTPUT_LOG"
+}
+
+function compose_startup_failure_message() {
+    if compose_startup_output_has_database_network_missing; then
+        printf '%s' "Database network missing during Circl8 compose startup."
+    elif [ -n "${DEPLOY_OUTPUT_LOG:-}" ] && [ -s "$DEPLOY_OUTPUT_LOG" ] && grep -Eiq 'failed to set up container networking|network .* not found' "$DEPLOY_OUTPUT_LOG"; then
+        printf '%s' "Circl8 container/network startup failed after valid compose config."
+    elif [ -n "${DEPLOY_OUTPUT_LOG:-}" ] && [ -s "$DEPLOY_OUTPUT_LOG" ] && grep -Eiq 'pull access denied|manifest unknown|failed to resolve reference|toomanyrequests|TLS handshake timeout|connection timed out' "$DEPLOY_OUTPUT_LOG"; then
+        printf '%s' "Circl8 image download/startup failed after valid compose config."
+    else
+        printf '%s' "Circl8 compose startup failed after valid compose config."
+    fi
+}
+
+function run_circl8_compose_up_once() {
+    docker_cmd compose --env-file "$ENV_FILE" -p circl8 -f "$CIRCL8_COMPOSE_FILE" up -d >> "$DEPLOY_OUTPUT_LOG" 2>&1
+}
+
 function deploy_circl8_core() {
     SCRIPT64_DEPLOYMENT="running"
     init_deploy_output_log
 
-    msg_info "Applying Circl8 compose"
-    if docker_cmd compose --env-file "$ENV_FILE" -p circl8 -f "$CIRCL8_COMPOSE_FILE" up -d >> "$DEPLOY_OUTPUT_LOG" 2>&1; then
+    progress_status_line "Images" "download/extract if needed" "$YW"
+    progress_status_line "Compose" "create/start containers" "$YW"
+
+    ensure_compose_startup_networks
+    if run_circl8_compose_up_once; then
         progress_ready_line "Images" "ready"
         progress_ready_line "Compose" "ready"
-    else
+        return 0
+    fi
+
+    if compose_startup_output_has_database_network_missing; then
+        progress_status_line "Compose" "database network retry" "$YW"
+        ensure_compose_startup_networks
+        printf '%s\n' "Retrying Circl8 compose startup after database network guard" >> "$DEPLOY_OUTPUT_LOG"
+        if run_circl8_compose_up_once; then
+            progress_ready_line "Images" "ready"
+            progress_ready_line "Compose" "ready"
+            return 0
+        fi
         progress_fail_line "Compose" "failed"
         SCRIPT64_DEPLOYMENT="failed"
-        fail_deployment "Circl8 core compose deployment failed."
+        fail_deployment "Circl8 compose startup failed after database network retry."
     fi
+
+    progress_fail_line "Compose" "failed"
+    SCRIPT64_DEPLOYMENT="failed"
+    fail_deployment "$(compose_startup_failure_message)"
 }
 
 
