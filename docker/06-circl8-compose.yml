@@ -97,6 +97,7 @@ services:
       SKIP_DB_CREATE: "true"
       DEFAULT_NAMESPACE: default
       TEMPORAL_NAMESPACE: default
+      SKIP_ADD_CUSTOM_SEARCH_ATTRIBUTES: "true"
       DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/development-sql.yml
     volumes:
       - ${DOCKER_DIR}/appdata/circl8/temporal-dynamicconfig/development-sql.yml:/etc/temporal/config/dynamicconfig/development-sql.yml:ro

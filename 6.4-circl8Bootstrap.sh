@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.4-circl8Bootstrap.sh"
-SCRIPT_VERSION="v1.2.2"
-SCRIPT_UPDATED="2026-06-16"
-SCRIPT_BUILD="ui-rerun-polish"
+SCRIPT_VERSION="v1.2.3"
+SCRIPT_UPDATED="2026-06-17"
+SCRIPT_BUILD="temporal-search-attribute-guard"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -118,6 +118,8 @@ SCRIPT64_CIRCL8_TEMPORAL="not-run"
 SCRIPT64_CIRCL8_APP="not-run"
 SCRIPT64_CIRCL8_INTERNAL_HTTP="not-run"
 SCRIPT64_CIRCL8_ROUTE="not-run"
+SCRIPT64_TEMPORAL_SEARCH_ATTRS="not-run"
+SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR="not-needed"
 SCRIPT64_AUTHENTIK_GROUPS="not-run"
 SCRIPT64_AUTHENTIK_POLICY="not-run"
 SCRIPT64_AUTHENTIK_APPLICATION="not-run"
@@ -506,16 +508,106 @@ function wait_for_temporal_api() {
     return 1
 }
 
+function circl8_http_status() {
+    local port="$1" path="$2"
+    docker_cmd exec circl8 node -e '''
+const http = require("http");
+const port = Number(process.argv[1]);
+const path = process.argv[2] || "/";
+const req = http.get({host: "127.0.0.1", port, path, timeout: 5000}, (res) => {
+  console.log(res.statusCode);
+  res.resume();
+  res.on("end", () => process.exit(0));
+});
+req.on("error", () => process.exit(111));
+req.setTimeout(5000, () => { req.destroy(); process.exit(124); });
+''' "$port" "$path" 2>/dev/null | tr -d '\r' | tail -n1
+}
+
+function circl8_http_endpoint_ready() {
+    local label="$1" port="$2" path="$3" status=""
+    status="$(circl8_http_status "$port" "$path" || true)"
+    [[ "$status" =~ ^[0-9]{3}$ ]] || return 1
+    if [ "$label" = "nginx-api" ] && [ "$status" = "502" ]; then
+        return 1
+    fi
+    return 0
+}
+
 function wait_for_circl8_internal_http() {
     local timeout_seconds="${1:-240}" elapsed="0"
     while [ "$elapsed" -le "$timeout_seconds" ]; do
-        if docker_cmd exec circl8 node -e 'const http=require("http"); const r=http.get("http://127.0.0.1:5000/", res => process.exit(res.statusCode < 500 ? 0 : 1)); r.on("error", () => process.exit(1)); r.setTimeout(5000, () => { r.destroy(); process.exit(1); });' >/dev/null 2>&1; then
+        if circl8_http_endpoint_ready "frontend" 4200 "/"             && circl8_http_endpoint_ready "backend-root" 3000 "/"             && circl8_http_endpoint_ready "backend-register" 3000 "/auth/can-register"             && circl8_http_endpoint_ready "nginx-root" 5000 "/"             && circl8_http_endpoint_ready "nginx-api" 5000 "/api/auth/can-register"; then
             return 0
         fi
         sleep 5
         elapsed=$((elapsed + 5))
     done
     return 1
+}
+
+function temporal_sample_search_attribute_present() {
+    local name="$1"
+    docker_cmd exec circl8-temporal sh -lc "temporal operator search-attribute list --address circl8-temporal:7233 --namespace default 2>/dev/null | awk '{print \\$1}' | grep -Fxq '$name'"
+}
+
+function temporal_remove_sample_search_attribute() {
+    local name="$1"
+    case "$name" in
+        CustomStringField)
+            docker_cmd exec circl8-temporal temporal operator search-attribute remove --address circl8-temporal:7233 --namespace default --name CustomStringField --yes >/dev/null 2>&1
+            ;;
+        CustomTextField)
+            docker_cmd exec circl8-temporal temporal operator search-attribute remove --address circl8-temporal:7233 --namespace default --name CustomTextField --yes >/dev/null 2>&1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+function temporal_sample_search_attributes_absent() {
+    ! temporal_sample_search_attribute_present CustomStringField && ! temporal_sample_search_attribute_present CustomTextField
+}
+
+function verify_temporal_search_attribute_guard_readonly() {
+    if temporal_sample_search_attributes_absent; then
+        SCRIPT64_TEMPORAL_SEARCH_ATTRS="ready"
+        SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR="not-needed"
+        return 0
+    fi
+    SCRIPT64_TEMPORAL_SEARCH_ATTRS="failed"
+    SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR="failed"
+    return 1
+}
+
+function run_temporal_search_attribute_guard() {
+    local repaired="no" failed="no" name=""
+
+    for name in CustomStringField CustomTextField; do
+        if temporal_sample_search_attribute_present "$name"; then
+            if temporal_remove_sample_search_attribute "$name"; then
+                repaired="yes"
+            else
+                failed="yes"
+            fi
+        fi
+    done
+
+    if [ "$failed" = "yes" ] || ! temporal_sample_search_attributes_absent; then
+        SCRIPT64_TEMPORAL_SEARCH_ATTRS="failed"
+        SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR="failed"
+        return 1
+    fi
+
+    SCRIPT64_TEMPORAL_SEARCH_ATTRS="ready"
+    if [ "$repaired" = "yes" ]; then
+        SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR="repaired"
+        return 2
+    fi
+
+    SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR="not-needed"
+    return 0
 }
 
 function traefik_container_name() {
@@ -1240,6 +1332,11 @@ function run_authentik_identity_lane() {
 
 function verify_core_marker_or_stack() {
     local marker_status="" marker_verify="" marker_deploy="" marker_ready=""
+    if [ "${SCRIPT64_RUN_MODE:-}" = "verify-only" ]; then
+        verify_circl8_core
+        SCRIPT64_DEPLOYMENT="completed"
+        return 0
+    fi
     marker_status="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_STATUS)"
     marker_verify="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_VERIFY_STATUS)"
     marker_deploy="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_DEPLOYMENT)"
@@ -1254,12 +1351,16 @@ function verify_core_marker_or_stack() {
         SCRIPT64_CIRCL8_APP="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_CIRCL8_APP)"
         SCRIPT64_CIRCL8_INTERNAL_HTTP="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_CIRCL8_INTERNAL_HTTP)"
         SCRIPT64_CIRCL8_ROUTE="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_CIRCL8_ROUTE)"
+        SCRIPT64_TEMPORAL_SEARCH_ATTRS="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_TEMPORAL_SEARCH_ATTRS)"
+        SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR)"
         SCRIPT64_CIRCL8_POSTGRES="${SCRIPT64_CIRCL8_POSTGRES:-healthy}"
         SCRIPT64_CIRCL8_REDIS="${SCRIPT64_CIRCL8_REDIS:-healthy}"
         SCRIPT64_CIRCL8_TEMPORAL="${SCRIPT64_CIRCL8_TEMPORAL:-ready}"
         SCRIPT64_CIRCL8_APP="${SCRIPT64_CIRCL8_APP:-running}"
         SCRIPT64_CIRCL8_INTERNAL_HTTP="${SCRIPT64_CIRCL8_INTERNAL_HTTP:-ready}"
         SCRIPT64_CIRCL8_ROUTE="${SCRIPT64_CIRCL8_ROUTE:-protected}"
+        SCRIPT64_TEMPORAL_SEARCH_ATTRS="${SCRIPT64_TEMPORAL_SEARCH_ATTRS:-ready}"
+        SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR="${SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR:-not-needed}"
         aligned_status_line "Core marker" "ready" "$GN"
         return 0
     fi
@@ -1320,6 +1421,10 @@ function write_verify_report() {
 ' "SCRIPT64_CIRCL8_INTERNAL_HTTP=${SCRIPT64_CIRCL8_INTERNAL_HTTP}"
         printf '%s
 ' "SCRIPT64_CIRCL8_ROUTE=${SCRIPT64_CIRCL8_ROUTE}"
+        printf '%s
+' "SCRIPT64_TEMPORAL_SEARCH_ATTRS=${SCRIPT64_TEMPORAL_SEARCH_ATTRS}"
+        printf '%s
+' "SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR=${SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR}"
         printf '%s
 ' "SCRIPT64_PROJECT_BASE_DOMAIN=${PROJECT_BASE_DOMAIN}"
         printf '%s
@@ -1536,6 +1641,10 @@ function write_deployment_marker() {
 ' "SCRIPT64_CIRCL8_INTERNAL_HTTP=${SCRIPT64_CIRCL8_INTERNAL_HTTP}"
         printf '%s
 ' "SCRIPT64_CIRCL8_ROUTE=${SCRIPT64_CIRCL8_ROUTE}"
+        printf '%s
+' "SCRIPT64_TEMPORAL_SEARCH_ATTRS=${SCRIPT64_TEMPORAL_SEARCH_ATTRS}"
+        printf '%s
+' "SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR=${SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR}"
         printf '%s
 ' "SCRIPT64_PROJECT_BASE_DOMAIN=${PROJECT_BASE_DOMAIN}"
         printf '%s
@@ -2058,6 +2167,42 @@ function verify_circl8_core() {
         fail_deployment "circl8-temporal API did not become ready."
     fi
 
+    mini_header "Temporal"
+    progress_status_line "Search attributes" "checking" "$YW"
+    msg_info "Checking Temporal search attributes"
+    if [ "${SCRIPT64_RUN_MODE:-}" = "verify-only" ]; then
+        if verify_temporal_search_attribute_guard_readonly; then
+            msg_ok "Temporal search attributes ready"
+            aligned_status_line "Temporal search attributes" "ready" "$GN"
+            aligned_status_line "Temporal repair" "not needed" "$GN"
+        else
+            progress_fail_line "Search attributes" "failed"
+            fail_deployment "Temporal sample Text search attributes are present; run deploy/redeploy to repair them."
+        fi
+    else
+        set +e
+        run_temporal_search_attribute_guard
+        local temporal_guard_rc="$?"
+        set -e
+        if [ "$temporal_guard_rc" = "0" ]; then
+            msg_ok "Temporal search attributes ready"
+            aligned_status_line "Temporal search attributes" "ready" "$GN"
+            aligned_status_line "Temporal repair" "not needed" "$GN"
+        elif [ "$temporal_guard_rc" = "2" ]; then
+            msg_ok "Temporal search attributes repaired"
+            aligned_status_line "Temporal search attributes" "repaired" "$GN"
+            msg_info "Restarting circl8 app after Temporal repair"
+            if docker_cmd restart circl8 >> "${DEPLOY_OUTPUT_LOG:-/tmp/circl8-app-deploy.log}" 2>&1; then
+                msg_ok "circl8 app restarted"
+            else
+                fail_deployment "Temporal search attributes were repaired but circl8 app restart failed."
+            fi
+        else
+            progress_fail_line "Search attributes" "failed"
+            fail_deployment "Temporal search attribute guard failed."
+        fi
+    fi
+
     msg_info "Waiting for circl8 app"
     if wait_for_container_status circl8 healthy-or-running 300; then
         SCRIPT64_CIRCL8_APP="running"
@@ -2074,12 +2219,12 @@ function verify_circl8_core() {
     msg_info "Checking internal app HTTP"
     if wait_for_circl8_internal_http 240; then
         SCRIPT64_CIRCL8_INTERNAL_HTTP="ready"
-        msg_ok "Internal app HTTP ready"
+        msg_ok "Internal HTTP/API ready"
         progress_ready_line "Services" "ready"
     else
         SCRIPT64_CIRCL8_INTERNAL_HTTP="failed"
         progress_fail_line "Services" "failed"
-        fail_deployment "Circl8 internal app HTTP did not respond on expected port."
+        fail_deployment "Circl8 frontend/backend/nginx API verification failed."
     fi
 
     mini_header "Route"
@@ -2150,6 +2295,8 @@ function finish_deployment_success() {
     final_line "PostgreSQL" "$SCRIPT64_CIRCL8_POSTGRES" "$(status_color_for_value "$SCRIPT64_CIRCL8_POSTGRES")"
     final_line "Redis" "$SCRIPT64_CIRCL8_REDIS" "$(status_color_for_value "$SCRIPT64_CIRCL8_REDIS")"
     final_line "Temporal" "$SCRIPT64_CIRCL8_TEMPORAL" "$(status_color_for_value "$SCRIPT64_CIRCL8_TEMPORAL")"
+    final_line "Temporal search attributes" "$SCRIPT64_TEMPORAL_SEARCH_ATTRS" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTRS")"
+    final_line "Temporal repair" "$SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR")"
     final_line "Circl8 app" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
     final_line "Internal HTTP" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
     final_line "Public route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
@@ -2216,6 +2363,8 @@ function finish_verify_only_success() {
     final_line "PostgreSQL" "$SCRIPT64_CIRCL8_POSTGRES" "$(status_color_for_value "$SCRIPT64_CIRCL8_POSTGRES")"
     final_line "Redis" "$SCRIPT64_CIRCL8_REDIS" "$(status_color_for_value "$SCRIPT64_CIRCL8_REDIS")"
     final_line "Temporal" "$SCRIPT64_CIRCL8_TEMPORAL" "$(status_color_for_value "$SCRIPT64_CIRCL8_TEMPORAL")"
+    final_line "Temporal search attributes" "$SCRIPT64_TEMPORAL_SEARCH_ATTRS" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTRS")"
+    final_line "Temporal repair" "$SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR")"
     final_line "App" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
     final_line "Internal HTTP" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
     final_line "Public route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
