@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.4-circl8Bootstrap.sh"
-SCRIPT_VERSION="v1.2.4"
+SCRIPT_VERSION="v1.2.5"
 SCRIPT_UPDATED="2026-06-17"
-SCRIPT_BUILD="temporal-search-attribute-ui-cleanup"
+SCRIPT_BUILD="final-ui-handoff-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -1607,6 +1607,27 @@ function preserve_existing_authentik_marker_values() {
     fi
 }
 
+function compute_script65_readiness() {
+    SCRIPT64_READY_FOR_SCRIPT65="no"
+
+    if [ "${SCRIPT64_VERIFY_STATUS:-}" = "PASS" ] \
+        && [ "${SCRIPT64_DEPLOYMENT:-}" = "completed" ] \
+        && [ "${SCRIPT64_CIRCL8_POSTGRES:-}" = "healthy" ] \
+        && [ "${SCRIPT64_CIRCL8_REDIS:-}" = "healthy" ] \
+        && [ "${SCRIPT64_CIRCL8_TEMPORAL:-}" = "ready" ] \
+        && [ "${SCRIPT64_TEMPORAL_SEARCH_ATTRS:-}" = "ready" ] \
+        && [ "${SCRIPT64_CIRCL8_APP:-}" = "running" ] \
+        && [ "${SCRIPT64_CIRCL8_INTERNAL_HTTP:-}" = "ready" ] \
+        && [ "${SCRIPT64_CIRCL8_ROUTE:-}" = "protected" ] \
+        && [ "${SCRIPT64_AUTHENTIK_GROUPS:-}" = "ready" ] \
+        && [ "${SCRIPT64_AUTHENTIK_POLICY:-}" = "ready" ] \
+        && [ "${SCRIPT64_AUTHENTIK_APPLICATION:-}" = "ready" ] \
+        && [ "${SCRIPT64_AUTHENTIK_PROVIDER:-}" = "ready" ] \
+        && [ "${SCRIPT64_AUTHENTIK_OUTPOST:-}" = "attached" ]; then
+        SCRIPT64_READY_FOR_SCRIPT65="yes"
+    fi
+}
+
 function write_deployment_marker() {
     local tmp_file=""
     if [ "$SCRIPT64_AUTHENTIK_LANE_RAN" != "yes" ]; then
@@ -1689,7 +1710,7 @@ function write_deployment_marker() {
         printf '%s
 ' "SCRIPT64_READY_FOR_AUTHENTIK_LANE=${SCRIPT64_READY_FOR_AUTHENTIK_LANE}"
         printf '%s
-' "SCRIPT64_READY_FOR_SCRIPT65=no"
+' "SCRIPT64_READY_FOR_SCRIPT65=${SCRIPT64_READY_FOR_SCRIPT65}"
     } > "$tmp_file"
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" chmod 600 "$tmp_file"
@@ -2124,14 +2145,14 @@ function write_template_preflight_marker_report() {
     write_template_preflight_success
 }
 
+
 function deploy_circl8_core() {
     SCRIPT64_DEPLOYMENT="running"
     init_deploy_output_log
-    mini_header "Images"
-    progress_status_line "Images" "checking" "$YW"
-    mini_header "Compose"
-    progress_status_line "Compose" "applying" "$YW"
+
+    msg_info "Applying Circl8 compose"
     if docker_cmd compose --env-file "$ENV_FILE" -p circl8 -f "$CIRCL8_COMPOSE_FILE" up -d >> "$DEPLOY_OUTPUT_LOG" 2>&1; then
+        msg_ok "Circl8 compose applied"
         progress_ready_line "Images" "ready"
         progress_ready_line "Compose" "ready"
     else
@@ -2141,51 +2162,35 @@ function deploy_circl8_core() {
     fi
 }
 
+
 function verify_circl8_core() {
     section "VERIFY CIRCL8"
-    mini_header "Containers"
-    progress_status_line "Containers" "waiting" "$YW"
 
-    msg_info "Waiting for circl8-postgres"
-    if wait_for_container_status circl8-postgres healthy 240; then
+    msg_info "Checking containers"
+    if wait_for_container_status circl8-postgres healthy 240 \
+        && wait_for_container_status circl8-redis healthy-or-running 120 \
+        && wait_for_container_status circl8-temporal healthy-or-running 300 \
+        && wait_for_temporal_api 240; then
         SCRIPT64_CIRCL8_POSTGRES="healthy"
-        msg_ok "circl8-postgres healthy"
-    else
-        SCRIPT64_CIRCL8_POSTGRES="failed"
-        progress_fail_line "Containers" "failed"
-        fail_deployment "circl8-postgres did not become healthy."
-    fi
-
-    msg_info "Waiting for circl8-redis"
-    if wait_for_container_status circl8-redis healthy-or-running 120; then
         SCRIPT64_CIRCL8_REDIS="healthy"
-        msg_ok "circl8-redis ready"
-    else
-        SCRIPT64_CIRCL8_REDIS="failed"
-        progress_fail_line "Containers" "failed"
-        fail_deployment "circl8-redis did not become ready."
-    fi
-
-    msg_info "Waiting for circl8-temporal"
-    if wait_for_container_status circl8-temporal healthy-or-running 300 && wait_for_temporal_api 240; then
         SCRIPT64_CIRCL8_TEMPORAL="ready"
-        msg_ok "circl8-temporal ready"
+        msg_ok "Containers ready"
+        progress_ready_line "Containers" "ready"
     else
-        SCRIPT64_CIRCL8_TEMPORAL="failed"
+        [ "$(container_health circl8-postgres)" = "healthy" ] && SCRIPT64_CIRCL8_POSTGRES="healthy" || SCRIPT64_CIRCL8_POSTGRES="failed"
+        if wait_for_container_status circl8-redis healthy-or-running 1; then SCRIPT64_CIRCL8_REDIS="healthy"; else SCRIPT64_CIRCL8_REDIS="failed"; fi
+        if wait_for_container_status circl8-temporal healthy-or-running 1 && wait_for_temporal_api 1; then SCRIPT64_CIRCL8_TEMPORAL="ready"; else SCRIPT64_CIRCL8_TEMPORAL="failed"; fi
         progress_fail_line "Containers" "failed"
-        fail_deployment "circl8-temporal API did not become ready."
+        fail_deployment "Circl8 dependency containers did not become ready."
     fi
 
-    mini_header "Temporal"
-    progress_status_line "Search attributes" "checking" "$YW"
     msg_info "Checking Temporal search attributes"
     if [ "${SCRIPT64_RUN_MODE:-}" = "verify-only" ]; then
         if verify_temporal_search_attribute_guard_readonly; then
             msg_ok "Temporal search attributes ready"
-            aligned_status_line "Temporal search attributes" "ready" "$GN"
-            aligned_status_line "Temporal repair" "not needed" "$GN"
+            progress_ready_line "Temporal attrs" "ready"
         else
-            progress_fail_line "Search attributes" "failed"
+            progress_fail_line "Temporal attrs" "failed"
             fail_deployment "Temporal sample Text search attributes are present; run deploy/redeploy to repair them."
         fi
     else
@@ -2195,11 +2200,10 @@ function verify_circl8_core() {
         set -e
         if [ "$temporal_guard_rc" = "0" ]; then
             msg_ok "Temporal search attributes ready"
-            aligned_status_line "Temporal search attributes" "ready" "$GN"
-            aligned_status_line "Temporal repair" "not needed" "$GN"
+            progress_ready_line "Temporal attrs" "ready"
         elif [ "$temporal_guard_rc" = "2" ]; then
             msg_ok "Temporal search attributes repaired"
-            aligned_status_line "Temporal search attributes" "repaired" "$GN"
+            progress_ready_line "Temporal attrs" "repaired"
             msg_info "Restarting circl8 app after Temporal repair"
             if docker_cmd restart circl8 >> "${DEPLOY_OUTPUT_LOG:-/tmp/circl8-app-deploy.log}" 2>&1; then
                 msg_ok "circl8 app restarted"
@@ -2207,41 +2211,36 @@ function verify_circl8_core() {
                 fail_deployment "Temporal search attributes were repaired but circl8 app restart failed."
             fi
         else
-            progress_fail_line "Search attributes" "failed"
+            progress_fail_line "Temporal attrs" "failed"
             fail_deployment "Temporal search attribute guard failed."
         fi
     fi
 
-    msg_info "Waiting for circl8 app"
+    msg_info "Checking circl8 app"
     if wait_for_container_status circl8 healthy-or-running 300; then
         SCRIPT64_CIRCL8_APP="running"
         msg_ok "circl8 app running"
-        progress_ready_line "Containers" "ready"
     else
         SCRIPT64_CIRCL8_APP="failed"
         progress_fail_line "Containers" "failed"
         fail_deployment "circl8 app container did not become ready."
     fi
 
-    mini_header "Services"
-    progress_status_line "Services" "waiting" "$YW"
-    msg_info "Checking internal app HTTP"
+    msg_info "Checking services/API"
     if wait_for_circl8_internal_http 240; then
         SCRIPT64_CIRCL8_INTERNAL_HTTP="ready"
-        msg_ok "Internal HTTP/API ready"
-        progress_ready_line "Services" "ready"
+        msg_ok "Services/API ready"
+        progress_ready_line "Services/API" "ready"
     else
         SCRIPT64_CIRCL8_INTERNAL_HTTP="failed"
-        progress_fail_line "Services" "failed"
+        progress_fail_line "Services/API" "failed"
         fail_deployment "Circl8 frontend/backend/nginx API verification failed."
     fi
 
-    mini_header "Route"
-    progress_status_line "Route" "checking" "$YW"
     msg_info "Checking protected public route"
     if verify_public_route_behavior; then
         SCRIPT64_CIRCL8_ROUTE="protected"
-        msg_ok "Circl8 route protected"
+        msg_ok "Route protected"
         progress_ready_line "Route" "protected"
     else
         local route_result="$?"
@@ -2286,29 +2285,35 @@ function finish_preflight_only_success() {
     final_line "Template marker" "$COMPLETED_MARKER" "$BL"
 }
 
+
 function finish_deployment_success() {
     SCRIPT64_STATUS="completed"
     SCRIPT64_VERIFY_STATUS="PASS"
     SCRIPT64_DEPLOYMENT="completed"
     SCRIPT64_READY_FOR_DEPLOYMENT_LANE="yes"
     SCRIPT64_READY_FOR_AUTHENTIK_LANE="yes"
-    SCRIPT64_READY_FOR_SCRIPT65="no"
+    if [ "$SCRIPT64_AUTHENTIK_LANE_RAN" != "yes" ]; then
+        preserve_existing_authentik_marker_values
+    fi
+    compute_script65_readiness
     write_deployment_marker
     write_verify_report
 
     section_flash_success "FINISHED"
-    mini_header "Circl8"
+    mini_header "Core"
     final_line "Status" "$SCRIPT64_STATUS" "$GN"
     final_line "Verification" "$SCRIPT64_VERIFY_STATUS" "$GN"
     final_line "Deployment" "$SCRIPT64_DEPLOYMENT" "$GN"
     final_line "PostgreSQL" "$SCRIPT64_CIRCL8_POSTGRES" "$(status_color_for_value "$SCRIPT64_CIRCL8_POSTGRES")"
     final_line "Redis" "$SCRIPT64_CIRCL8_REDIS" "$(status_color_for_value "$SCRIPT64_CIRCL8_REDIS")"
     final_line "Temporal" "$SCRIPT64_CIRCL8_TEMPORAL" "$(status_color_for_value "$SCRIPT64_CIRCL8_TEMPORAL")"
-    final_line "Temporal search attributes" "$SCRIPT64_TEMPORAL_SEARCH_ATTRS" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTRS")"
+    final_line "Temporal attrs" "$SCRIPT64_TEMPORAL_SEARCH_ATTRS" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTRS")"
     final_line "Temporal repair" "$SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR")"
-    final_line "Circl8 app" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
-    final_line "Internal HTTP" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
-    final_line "Public route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
+    final_line "App" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
+    final_line "API" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
+    final_line "Route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
+
+    mini_header "Identity"
     final_line "Project slug" "$PROJECT_SLUG" "$GN"
     final_line "App host" "$PROJECT_APP_HOST" "$GN"
     final_line "Authentik host" "$PROJECT_AUTH_HOST" "$GN"
@@ -2318,8 +2323,9 @@ function finish_deployment_success() {
     final_line "Provider" "$SCRIPT64_AUTHENTIK_PROVIDER" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_PROVIDER")"
     final_line "Outpost" "$SCRIPT64_AUTHENTIK_OUTPOST" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_OUTPOST")"
     final_line "akadmin" "$SCRIPT64_AUTHENTIK_AKADMIN" "$GN"
-    final_line "Ready for Authentik lane" "$SCRIPT64_READY_FOR_AUTHENTIK_LANE" "$GN"
-    final_line "Ready for Script 6.5" "$SCRIPT64_READY_FOR_SCRIPT65" "$YW"
+    final_line "Ready for Script 6.5" "$SCRIPT64_READY_FOR_SCRIPT65" "$(status_color_for_value "$SCRIPT64_READY_FOR_SCRIPT65")"
+
+    mini_header "Paths"
     final_line "Verify log" "$VERIFY_LOG" "$BL"
     final_line "Template marker" "$COMPLETED_MARKER" "$BL"
     final_line "Deploy marker" "$DEPLOYED_MARKER" "$BL"
@@ -2355,35 +2361,40 @@ function finish_render_only_success() {
     final_line "Deploy marker" "$DEPLOYED_MARKER" "$BL"
 }
 
+
 function finish_verify_only_success() {
     SCRIPT64_STATUS="verify-only-completed"
     SCRIPT64_VERIFY_STATUS="PASS"
     SCRIPT64_DEPLOYMENT="completed"
     SCRIPT64_READY_FOR_DEPLOYMENT_LANE="yes"
-    SCRIPT64_READY_FOR_SCRIPT65="no"
     preserve_existing_authentik_marker_values
+    compute_script65_readiness
     write_verify_report
 
     section_flash_success "FINISHED"
-    mini_header "Circl8"
+    mini_header "Core"
     final_line "Status" "$SCRIPT64_STATUS" "$GN"
     final_line "Verification" "$SCRIPT64_VERIFY_STATUS" "$GN"
     final_line "Deployment" "$SCRIPT64_DEPLOYMENT" "$GN"
     final_line "PostgreSQL" "$SCRIPT64_CIRCL8_POSTGRES" "$(status_color_for_value "$SCRIPT64_CIRCL8_POSTGRES")"
     final_line "Redis" "$SCRIPT64_CIRCL8_REDIS" "$(status_color_for_value "$SCRIPT64_CIRCL8_REDIS")"
     final_line "Temporal" "$SCRIPT64_CIRCL8_TEMPORAL" "$(status_color_for_value "$SCRIPT64_CIRCL8_TEMPORAL")"
-    final_line "Temporal search attributes" "$SCRIPT64_TEMPORAL_SEARCH_ATTRS" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTRS")"
+    final_line "Temporal attrs" "$SCRIPT64_TEMPORAL_SEARCH_ATTRS" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTRS")"
     final_line "Temporal repair" "$SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR" "$(status_color_for_value "$SCRIPT64_TEMPORAL_SEARCH_ATTR_REPAIR")"
     final_line "App" "$SCRIPT64_CIRCL8_APP" "$(status_color_for_value "$SCRIPT64_CIRCL8_APP")"
-    final_line "Internal HTTP" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
-    final_line "Public route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
+    final_line "API" "$SCRIPT64_CIRCL8_INTERNAL_HTTP" "$(status_color_for_value "$SCRIPT64_CIRCL8_INTERNAL_HTTP")"
+    final_line "Route" "$SCRIPT64_CIRCL8_ROUTE" "$(status_color_for_value "$SCRIPT64_CIRCL8_ROUTE")"
+
+    mini_header "Identity"
     final_line "Groups" "$SCRIPT64_AUTHENTIK_GROUPS" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_GROUPS")"
     final_line "Policy" "$SCRIPT64_AUTHENTIK_POLICY" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_POLICY")"
     final_line "Application" "$SCRIPT64_AUTHENTIK_APPLICATION" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_APPLICATION")"
     final_line "Provider" "$SCRIPT64_AUTHENTIK_PROVIDER" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_PROVIDER")"
     final_line "Outpost" "$SCRIPT64_AUTHENTIK_OUTPOST" "$(status_color_for_value "$SCRIPT64_AUTHENTIK_OUTPOST")"
     final_line "akadmin" "$SCRIPT64_AUTHENTIK_AKADMIN" "$GN"
-    final_line "Ready for Script 6.5" "$SCRIPT64_READY_FOR_SCRIPT65" "$YW"
+    final_line "Ready for Script 6.5" "$SCRIPT64_READY_FOR_SCRIPT65" "$(status_color_for_value "$SCRIPT64_READY_FOR_SCRIPT65")"
+
+    mini_header "Paths"
     final_line "Verify log" "$VERIFY_LOG" "$BL"
     final_line "Deploy marker" "$DEPLOYED_MARKER" "$BL"
 }
