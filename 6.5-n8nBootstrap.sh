@@ -22,7 +22,8 @@ DEFAULT_N8N_POSTGRES_IMAGE="postgres:17-alpine"
 DEFAULT_N8N_REDIS_IMAGE="redis:7-alpine"
 
 umask 077
-TMP_DIR="$(mktemp -d)"
+TMP_DIR=""
+SUDO_HANDOFF_SCRIPT="${CIRCL8_N8N_SUDO_HANDOFF:-}"
 CURRENT_PROGRESS=""
 ENV_KEYS_ADDED=0
 HANDOFF_STATUS="not-run"
@@ -35,9 +36,16 @@ MARKER_STATUS="not-written"
 
 cleanup() {
   [[ -n "${CURRENT_PROGRESS}" ]] && printf '\r\033[K' || true
-  rm -rf "${TMP_DIR}" 2>/dev/null || true
+  [[ -n "${TMP_DIR:-}" ]] && rm -rf "${TMP_DIR}" 2>/dev/null || true
+  [[ -n "${SUDO_HANDOFF_SCRIPT:-}" ]] && rm -f "${SUDO_HANDOFF_SCRIPT}" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+ensure_runtime_tmp_dir() {
+  if [[ -z "${TMP_DIR:-}" ]]; then
+    TMP_DIR="$(mktemp -d)"
+  fi
+}
 
 on_error() {
   local line="${1:-unknown}"
@@ -86,7 +94,31 @@ fail() {
 }
 
 require_root() {
-  [[ "${EUID}" -eq 0 ]] || fail "Run this script as root."
+  if [[ "${EUID}" -eq 0 ]]; then
+    return 0
+  fi
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    fail "Root privileges are required and sudo is not installed. Install sudo or re-run this script as root."
+  fi
+
+  msg_info "Validating sudo access"
+  if ! sudo -v >/dev/null 2>&1; then
+    fail "Sudo authentication failed. Re-run as root or configure sudo access for this user."
+  fi
+
+  local script_path="${BASH_SOURCE[0]}"
+  local sudo_script=""
+  if [[ "${script_path}" == /dev/fd/* || "${script_path}" == /proc/*/fd/* ]]; then
+    sudo_script="$(mktemp /tmp/circl8-n8n-sudo.XXXXXX.sh)" || fail "Could not prepare sudo handoff script."
+    cat "${script_path}" > "${sudo_script}" || fail "Could not copy script for sudo handoff."
+    chmod 700 "${sudo_script}" || true
+    msg_ok "SUDO ACCESS CONFIRMED"
+    CIRCL8_N8N_SUDO_HANDOFF="${sudo_script}" exec sudo -E bash "${sudo_script}" "$@"
+  fi
+
+  msg_ok "SUDO ACCESS CONFIRMED"
+  exec sudo -E bash "${script_path}" "$@"
 }
 
 log_line() {
@@ -354,10 +386,10 @@ validate_service_network_scope() {
 
 validate_webhook_auth_scope() {
   local compose="$1"
-  local routers router middleware_lines
+  local routers router middleware_lines public_test_routers
 
   routers="$(awk '
-    /traefik[.]http[.]routers[.][A-Za-z0-9_-]+[.]rule/ && /\/webhook/ && !/\/webhook-test/ {
+    /^[[:space:]]*-/ && /traefik[.]http[.]routers[.][A-Za-z0-9_-]+[.]rule/ && /Path(Prefix)?[(]?`?\/webhook/ && !/\/webhook-test/ {
       line=$0
       sub(/^.*traefik[.]http[.]routers[.]/, "", line)
       sub(/[.]rule.*$/, "", line)
@@ -369,27 +401,27 @@ validate_webhook_auth_scope() {
 
   while IFS= read -r router; do
     [[ -n "${router}" ]] || continue
-    middleware_lines="$(grep -E "traefik[.]http[.]routers[.]${router//./[.]}[.]middlewares" "${compose}" || true)"
-    [[ -z "${middleware_lines}" ]] || fail "Production webhook route must not use Authentik middleware."
+    middleware_lines="$(grep -E "^[[:space:]]*-[[:space:]]*.*traefik[.]http[.]routers[.]${router//./[.]}[.]middlewares" "${compose}" || true)"
+    if printf '%s\n' "${middleware_lines}" | grep -Eiq 'authentik|forwardauth|forward-auth|chain-auth|chain'; then
+      fail "Production webhook route must not use Authentik/auth middleware."
+    fi
   done <<< "${routers}"
 
-  if awk '
-    /traefik[.]http[.]routers[.][A-Za-z0-9_-]+[.]rule/ && /\/webhook-test/ {
+  public_test_routers="$(awk '
+    /^[[:space:]]*-/ && /traefik[.]http[.]routers[.][A-Za-z0-9_-]+[.]rule/ && /Path(Prefix)?[(]?`?\/webhook-test/ {
       line=$0
       sub(/^.*traefik[.]http[.]routers[.]/, "", line)
       sub(/[.]rule.*$/, "", line)
       print line
     }
-  ' "${compose}" | while IFS= read -r router; do
-    [[ -n "${router}" ]] || continue
-    grep -E "traefik[.]http[.]routers[.]${router//./[.]}[.]middlewares" "${compose}" >/dev/null 2>&1 || exit 1
-  done; then
-    :
-  else
-    fail "webhook-test route must not be publicly exposed without platform/admin middleware."
-  fi
-}
+  ' "${compose}" | sort -u)"
 
+  while IFS= read -r router; do
+    [[ -n "${router}" ]] || continue
+    middleware_lines="$(grep -E "^[[:space:]]*-[[:space:]]*.*traefik[.]http[.]routers[.]${router//./[.]}[.]middlewares" "${compose}" || true)"
+    printf '%s\n' "${middleware_lines}" | grep -Eiq 'authentik|forwardauth|forward-auth|chain-auth|chain'       || fail "webhook-test route must not be publicly exposed without platform/admin middleware."
+  done <<< "${public_test_routers}"
+}
 validate_script_self_safety() {
   local script_path
   script_path="$(readlink -f "$0")"
@@ -522,7 +554,8 @@ print_summary() {
 }
 
 main() {
-  require_root
+  require_root "$@"
+  ensure_runtime_tmp_dir
   : > "${LOG_FILE}"
   chmod 600 "${LOG_FILE}" 2>/dev/null || true
   log_line "Starting ${SCRIPT_SOURCE} ${SCRIPT_VERSION} ${SCRIPT_BUILD}"
