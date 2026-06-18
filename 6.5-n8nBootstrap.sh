@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.0.6"
+SCRIPT_VERSION="v1.0.7"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="setup-output-grouping-polish"
+SCRIPT_BUILD="inspection-status-color-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -803,19 +803,32 @@ function inspect_n8n_template_plan() {
 }
 
 function print_read_only_inspection_plan() {
+    local env_changes_display="" env_changes_color="" runtime_sync_display="" runtime_sync_color=""
     section "READ-ONLY INSPECTION"
     inspect_n8n_env_plan
     inspect_n8n_directories_plan
     inspect_n8n_template_plan
 
+    case "$SCRIPT65_ENV_CHANGES_PLANNED" in
+        yes) env_changes_display="planned"; env_changes_color="$YW" ;;
+        no) env_changes_display="none"; env_changes_color="$GN" ;;
+        *) env_changes_display="$SCRIPT65_ENV_CHANGES_PLANNED"; env_changes_color="$(status_color_for_value "$SCRIPT65_ENV_CHANGES_PLANNED")" ;;
+    esac
+
+    case "$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED" in
+        yes) runtime_sync_display="sync needed"; runtime_sync_color="$YW" ;;
+        no) runtime_sync_display="current"; runtime_sync_color="$GN" ;;
+        *) runtime_sync_display="$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED"; runtime_sync_color="$(status_color_for_value "$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED")" ;;
+    esac
+
     mini_header "Planned changes"
     aligned_status_line "Env keys missing" "$SCRIPT65_ENV_KEYS_MISSING" "$(status_color_for_value "$([ "$SCRIPT65_ENV_KEYS_MISSING" -eq 0 ] && printf ready || printf will-create)")"
-    aligned_status_line "Env changes planned" "$SCRIPT65_ENV_CHANGES_PLANNED" "$(status_color_for_value "$SCRIPT65_ENV_CHANGES_PLANNED")"
+    aligned_status_line "Env changes" "$env_changes_display" "$env_changes_color"
     aligned_status_line "Directories missing" "$SCRIPT65_DIRS_MISSING" "$(status_color_for_value "$([ "$SCRIPT65_DIRS_MISSING" -eq 0 ] && printf ready || printf will-create)")"
     aligned_status_line "Template source" "$SCRIPT65_TEMPLATE_SOURCE" "$GN"
     aligned_status_line "Template inspection" "$SCRIPT65_TEMPLATE_INSPECTION" "$GN"
     aligned_status_line "Runtime compose state" "$SCRIPT65_RUNTIME_COMPOSE_STATE" "$(status_color_for_value "$SCRIPT65_RUNTIME_COMPOSE_STATE")"
-    aligned_status_line "Runtime compose sync needed" "$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED" "$(status_color_for_value "$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED")"
+    aligned_status_line "Runtime compose" "$runtime_sync_display" "$runtime_sync_color"
     aligned_status_line "Deployment" "not-run" "$GN"
     aligned_status_line "Authentik API writes" "not-run" "$GN"
 }
