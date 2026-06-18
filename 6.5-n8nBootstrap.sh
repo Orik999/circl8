@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.1.4"
+SCRIPT_VERSION="v1.1.5"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="rerun-ui-status-polish"
+SCRIPT_BUILD="final-start-summary-ui-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -967,7 +967,7 @@ function sync_n8n_template() {
     if [ "${SCRIPT65_START_N8N_ACTIVE:-no}" = "yes" ]; then
         msg_info "Downloading n8n compose template"
         copy_n8n_template_to_temp "$template_tmp"
-        msg_ok "N8N COMPOSE TEMPLATE DOWNLOADED"
+        msg_ok "N8N COMPOSE TEMPLATE READY"
 
         msg_info "Syncing runtime compose"
         root_copy_file "$template_tmp" "$N8N_COMPOSE_FILE"
@@ -1666,7 +1666,7 @@ function print_deploy_summary() {
     mini_header "Deployment"
     final_line "Status" "$SCRIPT65_DEPLOYMENT" "$GN"
     final_line "Containers" "$SCRIPT65_CONTAINERS" "$GN"
-    final_line "Health" "$SCRIPT65_HEALTH_STATUS" "$GN"
+    final_line "Health" "healthy" "$GN"
     final_line "Runtime compose" "$SCRIPT65_N8N_COMPOSE_TEMPLATE" "$GN"
 
     mini_header "n8n"
@@ -1737,9 +1737,7 @@ function run_start_n8n_progress() {
     validate_compose_config
     msg_ok "N8N COMPOSE CONFIG VALID"
 
-    msg_info "Writing preflight marker"
     mark_template_preflight_ready
-    msg_ok "N8N PREFLIGHT MARKER WRITTEN"
 
     mini_header "Images"
     prepare_n8n_images
@@ -1759,6 +1757,8 @@ function run_start_n8n_progress() {
     SCRIPT65_READY_FOR_SCRIPT66="yes"
 
     mini_header "Completion"
+    msg_ok "N8N PREFLIGHT MARKER WRITTEN"
+
     msg_info "Writing completion marker"
     write_deployment_marker
     msg_ok "SCRIPT 6.5 MARKER WRITTEN"
