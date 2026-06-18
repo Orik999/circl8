@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.1.2"
+SCRIPT_VERSION="v1.1.3"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="image-loop-and-start-progress-fix"
+SCRIPT_BUILD="start-progress-ui-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -235,9 +235,9 @@ function show_script_version() {
 
 function section() { echo ""; echo -e "${BORDER}"; echo -e "${BL}$1${CL}"; echo -e "${BORDER}"; }
 function section_flash_success() { echo ""; echo -e "${BORDER}"; echo -e "${GN}${CLF}$1${CL}"; echo -e "${BORDER}"; }
-function mini_header() { echo ""; echo -e "${YW}$1:${CL}"; }
+function mini_header() { clear_progress_line || true; echo ""; echo -e "${YW}$1:${CL}"; }
 function clear_progress_line() { [ "${PROGRESS_LINE_ACTIVE:-no}" = "yes" ] && printf '%b' "${BFR}" && PROGRESS_LINE_ACTIVE="no" || true; }
-function msg_info() { PROGRESS_LINE_ACTIVE="yes"; echo -ne " ${HOLD} ${YW}$1...${CL}"; }
+function msg_info() { clear_progress_line || true; PROGRESS_LINE_ACTIVE="yes"; echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; PROGRESS_LINE_ACTIVE="no"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; PROGRESS_LINE_ACTIVE="no"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
@@ -970,14 +970,13 @@ function sync_n8n_template() {
         SCRIPT65_N8N_COMPOSE_TEMPLATE="synced"
         msg_ok "RUNTIME COMPOSE SYNCED"
 
-        msg_info "Syncing Dockge compose"
         if [ "$(env_value ADMIN_UI)" = "dockge" ]; then
             root_install_dir "$(dirname "$N8N_DOCKGE_COMPOSE_FILE")" 755
             root_copy_file "$N8N_COMPOSE_FILE" "$N8N_DOCKGE_COMPOSE_FILE"
             chmod 640 "$N8N_DOCKGE_COMPOSE_FILE"
-            msg_ok "DOCKGE COMPOSE SYNCED"
+            printf '%s\n' "SCRIPT65_ADMIN_COMPOSE_SYNC=done" >> "$LOG_FILE" 2>/dev/null || true
         else
-            msg_ok "DOCKGE COMPOSE NOT CONFIGURED"
+            printf '%s\n' "SCRIPT65_ADMIN_COMPOSE_SYNC=not-configured" >> "$LOG_FILE" 2>/dev/null || true
         fi
         return 0
     fi
@@ -1519,6 +1518,9 @@ function verify_n8n_deployment() {
     SCRIPT65_CONTAINERS="running"
     SCRIPT65_HEALTH_STATUS="pass"
 
+    if [ "${SCRIPT65_START_N8N_ACTIVE:-no}" = "yes" ]; then
+        mini_header "Routes"
+    fi
     msg_info "Checking n8n routes"
     verify_n8n_route_labels "$N8N_RUNTIME_COMPOSE"
     msg_ok "N8N ROUTES READY"
@@ -1553,7 +1555,7 @@ function confirm_start_n8n() {
         return 1
     fi
 
-    if read_yes_no "Proceed with n8n setup and deployment?" "n"; then
+    if read_yes_no "Proceed with n8n setup and deployment?" "y"; then
         msg_ok "Start confirmed — preparing n8n"
         return 0
     fi
@@ -1699,17 +1701,21 @@ function run_start_n8n_progress() {
     chmod 600 "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
 
     if [ "$mode" = "full" ]; then
+        mini_header "Environment"
         msg_info "Preparing n8n environment"
         prepare_env
         msg_ok "N8N ENV READY"
     fi
 
+    mini_header "Templates"
     sync_n8n_template
 
+    mini_header "Directories"
     msg_info "Checking n8n directories and permissions"
     prepare_n8n_directories
     msg_ok "N8N DIRECTORIES AND PERMISSIONS READY"
 
+    mini_header "Validation"
     msg_info "Checking static safety"
     validate_static_safety "$N8N_RUNTIME_COMPOSE"
     msg_ok "N8N STATIC SAFETY PASSED"
@@ -1722,8 +1728,13 @@ function run_start_n8n_progress() {
     mark_template_preflight_ready
     msg_ok "N8N PREFLIGHT MARKER WRITTEN"
 
+    mini_header "Images"
     prepare_n8n_images
+
+    mini_header "Deployment"
     deploy_n8n_stack
+
+    mini_header "Services"
     verify_n8n_deployment
 
     SCRIPT65_STATUS="completed"
@@ -1734,6 +1745,7 @@ function run_start_n8n_progress() {
     SCRIPT65_READY_FOR_WORKFLOW_LANE="yes"
     SCRIPT65_READY_FOR_SCRIPT66="yes"
 
+    mini_header "Completion"
     msg_info "Writing completion marker"
     write_deployment_marker
     msg_ok "SCRIPT 6.5 MARKER WRITTEN"
