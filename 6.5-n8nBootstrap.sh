@@ -5,9 +5,9 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 #  Project Circl8 - Script 6.5 n8n Bootstrap
 # =========================================================
-# Phase 2: template/preflight only. This script prepares the n8n
-# foundation contract, validates the rendered compose file, and writes
-# a preflight marker. It does not deploy containers or write Authentik/n8n APIs.
+# Script 6.5 prepares the n8n foundation, starts the n8n stack,
+# verifies service readiness/routes, and writes completion markers.
+# It uses the existing platform/admin Authentik lane and does not write Authentik/n8n APIs.
 
 YW="$(printf '\033[33m')"
 BL="$(printf '\033[36m')"
@@ -24,15 +24,16 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.1.0"
+SCRIPT_VERSION="v1.1.1"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="n8n-deploy-verify-lane"
+SCRIPT_BUILD="deploy-progress-per-service-readiness-fix"
 
 T="15"
 UI_LABEL_WIDTH="34"
 
 LOG_FILE="/var/log/circl8-n8n.log"
 VERIFY_LOG="/var/log/circl8-n8n-verify.log"
+DEPLOY_FAILURE_LOG="/var/log/circl8-n8n-deploy-failure.log"
 COMPLETED_MARKER="/root/.circl8-n8n-template-preflight-completed"
 DEPLOYED_MARKER="/root/.circl8-n8n-completed"
 SCRIPT61_MARKER="/root/.circl8-platform-core-completed"
@@ -54,6 +55,8 @@ TEMP_DIRS=()
 PROGRESS_LINE_ACTIVE="no"
 SCRIPT65_RUN_MODE="prompt"
 SCRIPT65_GROUPED_SETUP_ACTIVE="no"
+SCRIPT65_START_N8N_ACTIVE="no"
+SCRIPT65_DEPLOY_IN_PROGRESS="no"
 
 SCRIPT61_STATUS="unknown"
 SCRIPT61_VERIFY_STATUS="unknown"
@@ -111,6 +114,7 @@ SCRIPT65_TEST_WEBHOOKS="not-run"
 SCRIPT65_DEPLOYED_MARKER_WRITTEN="no"
 SCRIPT65_SERVICE_STATUS_SUMMARY="not-run"
 SCRIPT65_SERVICE_HEALTH_SUMMARY="not-run"
+SCRIPT65_IMAGE_STATUS_SUMMARY="not-run"
 
 SCRIPT65_ENV_KEYS_MISSING="0"
 SCRIPT65_ENV_CHANGES_PLANNED="no"
@@ -351,28 +355,49 @@ function cleanup() {
 function on_error() {
     local line_no="$1"
     clear_progress_line || true
-    SCRIPT65_STATUS="template-preflight-failed"
+    if [ "${SCRIPT65_DEPLOY_IN_PROGRESS:-no}" = "yes" ]; then
+        SCRIPT65_STATUS="deploy-failed"
+        SCRIPT65_DEPLOYMENT="failed"
+    else
+        SCRIPT65_STATUS="template-preflight-failed"
+        SCRIPT65_DEPLOYMENT="not-run"
+    fi
     SCRIPT65_VERIFY_STATUS="FAILED"
     SCRIPT65_READY_FOR_DEPLOYMENT_LANE="no"
+    SCRIPT65_READY_FOR_WORKFLOW_LANE="no"
+    SCRIPT65_READY_FOR_SCRIPT66="no"
     write_verify_report || true
     echo -e "${RD}ERROR:${CL} Script failed at line ${line_no}. Check ${LOG_FILE}"
     echo -e "  ${BL}Verify log:${CL} ${VERIFY_LOG}"
+    if [ -s "${DEPLOY_FAILURE_LOG:-}" ]; then
+        echo -e "  ${BL}Failure log:${CL} ${DEPLOY_FAILURE_LOG}"
+    fi
 }
+
 
 function fail_with_report() {
     local message="$1"
     clear_progress_line || true
-    SCRIPT65_STATUS="template-preflight-failed"
+    if [ "${SCRIPT65_DEPLOY_IN_PROGRESS:-no}" = "yes" ] || [ "${SCRIPT65_DEPLOYMENT:-not-run}" = "deployed" ]; then
+        SCRIPT65_STATUS="deploy-failed"
+        SCRIPT65_DEPLOYMENT="failed"
+    else
+        SCRIPT65_STATUS="template-preflight-failed"
+        SCRIPT65_DEPLOYMENT="not-run"
+    fi
     SCRIPT65_VERIFY_STATUS="FAILED"
-    SCRIPT65_DEPLOYMENT="not-run"
     SCRIPT65_READY_FOR_DEPLOYMENT_LANE="no"
     SCRIPT65_READY_FOR_WORKFLOW_LANE="no"
     SCRIPT65_READY_FOR_SCRIPT66="no"
     write_verify_report || true
     echo -e "${CROSS} ${RD}${message}${CL}"
     echo -e "  ${BL}Verify log:${CL} ${VERIFY_LOG}"
+    if [ -s "${DEPLOY_FAILURE_LOG:-}" ]; then
+        echo -e "  ${BL}Failure log:${CL} ${DEPLOY_FAILURE_LOG}"
+    fi
     exit 1
 }
+
 
 # =========================================================
 #  ROOT FILE / COMMAND HELPERS
@@ -418,13 +443,14 @@ function usage() {
     printf '%s\n' "Usage: sudo ./6.5-n8nBootstrap.sh [--preflight-only|--render-only|--verify-only|--deploy|--apply|--exit|-h|--help]"
     printf '%s\n' ""
     printf '%s\n' "Run modes:"
-    printf '%s\n' "  --preflight-only   Run read-only inspection and prompt before applying template/preflight setup."
-    printf '%s\n' "  --apply            Show plan and require confirmation before applying template/preflight setup."
+    printf '%s\n' "  --preflight-only   Run template/preflight setup only after confirmation."
+    printf '%s\n' "  --apply            Alias for template/preflight setup only after confirmation."
     printf '%s\n' "  --render-only      Re-sync runtime compose and run static/compose config validation only."
     printf '%s\n' "  --verify-only      Verify existing n8n preflight/deployment state without mutation."
-    printf '%s\n' "  --deploy           Deploy and verify the prepared n8n stack."
+    printf '%s\n' "  --deploy           Deploy and verify the prepared n8n stack; requires the preflight marker."
     printf '%s\n' "  --exit             Exit cleanly without changes."
 }
+
 
 function parse_args() {
     local arg=""
@@ -689,12 +715,17 @@ function load_project_context() {
 
 function print_plan() {
     section "PREFLIGHT PLAN"
-    aligned_status_line "Action" "template/preflight only" "$GN"
+    if [ "${SCRIPT65_RUN_MODE:-prompt}" = "prompt" ]; then
+        aligned_status_line "Action" "setup/deploy n8n stack" "$GN"
+    else
+        aligned_status_line "Action" "template/preflight only" "$GN"
+    fi
     aligned_status_line "Template" "docker/07-n8n-compose.yml" "$GN"
     aligned_status_line "Runtime compose" "$N8N_RUNTIME_COMPOSE" "$BL"
-    aligned_status_line "Deployment" "not-run" "$GN"
+    aligned_status_line "Deployment" "$([ "${SCRIPT65_RUN_MODE:-prompt}" = "prompt" ] && printf after-confirmation || printf not-run)" "$GN"
     aligned_status_line "Authentik API writes" "not-run" "$GN"
 }
+
 
 # =========================================================
 #  ENV / DIRECTORY / TEMPLATE PREP
@@ -753,9 +784,11 @@ function prepare_env() {
 
     validate_image_pairing
     SCRIPT65_ENV_STATUS="ready"
-    aligned_status_line "Keys added" "$SCRIPT65_ENV_KEYS_ADDED" "$GN"
-    aligned_status_line "Secrets" "preserved/generated if missing" "$GN"
-    [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || msg_ok "N8N ENV READY"
+    if [ "${SCRIPT65_START_N8N_ACTIVE:-no}" != "yes" ]; then
+        aligned_status_line "Keys added" "$SCRIPT65_ENV_KEYS_ADDED" "$GN"
+        aligned_status_line "Secrets" "preserved/generated if missing" "$GN"
+        [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || msg_ok "N8N ENV READY"
+    fi
 }
 
 function validate_image_pairing() {
@@ -798,26 +831,39 @@ function copy_n8n_template_to_temp() {
 }
 
 function inspect_n8n_template_plan() {
-    local template_tmp=""
-    template_tmp="$(mktemp /tmp/circl8-n8n-compose-inspect.XXXXXX)"
-    TEMP_FILES+=("$template_tmp")
-    copy_n8n_template_to_temp "$template_tmp"
-    N8N_TEMPLATE_INSPECTION_FILE="$template_tmp"
+    local template_path=""
 
-    if [ -s "$N8N_COMPOSE_FILE" ] && cmp -s "$template_tmp" "$N8N_COMPOSE_FILE"; then
-        SCRIPT65_RUNTIME_COMPOSE_STATE="present-current"
-        SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="no"
-    elif [ -s "$N8N_COMPOSE_FILE" ]; then
-        SCRIPT65_RUNTIME_COMPOSE_STATE="present-different"
-        SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="yes"
+    if [ -f "docker/07-n8n-compose.yml" ]; then
+        template_path="docker/07-n8n-compose.yml"
+        SCRIPT65_TEMPLATE_SOURCE="local repo"
+        N8N_TEMPLATE_INSPECTION_FILE="$template_path"
+        if [ -s "$N8N_COMPOSE_FILE" ] && cmp -s "$template_path" "$N8N_COMPOSE_FILE"; then
+            SCRIPT65_RUNTIME_COMPOSE_STATE="present-current"
+            SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="no"
+        elif [ -s "$N8N_COMPOSE_FILE" ]; then
+            SCRIPT65_RUNTIME_COMPOSE_STATE="present-different"
+            SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="yes"
+        else
+            SCRIPT65_RUNTIME_COMPOSE_STATE="missing"
+            SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="yes"
+        fi
+        validate_static_safety "$template_path" "inspection"
+        SCRIPT65_TEMPLATE_INSPECTION="pass"
+        return 0
+    fi
+
+    SCRIPT65_TEMPLATE_SOURCE="remote"
+    N8N_TEMPLATE_INSPECTION_FILE="not-downloaded"
+    if [ -s "$N8N_COMPOSE_FILE" ]; then
+        SCRIPT65_RUNTIME_COMPOSE_STATE="present"
+        SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="unknown"
     else
         SCRIPT65_RUNTIME_COMPOSE_STATE="missing"
         SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="yes"
     fi
-
-    validate_static_safety "$template_tmp" "inspection"
-    SCRIPT65_TEMPLATE_INSPECTION="pass"
+    SCRIPT65_TEMPLATE_INSPECTION="deferred"
 }
+
 
 function print_read_only_inspection_plan() {
     local env_changes_display="" env_changes_color="" runtime_sync_display="" runtime_sync_color=""
@@ -882,26 +928,58 @@ function confirm_apply_phase2_setup() {
 function prepare_n8n_directories() {
     [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || section "N8N DIRECTORIES"
     root_install_dir "$COMPOSE_DIR" 755
-    root_install_dir "$N8N_APPDATA_DIR" 700
+    root_install_dir "$N8N_APPDATA_DIR" 755
     root_install_dir "$N8N_POSTGRES_DIR" 700
     root_install_dir "$N8N_REDIS_DIR" 700
-    root_install_dir "$N8N_STORAGE_DIR" 700
+    root_install_dir "$N8N_STORAGE_DIR" 770
+
+    # The n8n containers run as the node user and mount this path at /home/node/.n8n.
+    # Repair only the n8n-owned app/config/storage mount; do not chown Postgres or Redis data.
+    chown -R 1000:1000 "$N8N_STORAGE_DIR" 2>/dev/null || true
+    chmod -R u+rwX,g+rwX,o-rwx "$N8N_STORAGE_DIR" 2>/dev/null || true
+
     SCRIPT65_N8N_APPDATA="ready"
     SCRIPT65_N8N_POSTGRES_DATA="ready"
     SCRIPT65_N8N_REDIS_DATA="ready"
     SCRIPT65_N8N_STORAGE="ready"
-    aligned_status_line "Appdata" "$SCRIPT65_N8N_APPDATA" "$GN"
-    aligned_status_line "Postgres data" "$SCRIPT65_N8N_POSTGRES_DATA" "$GN"
-    aligned_status_line "Redis data" "$SCRIPT65_N8N_REDIS_DATA" "$GN"
-    aligned_status_line "Storage" "$SCRIPT65_N8N_STORAGE" "$GN"
-    [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || msg_ok "N8N DIRECTORIES READY"
+    if [ "${SCRIPT65_START_N8N_ACTIVE:-no}" != "yes" ]; then
+        aligned_status_line "Appdata" "$SCRIPT65_N8N_APPDATA" "$GN"
+        aligned_status_line "Postgres data" "$SCRIPT65_N8N_POSTGRES_DATA" "$GN"
+        aligned_status_line "Redis data" "$SCRIPT65_N8N_REDIS_DATA" "$GN"
+        aligned_status_line "Storage" "$SCRIPT65_N8N_STORAGE" "$GN"
+        [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || msg_ok "N8N DIRECTORIES READY"
+    fi
 }
+
 
 function sync_n8n_template() {
     [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || section "TEMPLATES"
     local template_tmp=""
     template_tmp="$(mktemp /tmp/circl8-n8n-compose-template.XXXXXX)"
     TEMP_FILES+=("$template_tmp")
+
+    if [ "${SCRIPT65_START_N8N_ACTIVE:-no}" = "yes" ]; then
+        msg_info "Downloading n8n compose template"
+        copy_n8n_template_to_temp "$template_tmp"
+        msg_ok "N8N COMPOSE TEMPLATE DOWNLOADED"
+
+        msg_info "Syncing runtime compose"
+        root_copy_file "$template_tmp" "$N8N_COMPOSE_FILE"
+        chmod 640 "$N8N_COMPOSE_FILE"
+        SCRIPT65_N8N_COMPOSE_TEMPLATE="synced"
+        msg_ok "RUNTIME COMPOSE SYNCED"
+
+        msg_info "Syncing Dockge compose"
+        if [ "$(env_value ADMIN_UI)" = "dockge" ]; then
+            root_install_dir "$(dirname "$N8N_DOCKGE_COMPOSE_FILE")" 755
+            root_copy_file "$N8N_COMPOSE_FILE" "$N8N_DOCKGE_COMPOSE_FILE"
+            chmod 640 "$N8N_DOCKGE_COMPOSE_FILE"
+            msg_ok "DOCKGE COMPOSE SYNCED"
+        else
+            msg_ok "DOCKGE COMPOSE NOT CONFIGURED"
+        fi
+        return 0
+    fi
 
     copy_n8n_template_to_temp "$template_tmp"
 
@@ -919,6 +997,7 @@ function sync_n8n_template() {
         aligned_status_line "Dockge compose" "skipped" "$YW"
     fi
 }
+
 
 # =========================================================
 #  STATIC SAFETY / COMPOSE CONFIG
@@ -1046,34 +1125,40 @@ function validate_webhook_auth_scope() {
 }
 
 function validate_script_self_safety() {
-    local script_path=""
+    local script_path="" compose_up_lines=""
     script_path="$(readlink -f "${BASH_SOURCE[0]}")"
     [ -f "$script_path" ] || return 0
-    reject_regex "$script_path" 'docker[[:space:]]+compose[[:space:]]+(up|pull|down|restart|stop|rm)' "Script contains a forbidden Docker Compose lifecycle action."
-    reject_regex "$script_path" 'docker[[:space:]]+(image|volume|network|system)[[:space:]]+prune' "Script contains a forbidden prune action."
+    reject_regex "$script_path" 'docker[[:space:]]+compose[[:space:]]+(pull|down|restart|stop|rm)' "Script contains a forbidden Docker Compose lifecycle action."
+    compose_up_lines="$(uncommented_file_content "$script_path" | grep -E 'docker[[:space:]]+compose[[:space:]].*up' | grep -vF 'docker compose -f "$N8N_RUNTIME_COMPOSE" --env-file "$ENV_FILE" up -d' || true)"
+    [ -z "$compose_up_lines" ] || fail_with_report "Script contains an unapproved Docker Compose up action."
+    reject_regex "$script_path" 'docker[[:space:]]+(system|volume|network|image|builder)[[:space:]]+prune' "Script contains a forbidden prune action."
     reject_regex "$script_path" 'docker[.]sock|/var/run/docker[.]sock' "Script contains a Docker socket reference."
     reject_regex "$script_path" 'app[.]circl8[.]co[.]uk|auth[.]circl8[.]co[.]uk|[.]circl8[.]co[.]uk' "Script contains hardcoded public identity values."
     reject_regex "$script_path" 'status-(trial|active|past-due|cancelled|suspended|deletion-requested)|plan-(starter|growth|pro)' "Script contains customer status or plan group references."
     reject_regex "$script_path" '[s]tripe|[p]ostiz source|[c]ustom image build|[e]lastic[[:alpha:]]*|temporal[-]ui' "Script contains out-of-scope workflow or app modification references."
 }
 
+
 function validate_compose_config() {
     if [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" != "yes" ]; then
         section "COMPOSE CONFIG"
         msg_info "Validating n8n compose config"
     fi
-    docker compose -f "$N8N_RUNTIME_COMPOSE" --env-file "$ENV_FILE" config > /tmp/circl8-n8n-compose-config.out 2> /tmp/circl8-n8n-compose-config.err || {
+    docker compose -f "$N8N_RUNTIME_COMPOSE" --env-file "$ENV_FILE" config -q > /tmp/circl8-n8n-compose-config.out 2> /tmp/circl8-n8n-compose-config.err || {
         sed -E '/(PASSWORD|PASSWD|SECRET|TOKEN|DATABASE_URL|REDIS_URL|JWT|AUTHORIZATION|BEARER)/Id' /tmp/circl8-n8n-compose-config.err >> "$LOG_FILE" 2>/dev/null || true
         fail_with_report "Docker Compose config validation failed for n8n."
     }
     rm -f /tmp/circl8-n8n-compose-config.out /tmp/circl8-n8n-compose-config.err 2>/dev/null || true
     SCRIPT65_N8N_COMPOSE_CONFIG="valid"
-    if [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ]; then
+    if [ "${SCRIPT65_START_N8N_ACTIVE:-no}" = "yes" ]; then
+        return 0
+    elif [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ]; then
         aligned_status_line "Compose config" "$SCRIPT65_N8N_COMPOSE_CONFIG" "$GN"
     else
         msg_ok "N8N COMPOSE CONFIG VALID"
     fi
 }
+
 
 # =========================================================
 #  REPORT / MARKER / SUMMARY
@@ -1133,6 +1218,8 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT65_DEPLOYED_MARKER_WRITTEN=${SCRIPT65_DEPLOYED_MARKER_WRITTEN}"
         printf '%s\n' "SCRIPT65_SERVICE_STATUS_SUMMARY=${SCRIPT65_SERVICE_STATUS_SUMMARY}"
         printf '%s\n' "SCRIPT65_SERVICE_HEALTH_SUMMARY=${SCRIPT65_SERVICE_HEALTH_SUMMARY}"
+        printf '%s\n' "SCRIPT65_IMAGE_STATUS_SUMMARY=${SCRIPT65_IMAGE_STATUS_SUMMARY}"
+        printf '%s\n' "SCRIPT65_FAILURE_LOG=${DEPLOY_FAILURE_LOG}"
     } | write_root_file "$VERIFY_LOG"
     chmod 600 "$VERIFY_LOG" 2>/dev/null || true
 }
@@ -1176,14 +1263,91 @@ function write_completion_marker() {
 
 
 function expected_n8n_services() {
-    printf '%s
-' \
-        n8n-postgres \
-        n8n-redis \
-        n8n \
-        n8n-runner \
-        n8n-worker \
+    printf '%s\\n' \\
+        n8n-postgres \\
+        n8n-redis \\
+        n8n \\
+        n8n-runner \\
+        n8n-worker \\
         n8n-worker-runner
+}
+
+function expected_n8n_images() {
+    local image=""
+
+    image="$(env_value N8N_POSTGRES_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_POSTGRES_IMAGE"; printf '%s\\n' "$image"
+    image="$(env_value N8N_REDIS_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_REDIS_IMAGE"; printf '%s\\n' "$image"
+    image="$(env_value N8N_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_IMAGE"; printf '%s\\n' "$image"
+    image="$(env_value N8N_RUNNERS_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_RUNNERS_IMAGE"; printf '%s\\n' "$image"
+}
+
+
+function image_display_name() {
+    local image="$1"
+    case "$image" in
+        *postgres*) printf 'POSTGRES' ;;
+        *redis*) printf 'REDIS' ;;
+        *runners*) printf 'N8N RUNNER' ;;
+        *n8n*) printf 'N8N' ;;
+        *) printf '%s' "$image" | tr '[:lower:]' '[:upper:]' ;;
+    esac
+}
+
+function sanitize_log_file() {
+    sed -E '/(PASSWORD|PASSWD|SECRET|TOKEN|DATABASE_URL|REDIS_URL|JWT|AUTHORIZATION|BEARER|N8N_ENCRYPTION_KEY|N8N_RUNNERS_AUTH_TOKEN)/Id' "$1" 2>/dev/null || true
+}
+
+function prepare_n8n_images() {
+    local image="" label="" out_file="" image_summary=""
+    while IFS= read -r image; do
+        [ -n "$image" ] || continue
+        label="$(image_display_name "$image")"
+        msg_info "Preparing $(printf '%s' "$label" | tr '[:upper:]' '[:lower:]') image"
+        if docker image inspect "$image" >/dev/null 2>&1; then
+            image_summary="${image_summary}${image}=present "
+            msg_ok "${label} IMAGE READY"
+            continue
+        fi
+        msg_ok "${label} IMAGE NOT PRESENT"
+        msg_info "Downloading/extracting $(printf '%s' "$label" | tr '[:upper:]' '[:lower:]') image"
+        out_file="$(mktemp /tmp/circl8-n8n-image-pull.XXXXXX.log)"
+        TEMP_FILES+=("$out_file")
+        if docker pull "$image" >"$out_file" 2>&1; then
+            sanitize_log_file "$out_file" >> "$LOG_FILE" 2>/dev/null || true
+            image_summary="${image_summary}${image}=pulled "
+            msg_ok "${label} IMAGE READY"
+        else
+            sanitize_log_file "$out_file" >> "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
+            fail_with_report "Failed to prepare Docker image: ${image}"
+        fi
+    done < <(expected_n8n_images | sort -u)
+    SCRIPT65_IMAGE_STATUS_SUMMARY="${image_summary% }"
+}
+
+function capture_service_failure_logs() {
+    local service="$1" log_tmp=""
+    log_tmp="$(mktemp /tmp/circl8-n8n-${service}.XXXXXX.log)"
+    TEMP_FILES+=("$log_tmp")
+    {
+        printf '%s\n' "--- ${service} docker inspect state ---"
+        docker inspect -f 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restart_count={{.RestartCount}}' "$service" 2>/dev/null || true
+        printf '%s\n' "--- ${service} recent logs ---"
+        docker logs --tail 120 "$service" 2>&1 || true
+    } > "$log_tmp"
+    sanitize_log_file "$log_tmp" >> "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
+    if grep -Eiq 'EACCES|permission denied|/home/node/[.]n8n/config' "$log_tmp"; then
+        printf '%s\n' "SCRIPT65_DETECTED_PERMISSION_ERROR=${service}:/home/node/.n8n/config" >> "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
+    fi
+}
+
+function fail_service_readiness() {
+    local service="$1" message="$2"
+    SCRIPT65_CONTAINERS="failed"
+    capture_service_failure_logs "$service"
+    if grep -Eiq 'EACCES|permission denied|/home/node/[.]n8n/config' "$DEPLOY_FAILURE_LOG" 2>/dev/null; then
+        fail_with_report "${message} Detected permission failure writing /home/node/.n8n/config; n8n storage ownership should be 1000:1000."
+    fi
+    fail_with_report "$message"
 }
 
 function existing_deployment_marker_completed() {
@@ -1281,22 +1445,45 @@ function verify_n8n_route_labels() {
 }
 
 function verify_n8n_deployment() {
-    section "VERIFY N8N"
+    [ "${SCRIPT65_START_N8N_ACTIVE:-no}" = "yes" ] || section "VERIFY N8N"
     local service="" state="" health="" status_summary="" health_summary=""
 
-    msg_info "Checking n8n containers"
+    msg_info "Checking postgres container"
+    wait_for_n8n_container_ready "n8n-postgres" 300 || fail_service_readiness "n8n-postgres" "Postgres service did not become ready."
+    msg_ok "POSTGRES HEALTHY"
+
+    msg_info "Checking redis container"
+    wait_for_n8n_container_ready "n8n-redis" 300 || fail_service_readiness "n8n-redis" "Redis service did not become ready."
+    msg_ok "REDIS HEALTHY"
+
+    msg_info "Checking n8n service"
+    wait_for_n8n_container_ready "n8n" 300 || fail_service_readiness "n8n" "n8n service did not become ready."
+    if wait_for_n8n_internal_http 180; then
+        SCRIPT65_N8N_INTERNAL_HTTP="ready"
+    else
+        SCRIPT65_N8N_INTERNAL_HTTP="failed"
+        fail_service_readiness "n8n" "n8n internal health endpoint did not become ready."
+    fi
+    msg_ok "N8N READY"
+
+    msg_info "Checking n8n worker"
+    wait_for_n8n_container_ready "n8n-worker" 300 || fail_service_readiness "n8n-worker" "n8n worker did not become ready."
+    msg_ok "N8N WORKER READY"
+
+    msg_info "Checking n8n runners"
+    wait_for_n8n_container_ready "n8n-runner" 180 || fail_service_readiness "n8n-runner" "n8n runner did not become ready."
+    wait_for_n8n_container_ready "n8n-worker-runner" 180 || fail_service_readiness "n8n-worker-runner" "n8n worker runner did not become ready."
+    msg_ok "N8N RUNNERS READY"
+
     while IFS= read -r service; do
         [ -n "$service" ] || continue
-        if ! wait_for_n8n_container_ready "$service" 300; then
-            SCRIPT65_CONTAINERS="failed"
-            state="$(container_state "$service")"
-            health="$(container_health "$service")"
-            SCRIPT65_SERVICE_STATUS_SUMMARY="${SCRIPT65_SERVICE_STATUS_SUMMARY} ${service}=${state}"
-            SCRIPT65_SERVICE_HEALTH_SUMMARY="${SCRIPT65_SERVICE_HEALTH_SUMMARY} ${service}=${health}"
-            fail_with_report "n8n service did not become ready: ${service}"
-        fi
         state="$(container_state "$service")"
         health="$(container_health "$service")"
+        [ "$state" = "running" ] || fail_service_readiness "$service" "n8n service is not running: ${service}"
+        case "$health" in
+            healthy|none) : ;;
+            *) fail_service_readiness "$service" "n8n service health check failed: ${service}=${health}" ;;
+        esac
         status_summary="${status_summary}${service}=${state} "
         health_summary="${health_summary}${service}=${health} "
     done < <(expected_n8n_services)
@@ -1304,27 +1491,48 @@ function verify_n8n_deployment() {
     SCRIPT65_SERVICE_HEALTH_SUMMARY="${health_summary% }"
     SCRIPT65_CONTAINERS="running"
     SCRIPT65_HEALTH_STATUS="pass"
-    msg_ok "N8N CONTAINERS READY"
 
-    msg_info "Checking n8n internal readiness"
-    if wait_for_n8n_internal_http 180; then
-        SCRIPT65_N8N_INTERNAL_HTTP="ready"
-        msg_ok "N8N INTERNAL HTTP READY"
-    else
-        SCRIPT65_N8N_INTERNAL_HTTP="failed"
-        fail_with_report "n8n internal health endpoint did not become ready."
+    msg_info "Checking n8n routes"
+    verify_n8n_route_labels "$N8N_RUNTIME_COMPOSE"
+    msg_ok "N8N ROUTES READY"
+
+    if [ "${SCRIPT65_START_N8N_ACTIVE:-no}" != "yes" ]; then
+        aligned_status_line "Containers" "$SCRIPT65_CONTAINERS" "$GN"
+        aligned_status_line "Health" "$SCRIPT65_HEALTH_STATUS" "$GN"
+        aligned_status_line "Internal HTTP" "$SCRIPT65_N8N_INTERNAL_HTTP" "$GN"
+        aligned_status_line "UI protection" "$SCRIPT65_UI_PROTECTION" "$GN"
+        aligned_status_line "Production webhooks" "$SCRIPT65_PRODUCTION_WEBHOOKS" "$GN"
+        aligned_status_line "Test webhooks" "$SCRIPT65_TEST_WEBHOOKS" "$GN"
+    fi
+}
+
+
+function confirm_start_n8n() {
+    section "CONFIRM N8N START"
+    mini_header "Plan"
+    aligned_status_line "Action" "setup and deploy n8n stack" "$YW"
+    aligned_status_line "Runtime compose" "$N8N_RUNTIME_COMPOSE" "$BL"
+    aligned_status_line "Containers" "n8n stack" "$GN"
+    aligned_status_line "Authentik writes" "no" "$GN"
+    aligned_status_line "Webhooks" "production route public" "$GN"
+    aligned_status_line "Test webhooks" "not exposed publicly" "$GN"
+    echo ""
+    echo -e "${YW}This will prepare n8n, start the stack, verify services, and write the Script 6.5 marker.${CL}"
+    echo -e "${YW}No Authentik applications, providers, policies, or groups will be created.${CL}"
+    echo ""
+
+    if [ ! -r /dev/tty ]; then
+        msg_warn "No interactive TTY available; n8n setup/deployment skipped with no changes."
+        return 1
     fi
 
-    msg_info "Checking n8n route labels"
-    verify_n8n_route_labels "$N8N_RUNTIME_COMPOSE"
-    msg_ok "N8N ROUTE LABELS READY"
+    if read_yes_no "Proceed with n8n setup and deployment?" "n"; then
+        msg_ok "Start confirmed — preparing n8n"
+        return 0
+    fi
 
-    aligned_status_line "Containers" "$SCRIPT65_CONTAINERS" "$GN"
-    aligned_status_line "Health" "$SCRIPT65_HEALTH_STATUS" "$GN"
-    aligned_status_line "Internal HTTP" "$SCRIPT65_N8N_INTERNAL_HTTP" "$GN"
-    aligned_status_line "UI protection" "$SCRIPT65_UI_PROTECTION" "$GN"
-    aligned_status_line "Production webhooks" "$SCRIPT65_PRODUCTION_WEBHOOKS" "$GN"
-    aligned_status_line "Test webhooks" "$SCRIPT65_TEST_WEBHOOKS" "$GN"
+    msg_ok "Start skipped — no changes made"
+    return 1
 }
 
 function confirm_deploy_n8n() {
@@ -1356,12 +1564,13 @@ function confirm_deploy_n8n() {
 }
 
 function deploy_n8n_stack() {
-    section "START N8N"
+    [ "${SCRIPT65_START_N8N_ACTIVE:-no}" = "yes" ] || section "START N8N"
     local deploy_err=""
     deploy_err="$(mktemp /tmp/circl8-n8n-deploy.XXXXXX.err)"
     TEMP_FILES+=("$deploy_err")
 
-    msg_info "Starting n8n stack"
+    SCRIPT65_DEPLOY_IN_PROGRESS="yes"
+    msg_info "Deploying n8n stack"
     if docker compose -f "$N8N_RUNTIME_COMPOSE" --env-file "$ENV_FILE" up -d >/dev/null 2>"$deploy_err"; then
         SCRIPT65_DEPLOYMENT="deployed"
         msg_ok "N8N STACK STARTED"
@@ -1369,9 +1578,10 @@ function deploy_n8n_stack() {
     fi
 
     SCRIPT65_DEPLOYMENT="failed"
-    sed -E '/(PASSWORD|PASSWD|SECRET|TOKEN|DATABASE_URL|REDIS_URL|JWT|AUTHORIZATION|BEARER)/Id' "$deploy_err" >> "$LOG_FILE" 2>/dev/null || true
+    sanitize_log_file "$deploy_err" >> "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
     fail_with_report "n8n compose deployment failed."
 }
+
 
 function write_deployment_marker() {
     local tmp_file=""
@@ -1409,7 +1619,9 @@ function mark_deployment_ready() {
     SCRIPT65_READY_FOR_SCRIPT66="yes"
     write_deployment_marker
     write_verify_report
+    SCRIPT65_DEPLOY_IN_PROGRESS="no"
 }
+
 
 function print_deploy_summary() {
     section_flash_success "FINISHED"
@@ -1446,13 +1658,74 @@ function run_deploy_n8n() {
         exit 0
     fi
 
+    run_start_n8n_progress "deploy-only"
+}
+
+
+function run_start_n8n_progress() {
+    local mode="${1:-full}"
+    section "START N8N"
+    SCRIPT65_START_N8N_ACTIVE="yes"
+    SCRIPT65_GROUPED_SETUP_ACTIVE="yes"
+    SCRIPT65_DEPLOY_IN_PROGRESS="yes"
+    : > "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
+    chmod 600 "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
+
+    if [ "$mode" = "full" ]; then
+        msg_info "Preparing n8n environment"
+        prepare_env
+        msg_ok "N8N ENV READY"
+    fi
+
+    sync_n8n_template
+
+    msg_info "Checking n8n directories and permissions"
+    prepare_n8n_directories
+    msg_ok "N8N DIRECTORIES AND PERMISSIONS READY"
+
+    msg_info "Checking static safety"
     validate_static_safety "$N8N_RUNTIME_COMPOSE"
+    msg_ok "N8N STATIC SAFETY PASSED"
+
+    msg_info "Validating n8n compose config"
     validate_compose_config
-    SCRIPT65_N8N_COMPOSE_TEMPLATE="synced"
+    msg_ok "N8N COMPOSE CONFIG VALID"
+
+    msg_info "Writing preflight marker"
+    mark_template_preflight_ready
+    msg_ok "N8N PREFLIGHT MARKER WRITTEN"
+
+    prepare_n8n_images
     deploy_n8n_stack
     verify_n8n_deployment
-    mark_deployment_ready
+
+    SCRIPT65_STATUS="completed"
+    SCRIPT65_VERIFY_STATUS="PASS"
+    SCRIPT65_DEPLOYMENT="deployed"
+    SCRIPT65_CONTAINERS="running"
+    SCRIPT65_READY_FOR_DEPLOYMENT_LANE="yes"
+    SCRIPT65_READY_FOR_WORKFLOW_LANE="yes"
+    SCRIPT65_READY_FOR_SCRIPT66="yes"
+
+    msg_info "Writing completion marker"
+    write_deployment_marker
+    msg_ok "SCRIPT 6.5 MARKER WRITTEN"
+
+    msg_info "Writing verification report"
+    write_verify_report
+    msg_ok "VERIFY REPORT WRITTEN"
+
+    SCRIPT65_DEPLOY_IN_PROGRESS="no"
+    SCRIPT65_START_N8N_ACTIVE="no"
+    SCRIPT65_GROUPED_SETUP_ACTIVE="no"
     print_deploy_summary
+}
+
+function run_full_setup_deploy_flow() {
+    if ! confirm_start_n8n; then
+        exit 0
+    fi
+    run_start_n8n_progress "full"
 }
 
 function run_apply_preflight_setup() {
@@ -1481,6 +1754,8 @@ function run_apply_preflight_setup() {
     aligned_status_line "Status" "written" "$GN"
 
     SCRIPT65_GROUPED_SETUP_ACTIVE="no"
+SCRIPT65_START_N8N_ACTIVE="no"
+SCRIPT65_DEPLOY_IN_PROGRESS="no"
     msg_ok "N8N PREFLIGHT SETUP COMPLETE"
     print_summary
 }
@@ -1571,29 +1846,29 @@ function finish_clean_exit() {
 function rerun_menu_available() {
     [ "${SCRIPT65_RUN_MODE:-prompt}" = "prompt" ] || return 1
     [ -r /dev/tty ] || return 1
-    existing_preflight_marker_completed
+    existing_deployment_marker_completed
 }
+
 
 function show_rerun_menu() {
     local choice=""
     section "SCRIPT 6.5 RERUN OPTIONS"
-    aligned_status_line "Existing preflight" "completed" "$GN"
+    aligned_status_line "Existing deployment" "completed" "$GN"
     echo ""
-    echo -e "  ${YW}1)${CL} Verify current n8n state"
+    echo -e "  ${YW}1)${CL} Verify current n8n deployment"
     echo -e "  ${YW}2)${CL} Re-render/sync template preflight"
-    echo -e "  ${YW}3)${CL} Re-run template/preflight setup"
-    echo -e "  ${YW}4)${CL} Deploy n8n"
-    echo -e "  5) Exit"
+    echo -e "  ${YW}3)${CL} Deploy/redeploy n8n stack"
+    echo -e "  4) Exit"
     echo ""
-    choice="$(numeric_menu_input "Select action" "1" "1" "5")"
+    choice="$(numeric_menu_input "Select action" "1" "1" "4")"
     case "$choice" in
-        1) SCRIPT65_RUN_MODE="verify-only"; msg_ok "Verify current n8n state selected" ;;
+        1) SCRIPT65_RUN_MODE="verify-only"; msg_ok "Verify current n8n deployment selected" ;;
         2) SCRIPT65_RUN_MODE="render-only"; msg_ok "Re-render/sync template preflight selected" ;;
-        3) SCRIPT65_RUN_MODE="apply"; msg_ok "Re-run template/preflight setup selected" ;;
-        4) SCRIPT65_RUN_MODE="deploy"; msg_ok "Deploy n8n selected" ;;
-        5) SCRIPT65_RUN_MODE="exit" ;;
+        3) SCRIPT65_RUN_MODE="deploy"; msg_ok "Deploy/redeploy n8n stack selected" ;;
+        4) SCRIPT65_RUN_MODE="exit" ;;
     esac
 }
+
 
 function run_mode_decision() {
     if rerun_menu_available; then
@@ -1601,7 +1876,10 @@ function run_mode_decision() {
     fi
 
     case "${SCRIPT65_RUN_MODE:-prompt}" in
-        prompt|preflight-only|apply)
+        prompt)
+            run_full_setup_deploy_flow
+            ;;
+        preflight-only|apply)
             run_apply_preflight_setup
             ;;
         render-only)
@@ -1622,6 +1900,7 @@ function run_mode_decision() {
             ;;
     esac
 }
+
 
 function mark_template_preflight_ready() {
     SCRIPT65_STATUS="template-preflight-completed"
