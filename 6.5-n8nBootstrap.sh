@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.0.3"
+SCRIPT_VERSION="v1.0.4"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="process-substitution-sudo-handoff-fix"
+SCRIPT_BUILD="apply-decline-ux-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -748,8 +748,8 @@ function confirm_apply_phase2_setup() {
     aligned_status_line "Containers started" "no" "$GN"
     aligned_status_line "Authentik API writes" "no" "$GN"
     echo ""
-    echo -e "${YW}This will write missing n8n env keys, create n8n appdata dirs, sync the runtime compose file, validate config, and write the Script 6.5 template-preflight marker.${CL}"
-    echo -e "${YW}It will not deploy containers or write Authentik/n8n APIs.${CL}"
+    echo -e "${YW}This will prepare n8n env keys, appdata dirs, runtime compose, validation, and the preflight marker.${CL}"
+    echo -e "${YW}No containers, Authentik writes, or n8n workflows will run.${CL}"
     echo ""
 
     if [ ! -r /dev/tty ]; then
@@ -762,25 +762,8 @@ function confirm_apply_phase2_setup() {
         return 0
     fi
 
-    aligned_status_line "Apply confirmation" "no" "$YW"
+    msg_ok "Apply skipped — no changes made"
     return 1
-}
-
-function finish_no_changes_requested() {
-    section_flash_success "FINISHED"
-    mini_header "Script"
-    final_line "Source" "$SCRIPT_SOURCE" "$GN"
-    final_line "Version" "$SCRIPT_VERSION" "$GN"
-    final_line "Build" "$SCRIPT_BUILD" "$GN"
-
-    mini_header "Result"
-    final_line "Status" "clean exit" "$GN"
-    final_line "Action" "no changes requested" "$YW"
-    final_line "Env" "unchanged" "$GN"
-    final_line "Directories" "unchanged" "$GN"
-    final_line "Runtime compose" "unchanged" "$GN"
-    final_line "Marker" "not written" "$GN"
-    final_line "Deployment" "not-run" "$GN"
 }
 
 function prepare_n8n_directories() {
@@ -1121,7 +1104,6 @@ function main() {
     print_read_only_inspection_plan
 
     if ! confirm_apply_phase2_setup; then
-        finish_no_changes_requested
         exit 0
     fi
 
