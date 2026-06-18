@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.0.1"
+SCRIPT_VERSION="v1.0.2"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="preflight-apply-separation"
+SCRIPT_BUILD="sudo-env-preservation-fix"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -138,10 +138,10 @@ function elevate_to_root_if_needed() {
             handoff_script="$(mktemp /tmp/circl8-n8n-sudo-handoff.XXXXXX.sh)" || early_error "Could not prepare sudo handoff script."
             cat "$script_path" > "$handoff_script" || { rm -f "$handoff_script" 2>/dev/null || true; early_error "Could not copy script for sudo handoff."; }
             chmod 700 "$handoff_script" 2>/dev/null || true
-            exec sudo -n -E bash -c 'script="$1"; shift; trap '\''rm -f "$script"'\'' EXIT; bash "$script" "$@"' bash "$handoff_script" "$@"
+            exec sudo -n bash -c 'script="$1"; shift; trap '\''rm -f "$script"'\'' EXIT; bash "$script" "$@"' bash "$handoff_script" "$@"
             ;;
         *)
-            exec sudo -n -E bash "$script_path" "$@"
+            exec sudo -n bash "$script_path" "$@"
             ;;
     esac
 }
