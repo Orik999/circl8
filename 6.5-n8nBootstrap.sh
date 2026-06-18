@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.0.2"
+SCRIPT_VERSION="v1.0.3"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="sudo-env-preservation-fix"
+SCRIPT_BUILD="process-substitution-sudo-handoff-fix"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -117,6 +117,53 @@ function early_error() {
     exit 1
 }
 
+function validate_handoff_script_shape() {
+    local script_path="$1"
+
+    [ -s "$script_path" ] || return 1
+    grep -q '^SCRIPT_SOURCE="6[.]5-n8nBootstrap[.]sh"' "$script_path" || return 1
+    grep -q '^SCRIPT_VERSION=' "$script_path" || return 1
+    grep -q '^function main()' "$script_path" || return 1
+    grep -q '^main "[$]@"' "$script_path" || return 1
+    return 0
+}
+
+function download_handoff_script() {
+    local dest="$1"
+    local url="${RAW_BASE_FALLBACK%/}/${SCRIPT_SOURCE}"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o "$dest"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$dest" "$url"
+    else
+        return 1
+    fi
+}
+
+function prepare_process_substitution_handoff() {
+    local source_path="$1"
+    local dest="$2"
+
+    : > "$dest" || return 1
+
+    # A /dev/fd or /proc/*/fd process-substitution path can point at a stream
+    # that bash has already partially consumed. Try the direct copy first, then
+    # verify the copied script is complete before trusting it.
+    if [ -r "$source_path" ]; then
+        cat "$source_path" > "$dest" 2>/dev/null || true
+    fi
+
+    if ! validate_handoff_script_shape "$dest"; then
+        : > "$dest" || return 1
+        download_handoff_script "$dest" || return 1
+    fi
+
+    validate_handoff_script_shape "$dest" || return 1
+    chmod 700 "$dest" 2>/dev/null || return 1
+    return 0
+}
+
 function elevate_to_root_if_needed() {
     if [ "${EUID}" -eq 0 ]; then
         return 0
@@ -136,8 +183,10 @@ function elevate_to_root_if_needed() {
     case "$script_path" in
         /dev/fd/*|/proc/*/fd/*)
             handoff_script="$(mktemp /tmp/circl8-n8n-sudo-handoff.XXXXXX.sh)" || early_error "Could not prepare sudo handoff script."
-            cat "$script_path" > "$handoff_script" || { rm -f "$handoff_script" 2>/dev/null || true; early_error "Could not copy script for sudo handoff."; }
-            chmod 700 "$handoff_script" 2>/dev/null || true
+            if ! prepare_process_substitution_handoff "$script_path" "$handoff_script"; then
+                rm -f "$handoff_script" 2>/dev/null || true
+                early_error "Could not prepare a complete sudo handoff script from process substitution."
+            fi
             exec sudo -n bash -c 'script="$1"; shift; trap '\''rm -f "$script"'\'' EXIT; bash "$script" "$@"' bash "$handoff_script" "$@"
             ;;
         *)
