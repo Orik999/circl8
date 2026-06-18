@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.1.5"
+SCRIPT_VERSION="v1.1.6"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="final-start-summary-ui-polish"
+SCRIPT_BUILD="remove-deprecated-runner-env"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -1033,7 +1033,8 @@ function validate_static_safety() {
     require_regex "$compose" 'redis:7-alpine|N8N_REDIS_IMAGE:-redis:7-alpine' "Redis image baseline is not present."
     require_regex "$compose" '2[.]26[.]7' "n8n 2.26.7 baseline is not present."
     require_regex "$compose" 'EXECUTIONS_MODE.*queue|queue.*EXECUTIONS_MODE' "Queue mode is not enabled."
-    require_regex "$compose" 'N8N_RUNNERS_ENABLED.*true|true.*N8N_RUNNERS_ENABLED|OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS.*true|true.*OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS' "External runner settings are not present."
+    printf '%s\n' "$noncomment" | grep -qE 'OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS:[[:space:]]*"?true"?' || fail_with_report "Worker offload setting is not present."
+    printf '%s\n' "$noncomment" | grep -qE 'N8N_RUNNERS_ENABLED' && fail_with_report "Deprecated N8N_RUNNERS_ENABLED is present."
     require_regex "$compose" '/webhook' "Production webhook route is not present."
     require_regex "$compose" 'authentik|forwardauth|forward-auth|chain' "Protected platform/admin middleware reference is not present."
 
