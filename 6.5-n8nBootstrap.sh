@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="n8n-template-preflight-fresh"
+SCRIPT_BUILD="preflight-apply-separation"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -99,6 +99,15 @@ SCRIPT65_N8N_STATIC_SAFETY="not-run"
 SCRIPT65_READY_FOR_DEPLOYMENT_LANE="no"
 SCRIPT65_READY_FOR_WORKFLOW_LANE="no"
 SCRIPT65_READY_FOR_SCRIPT66="no"
+
+SCRIPT65_ENV_KEYS_MISSING="0"
+SCRIPT65_ENV_CHANGES_PLANNED="no"
+SCRIPT65_DIRS_MISSING="0"
+SCRIPT65_RUNTIME_COMPOSE_STATE="unknown"
+SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="unknown"
+SCRIPT65_TEMPLATE_SOURCE="unknown"
+SCRIPT65_TEMPLATE_INSPECTION="not-run"
+N8N_TEMPLATE_INSPECTION_FILE=""
 
 # =========================================================
 #  ROOT / SUDO HANDOFF
@@ -199,6 +208,65 @@ function aligned_status_line() {
 
 function final_line() { aligned_status_line "$1" "${2:-unknown}" "${3:-}" "$UI_LABEL_WIDTH"; }
 
+function tty_print() {
+    if [ -w /dev/tty ]; then
+        echo -ne "$*" > /dev/tty
+    else
+        echo -ne "$*" >&2
+    fi
+}
+
+function tty_println() {
+    if [ -w /dev/tty ]; then
+        echo -e "$*" > /dev/tty
+    else
+        echo -e "$*" >&2
+    fi
+}
+
+function flush_input_buffer() {
+    local junk="" i=""
+    [ -r /dev/tty ] || return 0
+    for i in {1..20}; do
+        IFS= read -rsn1 -t 0.02 junk < /dev/tty || break
+    done
+}
+
+function read_yes_no() {
+    local prompt="$1" default="${2:-n}" key="" label="y/N" answer=""
+    [[ "$default" =~ ^[Yy]$ ]] && label="Y/n"
+
+    if [ ! -r /dev/tty ]; then
+        return 2
+    fi
+
+    flush_input_buffer 2>/dev/null || true
+    while true; do
+        tty_print "${BFR}${YW}${prompt} [${label}]: ${CL}"
+        IFS= read -rsn1 key < /dev/tty || key=""
+        case "$key" in
+            ""|$'\n'|$'\r')
+                answer="$default"
+                break
+                ;;
+            [Yy])
+                answer="y"
+                break
+                ;;
+            [Nn])
+                answer="n"
+                break
+                ;;
+            *)
+                continue
+                ;;
+        esac
+    done
+    tty_print "${BFR}"
+    flush_input_buffer 2>/dev/null || true
+    [[ "$answer" =~ ^[Yy]$ ]]
+}
+
 # =========================================================
 #  LOGGING / CLEANUP
 # =========================================================
@@ -271,7 +339,7 @@ function run_cmd() {
 }
 
 function validate_dependencies() {
-    local cmds=(awk cat chmod command cp cut date grep install mkdir mktemp openssl rm sed sort stat tee test tr)
+    local cmds=(awk cat chmod cmp command cp cut date grep install mkdir mktemp openssl rm sed sort stat tee test tr)
     local cmd=""
     for cmd in "${cmds[@]}"; do command -v "$cmd" >/dev/null 2>&1 || msg_error "Required command not found: ${cmd}"; done
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then msg_error "curl or wget is required to download n8n templates."; fi
@@ -320,6 +388,45 @@ function env_line_escape() {
 
 function append_env_line() { printf '%s="%s"\n' "$1" "$(env_line_escape "$2")"; }
 function generate_secret_hex() { openssl rand -hex "${1:-32}"; }
+
+function n8n_env_keys() {
+    printf '%s\n' \
+        N8N_VERSION \
+        N8N_IMAGE \
+        N8N_RUNNERS_IMAGE \
+        N8N_POSTGRES_IMAGE \
+        N8N_REDIS_IMAGE \
+        N8N_HOST \
+        N8N_URL \
+        N8N_WEBHOOK_URL \
+        N8N_POSTGRES_DB \
+        N8N_POSTGRES_USER \
+        N8N_POSTGRES_PASSWORD \
+        N8N_ENCRYPTION_KEY \
+        N8N_RUNNERS_AUTH_TOKEN \
+        N8N_LOG_LEVEL
+}
+
+function n8n_default_for_key() {
+    local key="$1"
+    case "$key" in
+        N8N_VERSION) printf '%s' "$DEFAULT_N8N_VERSION" ;;
+        N8N_IMAGE) printf '%s' "$DEFAULT_N8N_IMAGE" ;;
+        N8N_RUNNERS_IMAGE) printf '%s' "$DEFAULT_N8N_RUNNERS_IMAGE" ;;
+        N8N_POSTGRES_IMAGE) printf '%s' "$DEFAULT_N8N_POSTGRES_IMAGE" ;;
+        N8N_REDIS_IMAGE) printf '%s' "$DEFAULT_N8N_REDIS_IMAGE" ;;
+        N8N_HOST) printf '%s' "$N8N_HOST" ;;
+        N8N_URL) printf '%s' "$N8N_URL" ;;
+        N8N_WEBHOOK_URL) printf '%s' "$N8N_WEBHOOK_URL" ;;
+        N8N_POSTGRES_DB) printf 'n8n' ;;
+        N8N_POSTGRES_USER) printf 'n8n' ;;
+        N8N_POSTGRES_PASSWORD) generate_secret_hex 24 ;;
+        N8N_ENCRYPTION_KEY) generate_secret_hex 32 ;;
+        N8N_RUNNERS_AUTH_TOKEN) generate_secret_hex 32 ;;
+        N8N_LOG_LEVEL) printf 'info' ;;
+        *) return 1 ;;
+    esac
+}
 
 function host_from_url() {
     local value="${1:-}"
@@ -452,9 +559,27 @@ function set_env_key_if_missing() {
     SCRIPT65_ENV_KEYS_ADDED=$((SCRIPT65_ENV_KEYS_ADDED + 1))
 }
 
+function inspect_n8n_env_plan() {
+    local key="" missing_count=0
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        if env_has_nonempty_value "$key"; then
+            :
+        else
+            missing_count=$((missing_count + 1))
+        fi
+    done < <(n8n_env_keys)
+    SCRIPT65_ENV_KEYS_MISSING="$missing_count"
+    if [ "$missing_count" -gt 0 ]; then
+        SCRIPT65_ENV_CHANGES_PLANNED="yes"
+    else
+        SCRIPT65_ENV_CHANGES_PLANNED="no"
+    fi
+}
+
 function prepare_env() {
     section "N8N ENV"
-    local backup_path="" ts=""
+    local backup_path="" ts="" key="" value=""
     root_install_dir "$(dirname "$ENV_FILE")" 755
     touch "$ENV_FILE"
     chmod 600 "$ENV_FILE"
@@ -464,20 +589,13 @@ function prepare_env() {
     cp -f "$ENV_FILE" "$backup_path"
     SCRIPT65_ENV_BACKUP="created"
 
-    set_env_key_if_missing "$ENV_FILE" N8N_VERSION "$DEFAULT_N8N_VERSION"
-    set_env_key_if_missing "$ENV_FILE" N8N_IMAGE "$DEFAULT_N8N_IMAGE"
-    set_env_key_if_missing "$ENV_FILE" N8N_RUNNERS_IMAGE "$DEFAULT_N8N_RUNNERS_IMAGE"
-    set_env_key_if_missing "$ENV_FILE" N8N_POSTGRES_IMAGE "$DEFAULT_N8N_POSTGRES_IMAGE"
-    set_env_key_if_missing "$ENV_FILE" N8N_REDIS_IMAGE "$DEFAULT_N8N_REDIS_IMAGE"
-    set_env_key_if_missing "$ENV_FILE" N8N_HOST "$N8N_HOST"
-    set_env_key_if_missing "$ENV_FILE" N8N_URL "$N8N_URL"
-    set_env_key_if_missing "$ENV_FILE" N8N_WEBHOOK_URL "$N8N_WEBHOOK_URL"
-    set_env_key_if_missing "$ENV_FILE" N8N_POSTGRES_DB "n8n"
-    set_env_key_if_missing "$ENV_FILE" N8N_POSTGRES_USER "n8n"
-    set_env_key_if_missing "$ENV_FILE" N8N_POSTGRES_PASSWORD "$(generate_secret_hex 24)"
-    set_env_key_if_missing "$ENV_FILE" N8N_ENCRYPTION_KEY "$(generate_secret_hex 32)"
-    set_env_key_if_missing "$ENV_FILE" N8N_RUNNERS_AUTH_TOKEN "$(generate_secret_hex 32)"
-    set_env_key_if_missing "$ENV_FILE" N8N_LOG_LEVEL "info"
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        if ! env_has_nonempty_value "$key"; then
+            value="$(n8n_default_for_key "$key")"
+            set_env_key_if_missing "$ENV_FILE" "$key" "$value"
+        fi
+    done < <(n8n_env_keys)
 
     if [ "$SCRIPT65_ENV_KEYS_ADDED" -eq 0 ]; then
         rm -f "$backup_path" 2>/dev/null || true
@@ -487,7 +605,7 @@ function prepare_env() {
     validate_image_pairing
     SCRIPT65_ENV_STATUS="ready"
     aligned_status_line "Keys added" "$SCRIPT65_ENV_KEYS_ADDED" "$GN"
-    aligned_status_line "Secrets" "preserved/generated" "$GN"
+    aligned_status_line "Secrets" "preserved/generated if missing" "$GN"
     msg_ok "N8N ENV READY"
 }
 
@@ -504,6 +622,116 @@ function validate_image_pairing() {
     [ "$n8n_tag" = "$runner_tag" ] || fail_with_report "n8n and runner image tags must match."
     [ "$n8n_tag" = "$n8n_version" ] || fail_with_report "N8N_IMAGE tag must match N8N_VERSION."
     version_at_least "$n8n_version" "1.111.0" || fail_with_report "External task runners require n8n >= 1.111.0."
+}
+
+function inspect_n8n_directories_plan() {
+    local dir="" missing_count=0
+    for dir in "$N8N_APPDATA_DIR" "$N8N_POSTGRES_DIR" "$N8N_REDIS_DIR" "$N8N_STORAGE_DIR"; do
+        if root_path_exists "$dir"; then
+            :
+        else
+            missing_count=$((missing_count + 1))
+        fi
+    done
+    SCRIPT65_DIRS_MISSING="$missing_count"
+}
+
+function copy_n8n_template_to_temp() {
+    local template_tmp="$1"
+    if [ -f "docker/07-n8n-compose.yml" ]; then
+        cp -f "docker/07-n8n-compose.yml" "$template_tmp"
+        SCRIPT65_TEMPLATE_SOURCE="local repo"
+    else
+        download_file "$N8N_TEMPLATE_URL" "$template_tmp" || fail_with_report "Failed to download n8n compose template."
+        SCRIPT65_TEMPLATE_SOURCE="remote"
+    fi
+    root_file_not_empty "$template_tmp" || fail_with_report "n8n compose template is empty."
+}
+
+function inspect_n8n_template_plan() {
+    local template_tmp=""
+    template_tmp="$(mktemp /tmp/circl8-n8n-compose-inspect.XXXXXX)"
+    TEMP_FILES+=("$template_tmp")
+    copy_n8n_template_to_temp "$template_tmp"
+    N8N_TEMPLATE_INSPECTION_FILE="$template_tmp"
+
+    if [ -s "$N8N_COMPOSE_FILE" ] && cmp -s "$template_tmp" "$N8N_COMPOSE_FILE"; then
+        SCRIPT65_RUNTIME_COMPOSE_STATE="present-current"
+        SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="no"
+    elif [ -s "$N8N_COMPOSE_FILE" ]; then
+        SCRIPT65_RUNTIME_COMPOSE_STATE="present-different"
+        SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="yes"
+    else
+        SCRIPT65_RUNTIME_COMPOSE_STATE="missing"
+        SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="yes"
+    fi
+
+    validate_static_safety "$template_tmp" "inspection"
+    SCRIPT65_TEMPLATE_INSPECTION="pass"
+}
+
+function print_read_only_inspection_plan() {
+    section "READ-ONLY INSPECTION"
+    inspect_n8n_env_plan
+    inspect_n8n_directories_plan
+    inspect_n8n_template_plan
+
+    mini_header "Planned changes"
+    aligned_status_line "Env keys missing" "$SCRIPT65_ENV_KEYS_MISSING" "$(status_color_for_value "$([ "$SCRIPT65_ENV_KEYS_MISSING" -eq 0 ] && printf ready || printf will-create)")"
+    aligned_status_line "Env changes planned" "$SCRIPT65_ENV_CHANGES_PLANNED" "$(status_color_for_value "$SCRIPT65_ENV_CHANGES_PLANNED")"
+    aligned_status_line "Directories missing" "$SCRIPT65_DIRS_MISSING" "$(status_color_for_value "$([ "$SCRIPT65_DIRS_MISSING" -eq 0 ] && printf ready || printf will-create)")"
+    aligned_status_line "Template source" "$SCRIPT65_TEMPLATE_SOURCE" "$GN"
+    aligned_status_line "Template inspection" "$SCRIPT65_TEMPLATE_INSPECTION" "$GN"
+    aligned_status_line "Runtime compose state" "$SCRIPT65_RUNTIME_COMPOSE_STATE" "$(status_color_for_value "$SCRIPT65_RUNTIME_COMPOSE_STATE")"
+    aligned_status_line "Runtime compose sync needed" "$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED" "$(status_color_for_value "$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED")"
+    aligned_status_line "Deployment" "not-run" "$GN"
+    aligned_status_line "Authentik API writes" "not-run" "$GN"
+}
+
+function confirm_apply_phase2_setup() {
+    section "APPLY SCRIPT 6.5 PREFLIGHT"
+    mini_header "Plan"
+    aligned_status_line "Action" "apply template/preflight setup" "$YW"
+    aligned_status_line "Env keys to add" "$SCRIPT65_ENV_KEYS_MISSING" "$YW"
+    aligned_status_line "Directories to create" "$SCRIPT65_DIRS_MISSING" "$YW"
+    aligned_status_line "Runtime compose sync" "$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED" "$YW"
+    aligned_status_line "Deployment" "not-run" "$GN"
+    aligned_status_line "Containers started" "no" "$GN"
+    aligned_status_line "Authentik API writes" "no" "$GN"
+    echo ""
+    echo -e "${YW}This will write missing n8n env keys, create n8n appdata dirs, sync the runtime compose file, validate config, and write the Script 6.5 template-preflight marker.${CL}"
+    echo -e "${YW}It will not deploy containers or write Authentik/n8n APIs.${CL}"
+    echo ""
+
+    if [ ! -r /dev/tty ]; then
+        msg_warn "No interactive TTY available; Script 6.5 setup/apply skipped with no changes."
+        return 1
+    fi
+
+    if read_yes_no "Apply Script 6.5 template/preflight setup now?" "n"; then
+        aligned_status_line "Apply confirmation" "yes" "$GN"
+        return 0
+    fi
+
+    aligned_status_line "Apply confirmation" "no" "$YW"
+    return 1
+}
+
+function finish_no_changes_requested() {
+    section_flash_success "FINISHED"
+    mini_header "Script"
+    final_line "Source" "$SCRIPT_SOURCE" "$GN"
+    final_line "Version" "$SCRIPT_VERSION" "$GN"
+    final_line "Build" "$SCRIPT_BUILD" "$GN"
+
+    mini_header "Result"
+    final_line "Status" "clean exit" "$GN"
+    final_line "Action" "no changes requested" "$YW"
+    final_line "Env" "unchanged" "$GN"
+    final_line "Directories" "unchanged" "$GN"
+    final_line "Runtime compose" "unchanged" "$GN"
+    final_line "Marker" "not written" "$GN"
+    final_line "Deployment" "not-run" "$GN"
 }
 
 function prepare_n8n_directories() {
@@ -530,15 +758,8 @@ function sync_n8n_template() {
     template_tmp="$(mktemp /tmp/circl8-n8n-compose-template.XXXXXX)"
     TEMP_FILES+=("$template_tmp")
 
-    if [ -f "docker/07-n8n-compose.yml" ]; then
-        cp -f "docker/07-n8n-compose.yml" "$template_tmp"
-    else
-        msg_info "Downloading n8n compose template"
-        download_file "$N8N_TEMPLATE_URL" "$template_tmp" || fail_with_report "Failed to download n8n compose template."
-        msg_ok "N8N COMPOSE TEMPLATE DOWNLOADED"
-    fi
+    copy_n8n_template_to_temp "$template_tmp"
 
-    root_file_not_empty "$template_tmp" || fail_with_report "n8n compose template is empty."
     root_copy_file "$template_tmp" "$N8N_COMPOSE_FILE"
     chmod 640 "$N8N_COMPOSE_FILE"
     SCRIPT65_N8N_COMPOSE_TEMPLATE="synced"
@@ -564,8 +785,10 @@ function require_regex() { contains_regex "$1" "$2" || fail_with_report "$3"; }
 function uncommented_file_content() { sed '/^[[:space:]]*#/d' "$1"; }
 
 function validate_static_safety() {
-    section "STATIC SAFETY"
-    local compose="$N8N_COMPOSE_FILE" noncomment=""
+    local compose="${1:-$N8N_COMPOSE_FILE}" mode="${2:-apply}" noncomment=""
+    if [ "$mode" != "inspection" ]; then
+        section "STATIC SAFETY"
+    fi
     [ -f "$compose" ] || fail_with_report "Rendered n8n compose file is missing."
     noncomment="$(uncommented_file_content "$compose")"
 
@@ -575,7 +798,7 @@ function validate_static_safety() {
     require_regex "$compose" '^[[:space:]]{2}n8n-runner:' "Compose missing n8n-runner service."
     require_regex "$compose" '^[[:space:]]{2}n8n-worker:' "Compose missing n8n-worker service."
     require_regex "$compose" '^[[:space:]]{2}n8n-worker-runner:' "Compose missing n8n-worker-runner service."
-    require_regex "$compose" 'n8n-internal' "Compose missing private n8n internal network."
+    require_regex "$compose" '(^|[[:space:]-])n8n_internal([[:space:]]|$)' "Compose missing private n8n internal network."
     require_regex "$compose" 't2_proxy' "Compose missing platform proxy network reference."
     require_regex "$compose" 'postgres:17-alpine|N8N_POSTGRES_IMAGE:-postgres:17-alpine' "Postgres image baseline is not present."
     require_regex "$compose" 'redis:7-alpine|N8N_REDIS_IMAGE:-redis:7-alpine' "Redis image baseline is not present."
@@ -590,16 +813,38 @@ function validate_static_safety() {
     printf '%s\n' "$noncomment" | grep -qE 'docker[.]sock|/var/run/docker[.]sock' && fail_with_report "Compose must not mount the Docker socket."
     printf '%s\n' "$noncomment" | grep -qE 'status-(trial|active|past-due|cancelled|suspended|deletion-requested)|plan-(starter|growth|pro)' && fail_with_report "Compose must not reference customer status or plan groups."
     printf '%s\n' "$noncomment" | grep -qE 'app[.]circl8[.]co[.]uk|auth[.]circl8[.]co[.]uk|[.]circl8[.]co[.]uk' && fail_with_report "Compose must not hardcode public identity values."
-    printf '%s\n' "$noncomment" | grep -qE 'elastic[[:alpha:]]*|temporal[-]ui|[s]tripe' && fail_with_report "Compose contains out-of-scope services or workflows."
+    printf '%s\n' "$noncomment" | grep -qE '[e]lastic[[:alpha:]]*|temporal[-]ui|[s]tripe' && fail_with_report "Compose contains out-of-scope services or workflows."
 
+    validate_private_network_scope "$compose"
     validate_service_network_scope "$compose"
     validate_webhook_auth_scope "$compose"
     validate_script_self_safety
     SCRIPT65_N8N_STATIC_SAFETY="pass"
-    aligned_status_line "Service networks" "pass" "$GN"
-    aligned_status_line "Webhook routing" "pass" "$GN"
-    aligned_status_line "Forbidden patterns" "absent" "$GN"
-    msg_ok "STATIC SAFETY PASSED"
+    if [ "$mode" != "inspection" ]; then
+        aligned_status_line "Private network" "pass" "$GN"
+        aligned_status_line "Service networks" "pass" "$GN"
+        aligned_status_line "Webhook routing" "pass" "$GN"
+        aligned_status_line "Forbidden patterns" "absent" "$GN"
+        msg_ok "STATIC SAFETY PASSED"
+    fi
+}
+
+function validate_private_network_scope() {
+    local compose="$1" services_with_internal="" missing_internal=""
+    require_regex "$compose" '^[[:space:]]{2}n8n_internal:[[:space:]]*$' "Compose missing top-level n8n_internal network declaration."
+    services_with_internal="$(awk '
+        /^services:[[:space:]]*$/ {in_services=1; svc=""; in_networks=0; next}
+        in_services && /^[^[:space:]][A-Za-z0-9_.-]*:/ {in_services=0; svc=""; in_networks=0}
+        !in_services {next}
+        /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {svc=$1; gsub(":", "", svc); in_networks=0; next}
+        /^    networks:[[:space:]]*$/ {in_networks=1; next}
+        in_networks && /^    [A-Za-z0-9_.-]+:/ {in_networks=0}
+        in_networks && /(^|[[:space:]-])n8n_internal([[:space:]]|$)/ {if (svc != "") print svc}
+    ' "$compose" | sort -u)"
+    for svc in n8n-postgres n8n-redis n8n n8n-runner n8n-worker n8n-worker-runner; do
+        printf '%s\n' "$services_with_internal" | grep -qx "$svc" || missing_internal="${missing_internal}${svc} "
+    done
+    [ -z "$missing_internal" ] || fail_with_report "All n8n services must attach to n8n_internal."
 }
 
 function validate_service_network_scope() {
@@ -664,7 +909,7 @@ function validate_script_self_safety() {
     reject_regex "$script_path" 'docker[.]sock|/var/run/docker[.]sock' "Script contains a Docker socket reference."
     reject_regex "$script_path" 'app[.]circl8[.]co[.]uk|auth[.]circl8[.]co[.]uk|[.]circl8[.]co[.]uk' "Script contains hardcoded public identity values."
     reject_regex "$script_path" 'status-(trial|active|past-due|cancelled|suspended|deletion-requested)|plan-(starter|growth|pro)' "Script contains customer status or plan group references."
-    reject_regex "$script_path" '[s]tripe|postiz source|custom image build|elastic[[:alpha:]]*|temporal[-]ui' "Script contains out-of-scope workflow or app modification references."
+    reject_regex "$script_path" '[s]tripe|[p]ostiz source|[c]ustom image build|[e]lastic[[:alpha:]]*|temporal[-]ui' "Script contains out-of-scope workflow or app modification references."
 }
 
 function validate_compose_config() {
@@ -824,6 +1069,13 @@ function main() {
     validate_handoff_gates
     load_project_context
     print_plan
+    print_read_only_inspection_plan
+
+    if ! confirm_apply_phase2_setup; then
+        finish_no_changes_requested
+        exit 0
+    fi
+
     prepare_env
     prepare_n8n_directories
     sync_n8n_template
