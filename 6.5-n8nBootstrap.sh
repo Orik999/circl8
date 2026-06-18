@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.0.8"
+SCRIPT_VERSION="v1.1.0"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="handoff-summary-ui-polish"
+SCRIPT_BUILD="n8n-deploy-verify-lane"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -80,6 +80,7 @@ N8N_POSTGRES_DIR=""
 N8N_REDIS_DIR=""
 N8N_STORAGE_DIR=""
 N8N_COMPOSE_FILE=""
+N8N_RUNTIME_COMPOSE=""
 N8N_DOCKGE_COMPOSE_FILE=""
 N8N_TEMPLATE_URL=""
 
@@ -101,6 +102,15 @@ SCRIPT65_N8N_STATIC_SAFETY="not-run"
 SCRIPT65_READY_FOR_DEPLOYMENT_LANE="no"
 SCRIPT65_READY_FOR_WORKFLOW_LANE="no"
 SCRIPT65_READY_FOR_SCRIPT66="no"
+SCRIPT65_CONTAINERS="not-run"
+SCRIPT65_HEALTH_STATUS="not-run"
+SCRIPT65_N8N_INTERNAL_HTTP="not-run"
+SCRIPT65_UI_PROTECTION="not-run"
+SCRIPT65_PRODUCTION_WEBHOOKS="not-run"
+SCRIPT65_TEST_WEBHOOKS="not-run"
+SCRIPT65_DEPLOYED_MARKER_WRITTEN="no"
+SCRIPT65_SERVICE_STATUS_SUMMARY="not-run"
+SCRIPT65_SERVICE_HEALTH_SUMMARY="not-run"
 
 SCRIPT65_ENV_KEYS_MISSING="0"
 SCRIPT65_ENV_CHANGES_PLANNED="no"
@@ -405,13 +415,14 @@ function download_file() {
 }
 
 function usage() {
-    printf '%s\n' "Usage: sudo ./6.5-n8nBootstrap.sh [--preflight-only|--render-only|--verify-only|--apply|--exit|-h|--help]"
+    printf '%s\n' "Usage: sudo ./6.5-n8nBootstrap.sh [--preflight-only|--render-only|--verify-only|--deploy|--apply|--exit|-h|--help]"
     printf '%s\n' ""
-    printf '%s\n' "Phase 2 modes:"
+    printf '%s\n' "Run modes:"
     printf '%s\n' "  --preflight-only   Run read-only inspection and prompt before applying template/preflight setup."
     printf '%s\n' "  --apply            Show plan and require confirmation before applying template/preflight setup."
     printf '%s\n' "  --render-only      Re-sync runtime compose and run static/compose config validation only."
-    printf '%s\n' "  --verify-only      Verify existing n8n preflight state without mutation."
+    printf '%s\n' "  --verify-only      Verify existing n8n preflight/deployment state without mutation."
+    printf '%s\n' "  --deploy           Deploy and verify the prepared n8n stack."
     printf '%s\n' "  --exit             Exit cleanly without changes."
 }
 
@@ -438,11 +449,14 @@ function parse_args() {
             --verify-only)
                 SCRIPT65_RUN_MODE="verify-only"
                 ;;
+            --deploy)
+                SCRIPT65_RUN_MODE="deploy"
+                ;;
             --exit)
                 SCRIPT65_RUN_MODE="exit"
                 ;;
-            --deploy|--webhook-only)
-                early_error "${arg} is not implemented in Script 6.5 Phase 2. No deploy, webhook, Authentik API, or n8n workflow lane was run."
+            --webhook-only)
+                early_error "${arg} is not implemented in Script 6.5. No webhook, Authentik API, or n8n workflow lane was run."
                 ;;
             -h|--help)
                 usage
@@ -667,6 +681,7 @@ function load_project_context() {
     N8N_REDIS_DIR="${N8N_APPDATA_DIR}/redis"
     N8N_STORAGE_DIR="${N8N_APPDATA_DIR}/storage"
     N8N_COMPOSE_FILE="${COMPOSE_DIR}/07-n8n-compose.yml"
+    N8N_RUNTIME_COMPOSE="$N8N_COMPOSE_FILE"
     N8N_DOCKGE_COMPOSE_FILE="${COMPOSE_DIR}/n8n/compose.yaml"
     N8N_TEMPLATE_URL="${RAW_BASE_DEFAULT%/}/docker/07-n8n-compose.yml"
 
@@ -676,7 +691,7 @@ function print_plan() {
     section "PREFLIGHT PLAN"
     aligned_status_line "Action" "template/preflight only" "$GN"
     aligned_status_line "Template" "docker/07-n8n-compose.yml" "$GN"
-    aligned_status_line "Runtime compose" "$N8N_COMPOSE_FILE" "$BL"
+    aligned_status_line "Runtime compose" "$N8N_RUNTIME_COMPOSE" "$BL"
     aligned_status_line "Deployment" "not-run" "$GN"
     aligned_status_line "Authentik API writes" "not-run" "$GN"
 }
@@ -1047,7 +1062,7 @@ function validate_compose_config() {
         section "COMPOSE CONFIG"
         msg_info "Validating n8n compose config"
     fi
-    docker compose -f "$N8N_COMPOSE_FILE" --env-file "$ENV_FILE" config > /tmp/circl8-n8n-compose-config.out 2> /tmp/circl8-n8n-compose-config.err || {
+    docker compose -f "$N8N_RUNTIME_COMPOSE" --env-file "$ENV_FILE" config > /tmp/circl8-n8n-compose-config.out 2> /tmp/circl8-n8n-compose-config.err || {
         sed -E '/(PASSWORD|PASSWD|SECRET|TOKEN|DATABASE_URL|REDIS_URL|JWT|AUTHORIZATION|BEARER)/Id' /tmp/circl8-n8n-compose-config.err >> "$LOG_FILE" 2>/dev/null || true
         fail_with_report "Docker Compose config validation failed for n8n."
     }
@@ -1070,6 +1085,15 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT65_BUILD=${SCRIPT_BUILD}"
         printf '%s\n' "SCRIPT65_VERIFY_STATUS=${SCRIPT65_VERIFY_STATUS}"
         printf '%s\n' "SCRIPT65_DEPLOYMENT=${SCRIPT65_DEPLOYMENT}"
+        printf '%s\n' "SCRIPT65_PREFLIGHT_MARKER_STATUS=$(existing_preflight_marker_completed && printf completed || printf missing)"
+        printf '%s\n' "SCRIPT65_DEPLOYED_MARKER_STATUS=$(existing_deployment_marker_completed && printf completed || printf missing)"
+        printf '%s\n' "SCRIPT65_CONTAINERS=${SCRIPT65_CONTAINERS}"
+        printf '%s\n' "SCRIPT65_HEALTH_STATUS=${SCRIPT65_HEALTH_STATUS}"
+        printf '%s\n' "SCRIPT65_N8N_INTERNAL_HTTP=${SCRIPT65_N8N_INTERNAL_HTTP}"
+        printf '%s\n' "SCRIPT65_UI_PROTECTION=${SCRIPT65_UI_PROTECTION}"
+        printf '%s\n' "SCRIPT65_PRODUCTION_WEBHOOKS=${SCRIPT65_PRODUCTION_WEBHOOKS}"
+        printf '%s\n' "SCRIPT65_TEST_WEBHOOKS=${SCRIPT65_TEST_WEBHOOKS}"
+        printf '%s\n' "SCRIPT65_AUTHENTIK_WRITES=no"
         printf '%s\n' "SCRIPT65_MARKER_WRITTEN=${SCRIPT65_MARKER_WRITTEN}"
         printf '%s\n' "SCRIPT65_HANDOFF_GATES=${SCRIPT65_HANDOFF_GATES}"
         printf '%s\n' "SCRIPT61_STATUS=${SCRIPT61_STATUS}"
@@ -1103,10 +1127,12 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT65_READY_FOR_DEPLOYMENT_LANE=${SCRIPT65_READY_FOR_DEPLOYMENT_LANE}"
         printf '%s\n' "SCRIPT65_READY_FOR_WORKFLOW_LANE=${SCRIPT65_READY_FOR_WORKFLOW_LANE}"
         printf '%s\n' "SCRIPT65_READY_FOR_SCRIPT66=${SCRIPT65_READY_FOR_SCRIPT66}"
-        printf '%s\n' "SCRIPT65_COMPOSE_FILE=${N8N_COMPOSE_FILE}"
+        printf '%s\n' "SCRIPT65_COMPOSE_FILE=${N8N_RUNTIME_COMPOSE}"
         printf '%s\n' "SCRIPT65_TEMPLATE_PREFLIGHT_MARKER_PATH=${COMPLETED_MARKER}"
         printf '%s\n' "SCRIPT65_DEPLOYED_MARKER_PATH=${DEPLOYED_MARKER}"
-        printf '%s\n' "SCRIPT65_DEPLOYED_MARKER_WRITTEN=no"
+        printf '%s\n' "SCRIPT65_DEPLOYED_MARKER_WRITTEN=${SCRIPT65_DEPLOYED_MARKER_WRITTEN}"
+        printf '%s\n' "SCRIPT65_SERVICE_STATUS_SUMMARY=${SCRIPT65_SERVICE_STATUS_SUMMARY}"
+        printf '%s\n' "SCRIPT65_SERVICE_HEALTH_SUMMARY=${SCRIPT65_SERVICE_HEALTH_SUMMARY}"
     } | write_root_file "$VERIFY_LOG"
     chmod 600 "$VERIFY_LOG" 2>/dev/null || true
 }
@@ -1148,6 +1174,286 @@ function write_completion_marker() {
     SCRIPT65_MARKER_WRITTEN="yes"
 }
 
+
+function expected_n8n_services() {
+    printf '%s
+' \
+        n8n-postgres \
+        n8n-redis \
+        n8n \
+        n8n-runner \
+        n8n-worker \
+        n8n-worker-runner
+}
+
+function existing_deployment_marker_completed() {
+    local marker_status="" marker_verify="" marker_deploy=""
+    marker_status="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT65_STATUS)"
+    marker_verify="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT65_VERIFY_STATUS)"
+    marker_deploy="$(marker_file_key_value "$DEPLOYED_MARKER" SCRIPT65_DEPLOYMENT)"
+    [ "$marker_status" = "completed" ] && [ "$marker_verify" = "PASS" ] && [ "$marker_deploy" = "deployed" ]
+}
+
+function container_state() {
+    docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || printf 'missing'
+}
+
+function container_health() {
+    docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1" 2>/dev/null || printf 'missing'
+}
+
+function wait_for_n8n_container_ready() {
+    local name="$1" timeout_seconds="${2:-300}" elapsed="0" state="" health=""
+    while [ "$elapsed" -le "$timeout_seconds" ]; do
+        state="$(container_state "$name")"
+        health="$(container_health "$name")"
+        if [ "$state" = "running" ]; then
+            case "$health" in
+                healthy|none)
+                    return 0
+                    ;;
+            esac
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    return 1
+}
+
+function wait_for_n8n_internal_http() {
+    local timeout_seconds="${1:-180}" elapsed="0"
+    while [ "$elapsed" -le "$timeout_seconds" ]; do
+        if docker exec n8n node -e '
+const http = require("http");
+const req = http.get({host: "127.0.0.1", port: 5678, path: "/healthz", timeout: 5000}, (res) => {
+  res.resume();
+  res.on("end", () => process.exit(res.statusCode === 200 ? 0 : 1));
+});
+req.on("error", () => process.exit(1));
+req.setTimeout(5000, () => { req.destroy(); process.exit(1); });
+' >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    return 1
+}
+
+function verify_n8n_route_labels() {
+    local compose="${1:-$N8N_RUNTIME_COMPOSE}" webhook_middlewares="" test_public=""
+
+    if grep -Eq 'traefik[.]http[.]routers[.]n8n-ui[.]middlewares:.*(authentik|forwardauth|forward-auth|chain)' "$compose"; then
+        SCRIPT65_UI_PROTECTION="platform-admin"
+    else
+        SCRIPT65_UI_PROTECTION="failed"
+        fail_with_report "n8n UI router is not protected by the platform/admin middleware."
+    fi
+
+    require_regex "$compose" 'traefik[.]http[.]routers[.]n8n-webhook[.]rule:.*\/webhook' "Production webhook router is missing."
+    webhook_middlewares="$(grep -E 'traefik[.]http[.]routers[.]n8n-webhook[.]middlewares' "$compose" || true)"
+    if [ -z "$webhook_middlewares" ]; then
+        SCRIPT65_PRODUCTION_WEBHOOKS="public"
+    else
+        SCRIPT65_PRODUCTION_WEBHOOKS="failed"
+        fail_with_report "Production webhook router must not use forward-auth middleware."
+    fi
+
+    test_public="$(awk '
+        /traefik[.]http[.]routers[.][A-Za-z0-9_.-]+[.]rule/ && /\/webhook-test/ {
+            line=$0
+            sub(/^.*traefik[.]http[.]routers[.]/, "", line)
+            sub(/[.]rule.*$/, "", line)
+            print line
+        }
+    ' "$compose" | while IFS= read -r router; do
+        [ -n "$router" ] || continue
+        if ! grep -E "traefik[.]http[.]routers[.]${router//./[.]}[.]middlewares" "$compose" | grep -E 'authentik|forwardauth|forward-auth|chain' >/dev/null 2>&1; then
+            printf '%s\n' "$router"
+        fi
+    done)"
+    if [ -z "$test_public" ]; then
+        SCRIPT65_TEST_WEBHOOKS="not-exposed"
+    else
+        SCRIPT65_TEST_WEBHOOKS="failed"
+        fail_with_report "webhook-test route must not be publicly exposed without platform/admin middleware."
+    fi
+}
+
+function verify_n8n_deployment() {
+    section "VERIFY N8N"
+    local service="" state="" health="" status_summary="" health_summary=""
+
+    msg_info "Checking n8n containers"
+    while IFS= read -r service; do
+        [ -n "$service" ] || continue
+        if ! wait_for_n8n_container_ready "$service" 300; then
+            SCRIPT65_CONTAINERS="failed"
+            state="$(container_state "$service")"
+            health="$(container_health "$service")"
+            SCRIPT65_SERVICE_STATUS_SUMMARY="${SCRIPT65_SERVICE_STATUS_SUMMARY} ${service}=${state}"
+            SCRIPT65_SERVICE_HEALTH_SUMMARY="${SCRIPT65_SERVICE_HEALTH_SUMMARY} ${service}=${health}"
+            fail_with_report "n8n service did not become ready: ${service}"
+        fi
+        state="$(container_state "$service")"
+        health="$(container_health "$service")"
+        status_summary="${status_summary}${service}=${state} "
+        health_summary="${health_summary}${service}=${health} "
+    done < <(expected_n8n_services)
+    SCRIPT65_SERVICE_STATUS_SUMMARY="${status_summary% }"
+    SCRIPT65_SERVICE_HEALTH_SUMMARY="${health_summary% }"
+    SCRIPT65_CONTAINERS="running"
+    SCRIPT65_HEALTH_STATUS="pass"
+    msg_ok "N8N CONTAINERS READY"
+
+    msg_info "Checking n8n internal readiness"
+    if wait_for_n8n_internal_http 180; then
+        SCRIPT65_N8N_INTERNAL_HTTP="ready"
+        msg_ok "N8N INTERNAL HTTP READY"
+    else
+        SCRIPT65_N8N_INTERNAL_HTTP="failed"
+        fail_with_report "n8n internal health endpoint did not become ready."
+    fi
+
+    msg_info "Checking n8n route labels"
+    verify_n8n_route_labels "$N8N_RUNTIME_COMPOSE"
+    msg_ok "N8N ROUTE LABELS READY"
+
+    aligned_status_line "Containers" "$SCRIPT65_CONTAINERS" "$GN"
+    aligned_status_line "Health" "$SCRIPT65_HEALTH_STATUS" "$GN"
+    aligned_status_line "Internal HTTP" "$SCRIPT65_N8N_INTERNAL_HTTP" "$GN"
+    aligned_status_line "UI protection" "$SCRIPT65_UI_PROTECTION" "$GN"
+    aligned_status_line "Production webhooks" "$SCRIPT65_PRODUCTION_WEBHOOKS" "$GN"
+    aligned_status_line "Test webhooks" "$SCRIPT65_TEST_WEBHOOKS" "$GN"
+}
+
+function confirm_deploy_n8n() {
+    section "DEPLOY N8N"
+    mini_header "Plan"
+    aligned_status_line "Action" "deploy n8n stack" "$YW"
+    aligned_status_line "Runtime compose" "$N8N_RUNTIME_COMPOSE" "$BL"
+    aligned_status_line "Containers" "n8n stack" "$GN"
+    aligned_status_line "Authentik writes" "no" "$GN"
+    aligned_status_line "Webhooks" "production route public" "$GN"
+    aligned_status_line "Test webhooks" "not exposed publicly" "$GN"
+    echo ""
+    echo -e "${YW}This will start the n8n stack using the prepared runtime compose.${CL}"
+    echo -e "${YW}No Authentik applications, providers, policies, or groups will be created.${CL}"
+    echo ""
+
+    if [ ! -r /dev/tty ]; then
+        msg_warn "No interactive TTY available; n8n deployment skipped with no changes."
+        return 1
+    fi
+
+    if read_yes_no "Proceed with n8n deployment?" "n"; then
+        msg_ok "Deployment confirmed — starting n8n"
+        return 0
+    fi
+
+    msg_ok "Deployment skipped — no changes made"
+    return 1
+}
+
+function deploy_n8n_stack() {
+    section "START N8N"
+    local deploy_err=""
+    deploy_err="$(mktemp /tmp/circl8-n8n-deploy.XXXXXX.err)"
+    TEMP_FILES+=("$deploy_err")
+
+    msg_info "Starting n8n stack"
+    if docker compose -f "$N8N_RUNTIME_COMPOSE" --env-file "$ENV_FILE" up -d >/dev/null 2>"$deploy_err"; then
+        SCRIPT65_DEPLOYMENT="deployed"
+        msg_ok "N8N STACK STARTED"
+        return 0
+    fi
+
+    SCRIPT65_DEPLOYMENT="failed"
+    sed -E '/(PASSWORD|PASSWD|SECRET|TOKEN|DATABASE_URL|REDIS_URL|JWT|AUTHORIZATION|BEARER)/Id' "$deploy_err" >> "$LOG_FILE" 2>/dev/null || true
+    fail_with_report "n8n compose deployment failed."
+}
+
+function write_deployment_marker() {
+    local tmp_file=""
+    tmp_file="$(mktemp /tmp/circl8-n8n-deployed-marker.XXXXXX)"
+    {
+        printf '%s\n' "SCRIPT65_STATUS=completed"
+        printf '%s\n' "SCRIPT65_VERSION=${SCRIPT_VERSION}"
+        printf '%s\n' "SCRIPT65_BUILD=${SCRIPT_BUILD}"
+        printf '%s\n' "SCRIPT65_VERIFY_STATUS=PASS"
+        printf '%s\n' "SCRIPT65_DEPLOYMENT=deployed"
+        printf '%s\n' "SCRIPT65_CONTAINERS=running"
+        printf '%s\n' "SCRIPT65_HEALTH_STATUS=${SCRIPT65_HEALTH_STATUS}"
+        printf '%s\n' "SCRIPT65_AUTHENTIK_WRITES=no"
+        printf '%s\n' "SCRIPT65_IDENTITY_LANE=platform-admin"
+        printf '%s\n' "SCRIPT65_N8N_URL=${N8N_URL}"
+        printf '%s\n' "SCRIPT65_UI_PROTECTION=${SCRIPT65_UI_PROTECTION}"
+        printf '%s\n' "SCRIPT65_PRODUCTION_WEBHOOKS=${SCRIPT65_PRODUCTION_WEBHOOKS}"
+        printf '%s\n' "SCRIPT65_TEST_WEBHOOKS=${SCRIPT65_TEST_WEBHOOKS}"
+        printf '%s\n' "SCRIPT65_READY_FOR_DEPLOYMENT_LANE=yes"
+        printf '%s\n' "SCRIPT65_READY_FOR_WORKFLOW_LANE=yes"
+        printf '%s\n' "SCRIPT65_READY_FOR_SCRIPT66=yes"
+    } > "$tmp_file"
+    chmod 600 "$tmp_file"
+    mv -f "$tmp_file" "$DEPLOYED_MARKER"
+    SCRIPT65_DEPLOYED_MARKER_WRITTEN="yes"
+}
+
+function mark_deployment_ready() {
+    SCRIPT65_STATUS="completed"
+    SCRIPT65_VERIFY_STATUS="PASS"
+    SCRIPT65_DEPLOYMENT="deployed"
+    SCRIPT65_CONTAINERS="running"
+    SCRIPT65_READY_FOR_DEPLOYMENT_LANE="yes"
+    SCRIPT65_READY_FOR_WORKFLOW_LANE="yes"
+    SCRIPT65_READY_FOR_SCRIPT66="yes"
+    write_deployment_marker
+    write_verify_report
+}
+
+function print_deploy_summary() {
+    section_flash_success "FINISHED"
+    mini_header "Deployment"
+    final_line "Status" "$SCRIPT65_DEPLOYMENT" "$GN"
+    final_line "Containers" "$SCRIPT65_CONTAINERS" "$GN"
+    final_line "Health" "$SCRIPT65_HEALTH_STATUS" "$GN"
+    final_line "Runtime compose" "$SCRIPT65_N8N_COMPOSE_TEMPLATE" "$GN"
+
+    mini_header "n8n"
+    final_line "URL" "$N8N_URL" "$GN"
+    final_line "UI protection" "$SCRIPT65_UI_PROTECTION" "$GN"
+    final_line "Production webhooks" "$SCRIPT65_PRODUCTION_WEBHOOKS" "$GN"
+    final_line "Test webhooks" "$SCRIPT65_TEST_WEBHOOKS" "$GN"
+
+    mini_header "Identity"
+    final_line "Authentik lane" "platform-admin" "$GN"
+    final_line "Authentik writes" "no" "$GN"
+
+    mini_header "Next step"
+    final_line "Run" "6.6-landingBootstrap.sh" "$YW"
+    final_line "Verify log" "$VERIFY_LOG" "$BL"
+    final_line "Marker" "$DEPLOYED_MARKER" "$BL"
+}
+
+function run_deploy_n8n() {
+    if ! existing_preflight_marker_completed; then
+        section "DEPLOY N8N"
+        aligned_status_line "Preflight marker" "missing" "$RD"
+        fail_with_report "n8n template/preflight marker is missing. Run template/preflight setup first."
+    fi
+
+    if ! confirm_deploy_n8n; then
+        exit 0
+    fi
+
+    validate_static_safety "$N8N_RUNTIME_COMPOSE"
+    validate_compose_config
+    SCRIPT65_N8N_COMPOSE_TEMPLATE="synced"
+    deploy_n8n_stack
+    verify_n8n_deployment
+    mark_deployment_ready
+    print_deploy_summary
+}
 
 function run_apply_preflight_setup() {
     if ! confirm_apply_phase2_setup; then
@@ -1219,11 +1525,27 @@ function finish_render_only_success() {
 }
 
 function run_verify_only() {
-    section "VERIFY CURRENT N8N PREFLIGHT"
+    section "VERIFY CURRENT N8N STATE"
     mini_header "Mode"
     aligned_status_line "Run mode" "verify-only" "$GN"
-    aligned_status_line "Deployment" "not-run" "$GN"
-    aligned_status_line "Marker" "$(existing_preflight_marker_completed && printf completed || printf missing)" "$(existing_preflight_marker_completed && printf '%s' "$GN" || printf '%s' "$YW")"
+    aligned_status_line "Preflight marker" "$(existing_preflight_marker_completed && printf completed || printf missing)" "$(existing_preflight_marker_completed && printf '%s' "$GN" || printf '%s' "$YW")"
+    aligned_status_line "Deployment marker" "$(existing_deployment_marker_completed && printf completed || printf missing)" "$(existing_deployment_marker_completed && printf '%s' "$GN" || printf '%s' "$YW")"
+
+    if existing_deployment_marker_completed; then
+        SCRIPT65_N8N_COMPOSE_TEMPLATE="synced"
+        validate_static_safety "$N8N_RUNTIME_COMPOSE"
+        verify_n8n_deployment
+        SCRIPT65_STATUS="verify-only-completed"
+        SCRIPT65_VERIFY_STATUS="PASS"
+        SCRIPT65_DEPLOYMENT="deployed"
+        SCRIPT65_READY_FOR_DEPLOYMENT_LANE="yes"
+        SCRIPT65_READY_FOR_WORKFLOW_LANE="yes"
+        SCRIPT65_READY_FOR_SCRIPT66="yes"
+        write_verify_report
+        print_deploy_summary
+        return 0
+    fi
+
     SCRIPT65_N8N_STATIC_SAFETY="pass"
     SCRIPT65_N8N_COMPOSE_CONFIG="not-run"
     finish_verify_only_success
@@ -1257,17 +1579,19 @@ function show_rerun_menu() {
     section "SCRIPT 6.5 RERUN OPTIONS"
     aligned_status_line "Existing preflight" "completed" "$GN"
     echo ""
-    echo -e "  ${YW}1)${CL} Verify current n8n preflight state"
+    echo -e "  ${YW}1)${CL} Verify current n8n state"
     echo -e "  ${YW}2)${CL} Re-render/sync template preflight"
     echo -e "  ${YW}3)${CL} Re-run template/preflight setup"
-    echo -e "  4) Exit"
+    echo -e "  ${YW}4)${CL} Deploy n8n"
+    echo -e "  5) Exit"
     echo ""
-    choice="$(numeric_menu_input "Select action" "1" "1" "4")"
+    choice="$(numeric_menu_input "Select action" "1" "1" "5")"
     case "$choice" in
-        1) SCRIPT65_RUN_MODE="verify-only"; msg_ok "Verify current n8n preflight state selected" ;;
+        1) SCRIPT65_RUN_MODE="verify-only"; msg_ok "Verify current n8n state selected" ;;
         2) SCRIPT65_RUN_MODE="render-only"; msg_ok "Re-render/sync template preflight selected" ;;
         3) SCRIPT65_RUN_MODE="apply"; msg_ok "Re-run template/preflight setup selected" ;;
-        4) SCRIPT65_RUN_MODE="exit" ;;
+        4) SCRIPT65_RUN_MODE="deploy"; msg_ok "Deploy n8n selected" ;;
+        5) SCRIPT65_RUN_MODE="exit" ;;
     esac
 }
 
@@ -1285,6 +1609,9 @@ function run_mode_decision() {
             ;;
         verify-only)
             run_verify_only
+            ;;
+        deploy)
+            run_deploy_n8n
             ;;
         exit)
             finish_clean_exit
