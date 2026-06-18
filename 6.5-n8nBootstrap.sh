@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.1.3"
+SCRIPT_VERSION="v1.1.4"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="start-progress-ui-polish"
+SCRIPT_BUILD="rerun-ui-status-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -855,8 +855,13 @@ function inspect_n8n_template_plan() {
     SCRIPT65_TEMPLATE_SOURCE="remote"
     N8N_TEMPLATE_INSPECTION_FILE="not-downloaded"
     if [ -s "$N8N_COMPOSE_FILE" ]; then
-        SCRIPT65_RUNTIME_COMPOSE_STATE="present-deferred"
-        SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="deferred"
+        if existing_deployment_marker_completed; then
+            SCRIPT65_RUNTIME_COMPOSE_STATE="present-current"
+            SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="no"
+        else
+            SCRIPT65_RUNTIME_COMPOSE_STATE="present-deferred"
+            SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="deferred"
+        fi
     else
         SCRIPT65_RUNTIME_COMPOSE_STATE="missing"
         SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="yes"
@@ -1565,7 +1570,11 @@ function confirm_start_n8n() {
 }
 
 function confirm_deploy_n8n() {
-    section "DEPLOY N8N"
+    if existing_deployment_marker_completed; then
+        section "DEPLOY / REDEPLOY N8N"
+    else
+        section "DEPLOY N8N"
+    fi
     mini_header "Plan"
     aligned_status_line "Action" "deploy n8n stack" "$YW"
     aligned_status_line "Runtime compose" "$N8N_RUNTIME_COMPOSE" "$BL"
@@ -1584,7 +1593,7 @@ function confirm_deploy_n8n() {
     fi
 
     if read_yes_no "Proceed with n8n deployment?" "n"; then
-        msg_ok "Deployment confirmed — starting n8n"
+        msg_ok "Deployment confirmed — preparing n8n"
         return 0
     fi
 
@@ -1700,10 +1709,14 @@ function run_start_n8n_progress() {
     : > "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
     chmod 600 "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
 
+    mini_header "Environment"
     if [ "$mode" = "full" ]; then
-        mini_header "Environment"
         msg_info "Preparing n8n environment"
         prepare_env
+        msg_ok "N8N ENV READY"
+    else
+        SCRIPT65_ENV_STATUS="$(marker_file_key_value "$COMPLETED_MARKER" SCRIPT65_ENV_STATUS)"
+        [ -n "$SCRIPT65_ENV_STATUS" ] || SCRIPT65_ENV_STATUS="ready"
         msg_ok "N8N ENV READY"
     fi
 
