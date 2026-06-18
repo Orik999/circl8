@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.0.7"
+SCRIPT_VERSION="v1.0.8"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="inspection-status-color-polish"
+SCRIPT_BUILD="handoff-summary-ui-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -578,13 +578,9 @@ function version_at_least() { local have="$1" need="$2"; [ "$(printf '%s\n%s\n' 
 #  PREFLIGHT GATES / PROJECT CONTEXT
 # =========================================================
 function validate_handoff_gates() {
-    section "SCRIPT 6.5 HANDOFF"
-
     if ! root_path_exists "$SCRIPT61_MARKER"; then fail_with_report "Script 6.1 completion marker is missing."; fi
     SCRIPT61_STATUS="$(marker_file_key_value "$SCRIPT61_MARKER" SCRIPT61_STATUS)"
     SCRIPT61_VERIFY_STATUS="$(marker_file_key_value "$SCRIPT61_MARKER" SCRIPT61_VERIFY_STATUS)"
-    aligned_status_line "Script 6.1 status" "${SCRIPT61_STATUS:-missing}" "$(status_color_for_value "${SCRIPT61_STATUS:-missing}")"
-    aligned_status_line "Script 6.1 verify" "${SCRIPT61_VERIFY_STATUS:-missing}" "$(status_color_for_value "${SCRIPT61_VERIFY_STATUS:-missing}")"
     [ "$SCRIPT61_STATUS" = "completed" ] || fail_with_report "Script 6.1 status is not completed."
     [ "$SCRIPT61_VERIFY_STATUS" = "PASS" ] || fail_with_report "Script 6.1 verification is not PASS."
 
@@ -593,10 +589,6 @@ function validate_handoff_gates() {
     SCRIPT63_VERIFY_STATUS="$(marker_file_key_value "$SCRIPT63_MARKER" SCRIPT63_VERIFY_STATUS)"
     SCRIPT63_FORWARD_AUTH="$(marker_file_key_value "$SCRIPT63_MARKER" SCRIPT63_FORWARD_AUTH)"
     SCRIPT63_TRAEFIK_FORWARD_AUTH="$(marker_file_key_value "$SCRIPT63_MARKER" SCRIPT63_TRAEFIK_FORWARD_AUTH)"
-    aligned_status_line "Script 6.3 status" "${SCRIPT63_STATUS:-missing}" "$(status_color_for_value "${SCRIPT63_STATUS:-missing}")"
-    aligned_status_line "Script 6.3 verify" "${SCRIPT63_VERIFY_STATUS:-missing}" "$(status_color_for_value "${SCRIPT63_VERIFY_STATUS:-missing}")"
-    aligned_status_line "ForwardAuth" "${SCRIPT63_FORWARD_AUTH:-missing}" "$(status_color_for_value "${SCRIPT63_FORWARD_AUTH:-missing}")"
-    aligned_status_line "Traefik ForwardAuth" "${SCRIPT63_TRAEFIK_FORWARD_AUTH:-missing}" "$(status_color_for_value "${SCRIPT63_TRAEFIK_FORWARD_AUTH:-missing}")"
     [ "$SCRIPT63_STATUS" = "completed" ] || fail_with_report "Script 6.3 status is not completed."
     [ "$SCRIPT63_VERIFY_STATUS" = "PASS" ] || fail_with_report "Script 6.3 verification is not PASS."
     [ "$SCRIPT63_FORWARD_AUTH" = "ready" ] || fail_with_report "Script 6.3 ForwardAuth is not ready."
@@ -606,19 +598,34 @@ function validate_handoff_gates() {
     SCRIPT64_STATUS="$(marker_file_key_value "$SCRIPT64_MARKER" SCRIPT64_STATUS)"
     SCRIPT64_VERIFY_STATUS="$(marker_file_key_value "$SCRIPT64_MARKER" SCRIPT64_VERIFY_STATUS)"
     SCRIPT64_READY_FOR_SCRIPT65="$(marker_file_key_value "$SCRIPT64_MARKER" SCRIPT64_READY_FOR_SCRIPT65)"
-    aligned_status_line "Script 6.4 status" "${SCRIPT64_STATUS:-missing}" "$(status_color_for_value "${SCRIPT64_STATUS:-missing}")"
-    aligned_status_line "Script 6.4 verify" "${SCRIPT64_VERIFY_STATUS:-missing}" "$(status_color_for_value "${SCRIPT64_VERIFY_STATUS:-missing}")"
-    aligned_status_line "Ready for Script 6.5" "${SCRIPT64_READY_FOR_SCRIPT65:-missing}" "$(status_color_for_value "${SCRIPT64_READY_FOR_SCRIPT65:-missing}")"
     [ "$SCRIPT64_STATUS" = "completed" ] || fail_with_report "Script 6.4 status is not completed."
     [ "$SCRIPT64_VERIFY_STATUS" = "PASS" ] || fail_with_report "Script 6.4 verification is not PASS."
     [ "$SCRIPT64_READY_FOR_SCRIPT65" = "yes" ] || fail_with_report "Script 6.4 is not marked ready for Script 6.5."
 
     SCRIPT65_HANDOFF_GATES="PASS"
+}
+
+function print_handoff_summary() {
+    section "SCRIPT 6.5 HANDOFF"
+
+    mini_header "Previous script"
+    aligned_status_line "Script 6.4 status" "${SCRIPT64_STATUS:-missing}" "$(status_color_for_value "${SCRIPT64_STATUS:-missing}")"
+    aligned_status_line "Script 6.4 verify" "${SCRIPT64_VERIFY_STATUS:-missing}" "$(status_color_for_value "${SCRIPT64_VERIFY_STATUS:-missing}")"
+    aligned_status_line "Ready for Script 6.5" "${SCRIPT64_READY_FOR_SCRIPT65:-missing}" "$(status_color_for_value "${SCRIPT64_READY_FOR_SCRIPT65:-missing}")"
+
+    mini_header "Platform dependencies"
+    aligned_status_line "Platform core" "ready" "$GN"
+    aligned_status_line "Authentik forward auth" "ready" "$GN"
+
+    mini_header "Project"
+    aligned_status_line "Base domain" "$DOMAIN_VALUE" "$GN"
+    aligned_status_line "n8n host" "$N8N_HOST" "$GN"
+    aligned_status_line "Identity lane" "platform-admin" "$GN"
+
     msg_ok "SCRIPT 6.5 HANDOFF PASSED"
 }
 
 function load_project_context() {
-    section "PROJECT IDENTITY"
     DOCKER_DIR="$(marker_file_key_value "$SCRIPT61_MARKER" SCRIPT61_DOCKER_DIR)"
     COMPOSE_DIR="$(marker_file_key_value "$SCRIPT61_MARKER" SCRIPT61_COMPOSE_DIR)"
     [ -n "$DOCKER_DIR" ] || DOCKER_DIR="$(marker_file_key_value "$SCRIPT64_MARKER" SCRIPT64_DOCKER_DIR)"
@@ -663,11 +670,6 @@ function load_project_context() {
     N8N_DOCKGE_COMPOSE_FILE="${COMPOSE_DIR}/n8n/compose.yaml"
     N8N_TEMPLATE_URL="${RAW_BASE_DEFAULT%/}/docker/07-n8n-compose.yml"
 
-    aligned_status_line "Base domain" "$DOMAIN_VALUE" "$GN"
-    aligned_status_line "Project slug" "$PROJECT_SLUG" "$GN"
-    aligned_status_line "Project name" "$PROJECT_NAME" "$GN"
-    aligned_status_line "n8n host" "$N8N_HOST" "$GN"
-    aligned_status_line "Identity lane" "platform-admin" "$GN"
 }
 
 function print_plan() {
@@ -1254,8 +1256,6 @@ function show_rerun_menu() {
     local choice=""
     section "SCRIPT 6.5 RERUN OPTIONS"
     aligned_status_line "Existing preflight" "completed" "$GN"
-    aligned_status_line "Project" "${PROJECT_NAME:-${PROJECT_SLUG:-circl8}}" "$GN"
-    aligned_status_line "n8n host" "${N8N_HOST:-unknown}" "$GN"
     echo ""
     echo -e "  ${YW}1)${CL} Verify current n8n preflight state"
     echo -e "  ${YW}2)${CL} Re-render/sync template preflight"
@@ -1309,19 +1309,22 @@ function mark_template_preflight_ready() {
 
 function print_summary() {
     section_flash_success "FINISHED"
-    mini_header "Script"
-    final_line "Source" "$SCRIPT_SOURCE" "$GN"
-    final_line "Version" "$SCRIPT_VERSION" "$GN"
-    final_line "Build" "$SCRIPT_BUILD" "$GN"
-
-    mini_header "Result"
+    mini_header "Preflight"
     final_line "Status" "template preflight complete" "$GN"
+    final_line "Env" "$SCRIPT65_ENV_STATUS" "$GN"
+    final_line "Appdata dirs" "$SCRIPT65_N8N_APPDATA" "$GN"
+    final_line "Runtime compose" "$SCRIPT65_N8N_COMPOSE_TEMPLATE" "$GN"
+    final_line "Static safety" "$SCRIPT65_N8N_STATIC_SAFETY" "$GN"
+    final_line "Compose config" "$SCRIPT65_N8N_COMPOSE_CONFIG" "$GN"
+
+    mini_header "n8n"
+    final_line "URL" "$N8N_URL" "$GN"
     final_line "Deployment" "not-run" "$GN"
     final_line "Containers started" "no" "$GN"
     final_line "Authentik writes" "no" "$GN"
 
-    mini_header "Next"
-    final_line "Ready" "future Script 6.5 deploy lane patch" "$YW"
+    mini_header "Next step"
+    final_line "Run" "6.6-landingBootstrap.sh" "$YW"
     final_line "Verify log" "$VERIFY_LOG" "$BL"
     final_line "Marker" "$COMPLETED_MARKER" "$BL"
 }
@@ -1346,6 +1349,7 @@ function main() {
     init_script "$@"
     validate_handoff_gates
     load_project_context
+    print_handoff_summary
     print_plan
     print_read_only_inspection_plan
 
