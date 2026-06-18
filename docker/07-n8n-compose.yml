@@ -1,0 +1,206 @@
+# 07-n8n-compose.yml
+# Project: n8n Automation foundation for Project Circl8
+# Scope: Script 6.5 Phase 1 compose template only.
+#
+# Identity lane:
+# - n8n belongs to the existing Script 6.3 platform/admin lane.
+# - The editor/UI route is protected by the existing platform/admin Authentik chain.
+# - Production /webhook routes are public for external callbacks.
+# - /webhook-test is not exposed by a public router and remains protected by the UI route.
+#
+# Safety:
+# - No host ports.
+# - No Docker socket mount.
+# - No bundled Traefik service.
+# - No customer status/plan identity groups.
+
+name: n8n
+
+x-shared: &shared
+  image: "${N8N_IMAGE:-docker.n8n.io/n8nio/n8n:2.26.7}"
+  restart: unless-stopped
+  env_file:
+    - "${DOCKER_DIR}/.env"
+  security_opt:
+    - no-new-privileges:true
+  environment:
+    DB_TYPE: postgresdb
+    DB_POSTGRESDB_HOST: n8n-postgres
+    DB_POSTGRESDB_PORT: 5432
+    DB_POSTGRESDB_DATABASE: "${N8N_POSTGRES_DB}"
+    DB_POSTGRESDB_USER: "${N8N_POSTGRES_USER}"
+    DB_POSTGRESDB_PASSWORD: "${N8N_POSTGRES_PASSWORD}"
+
+    EXECUTIONS_MODE: queue
+    QUEUE_BULL_REDIS_HOST: n8n-redis
+    QUEUE_BULL_REDIS_PORT: 6379
+    QUEUE_HEALTH_CHECK_ACTIVE: "true"
+
+    N8N_RUNNERS_ENABLED: "true"
+    N8N_RUNNERS_MODE: external
+    N8N_RUNNERS_AUTH_TOKEN: "${N8N_RUNNERS_AUTH_TOKEN}"
+    N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+    OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: "true"
+
+    N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY}"
+    N8N_HOST: "${N8N_HOST}"
+    N8N_PORT: 5678
+    N8N_PROTOCOL: https
+    N8N_EDITOR_BASE_URL: "${N8N_URL}"
+    WEBHOOK_URL: "${N8N_WEBHOOK_URL}"
+    N8N_SECURE_COOKIE: "true"
+    N8N_PROXY_HOPS: 1
+    N8N_DIAGNOSTICS_ENABLED: "false"
+    N8N_PERSONALIZATION_ENABLED: "false"
+    N8N_LOG_LEVEL: "${N8N_LOG_LEVEL:-info}"
+    GENERIC_TIMEZONE: "${TZ}"
+    TZ: "${TZ}"
+  volumes:
+    - "${DOCKER_DIR}/appdata/n8n/storage:/home/node/.n8n"
+    - /etc/localtime:/etc/localtime:ro
+  depends_on:
+    n8n-postgres:
+      condition: service_healthy
+    n8n-redis:
+      condition: service_healthy
+
+x-runner: &runner
+  image: "${N8N_RUNNERS_IMAGE:-n8nio/runners:2.26.7}"
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  environment:
+    N8N_RUNNERS_AUTH_TOKEN: "${N8N_RUNNERS_AUTH_TOKEN}"
+    GENERIC_TIMEZONE: "${TZ}"
+    TZ: "${TZ}"
+
+services:
+  n8n-postgres:
+    image: "${N8N_POSTGRES_IMAGE:-postgres:17-alpine}"
+    container_name: n8n-postgres
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_DB: "${N8N_POSTGRES_DB}"
+      POSTGRES_USER: "${N8N_POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${N8N_POSTGRES_PASSWORD}"
+      TZ: "${TZ}"
+    volumes:
+      - "${DOCKER_DIR}/appdata/n8n/postgres:/var/lib/postgresql/data"
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - n8n_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  n8n-redis:
+    image: "${N8N_REDIS_IMAGE:-redis:7-alpine}"
+    container_name: n8n-redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - "${DOCKER_DIR}/appdata/n8n/redis:/data"
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - n8n_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  n8n:
+    <<: *shared
+    container_name: n8n
+    command: start
+    networks:
+      - t2_proxy
+      - n8n_internal
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "require('http').get('http://127.0.0.1:5678/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: t2_proxy
+
+      # Public production webhooks for Stripe/external callbacks.
+      # Workflow-level signature/shared-secret validation must be configured later.
+      # /webhook-test is deliberately excluded, so test webhooks stay protected by the UI router.
+      traefik.http.routers.n8n-webhook.rule: "Host(`${N8N_HOST}`) && (Path(`/webhook`) || PathPrefix(`/webhook/`))"
+      traefik.http.routers.n8n-webhook.entrypoints: https
+      traefik.http.routers.n8n-webhook.tls: "true"
+      traefik.http.routers.n8n-webhook.priority: 200
+      traefik.http.routers.n8n-webhook.service: n8n
+
+      # n8n editor/UI. Protected by the existing Script 6.3 platform/admin ForwardAuth chain.
+      traefik.http.routers.n8n-ui.rule: "Host(`${N8N_HOST}`)"
+      traefik.http.routers.n8n-ui.entrypoints: https
+      traefik.http.routers.n8n-ui.tls: "true"
+      traefik.http.routers.n8n-ui.priority: 100
+      traefik.http.routers.n8n-ui.middlewares: chain-authentik@file
+      traefik.http.routers.n8n-ui.service: n8n
+      traefik.http.services.n8n.loadbalancer.server.port: 5678
+
+  n8n-runner:
+    <<: *runner
+    container_name: n8n-runner
+    environment:
+      N8N_RUNNERS_AUTH_TOKEN: "${N8N_RUNNERS_AUTH_TOKEN}"
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      GENERIC_TIMEZONE: "${TZ}"
+      TZ: "${TZ}"
+    networks:
+      - n8n_internal
+    depends_on:
+      n8n:
+        condition: service_started
+
+  n8n-worker:
+    <<: *shared
+    container_name: n8n-worker
+    command: "worker --concurrency=${N8N_WORKER_CONCURRENCY:-5}"
+    networks:
+      - n8n_internal
+    depends_on:
+      n8n:
+        condition: service_started
+      n8n-postgres:
+        condition: service_healthy
+      n8n-redis:
+        condition: service_healthy
+
+  n8n-worker-runner:
+    <<: *runner
+    container_name: n8n-worker-runner
+    environment:
+      N8N_RUNNERS_AUTH_TOKEN: "${N8N_RUNNERS_AUTH_TOKEN}"
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n-worker:5679
+      GENERIC_TIMEZONE: "${TZ}"
+      TZ: "${TZ}"
+    networks:
+      - n8n_internal
+    depends_on:
+      n8n-worker:
+        condition: service_started
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true
+
+  n8n_internal:
+    name: n8n_internal
