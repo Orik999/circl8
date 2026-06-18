@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.0.5"
+SCRIPT_VERSION="v1.0.6"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="apply-confirm-and-run-options"
+SCRIPT_BUILD="setup-output-grouping-polish"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -53,6 +53,7 @@ TEMP_FILES=()
 TEMP_DIRS=()
 PROGRESS_LINE_ACTIVE="no"
 SCRIPT65_RUN_MODE="prompt"
+SCRIPT65_GROUPED_SETUP_ACTIVE="no"
 
 SCRIPT61_STATUS="unknown"
 SCRIPT61_VERIFY_STATUS="unknown"
@@ -709,7 +710,7 @@ function inspect_n8n_env_plan() {
 }
 
 function prepare_env() {
-    section "N8N ENV"
+    [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || section "N8N ENV"
     local backup_path="" ts="" key="" value=""
     root_install_dir "$(dirname "$ENV_FILE")" 755
     touch "$ENV_FILE"
@@ -737,7 +738,7 @@ function prepare_env() {
     SCRIPT65_ENV_STATUS="ready"
     aligned_status_line "Keys added" "$SCRIPT65_ENV_KEYS_ADDED" "$GN"
     aligned_status_line "Secrets" "preserved/generated if missing" "$GN"
-    msg_ok "N8N ENV READY"
+    [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || msg_ok "N8N ENV READY"
 }
 
 function validate_image_pairing() {
@@ -849,7 +850,7 @@ function confirm_apply_phase2_setup() {
 }
 
 function prepare_n8n_directories() {
-    section "N8N DIRECTORIES"
+    [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || section "N8N DIRECTORIES"
     root_install_dir "$COMPOSE_DIR" 755
     root_install_dir "$N8N_APPDATA_DIR" 700
     root_install_dir "$N8N_POSTGRES_DIR" 700
@@ -863,11 +864,11 @@ function prepare_n8n_directories() {
     aligned_status_line "Postgres data" "$SCRIPT65_N8N_POSTGRES_DATA" "$GN"
     aligned_status_line "Redis data" "$SCRIPT65_N8N_REDIS_DATA" "$GN"
     aligned_status_line "Storage" "$SCRIPT65_N8N_STORAGE" "$GN"
-    msg_ok "N8N DIRECTORIES READY"
+    [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || msg_ok "N8N DIRECTORIES READY"
 }
 
 function sync_n8n_template() {
-    section "TEMPLATES"
+    [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || section "TEMPLATES"
     local template_tmp=""
     template_tmp="$(mktemp /tmp/circl8-n8n-compose-template.XXXXXX)"
     TEMP_FILES+=("$template_tmp")
@@ -900,7 +901,7 @@ function uncommented_file_content() { sed '/^[[:space:]]*#/d' "$1"; }
 
 function validate_static_safety() {
     local compose="${1:-$N8N_COMPOSE_FILE}" mode="${2:-apply}" noncomment=""
-    if [ "$mode" != "inspection" ]; then
+    if [ "$mode" != "inspection" ] && [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" != "yes" ]; then
         section "STATIC SAFETY"
     fi
     [ -f "$compose" ] || fail_with_report "Rendered n8n compose file is missing."
@@ -939,7 +940,7 @@ function validate_static_safety() {
         aligned_status_line "Service networks" "pass" "$GN"
         aligned_status_line "Webhook routing" "pass" "$GN"
         aligned_status_line "Forbidden patterns" "absent" "$GN"
-        msg_ok "STATIC SAFETY PASSED"
+        [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ] || msg_ok "STATIC SAFETY PASSED"
     fi
 }
 
@@ -1027,15 +1028,21 @@ function validate_script_self_safety() {
 }
 
 function validate_compose_config() {
-    section "COMPOSE CONFIG"
-    msg_info "Validating n8n compose config"
+    if [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" != "yes" ]; then
+        section "COMPOSE CONFIG"
+        msg_info "Validating n8n compose config"
+    fi
     docker compose -f "$N8N_COMPOSE_FILE" --env-file "$ENV_FILE" config > /tmp/circl8-n8n-compose-config.out 2> /tmp/circl8-n8n-compose-config.err || {
         sed -E '/(PASSWORD|PASSWD|SECRET|TOKEN|DATABASE_URL|REDIS_URL|JWT|AUTHORIZATION|BEARER)/Id' /tmp/circl8-n8n-compose-config.err >> "$LOG_FILE" 2>/dev/null || true
         fail_with_report "Docker Compose config validation failed for n8n."
     }
     rm -f /tmp/circl8-n8n-compose-config.out /tmp/circl8-n8n-compose-config.err 2>/dev/null || true
     SCRIPT65_N8N_COMPOSE_CONFIG="valid"
-    msg_ok "N8N COMPOSE CONFIG VALID"
+    if [ "${SCRIPT65_GROUPED_SETUP_ACTIVE:-no}" = "yes" ]; then
+        aligned_status_line "Compose config" "$SCRIPT65_N8N_COMPOSE_CONFIG" "$GN"
+    else
+        msg_ok "N8N COMPOSE CONFIG VALID"
+    fi
 }
 
 # =========================================================
@@ -1132,12 +1139,28 @@ function run_apply_preflight_setup() {
         exit 0
     fi
 
+    section "SETUP N8N PREFLIGHT"
+    SCRIPT65_GROUPED_SETUP_ACTIVE="yes"
+
+    mini_header "Environment"
     prepare_env
+
+    mini_header "Directories"
     prepare_n8n_directories
+
+    mini_header "Templates"
     sync_n8n_template
+
+    mini_header "Validation"
     validate_static_safety
     validate_compose_config
+
+    mini_header "Marker"
     mark_template_preflight_ready
+    aligned_status_line "Status" "written" "$GN"
+
+    SCRIPT65_GROUPED_SETUP_ACTIVE="no"
+    msg_ok "N8N PREFLIGHT SETUP COMPLETE"
     print_summary
 }
 
@@ -1224,14 +1247,14 @@ function show_rerun_menu() {
     echo -e "  ${YW}1)${CL} Verify current n8n preflight state"
     echo -e "  ${YW}2)${CL} Re-render/sync template preflight"
     echo -e "  ${YW}3)${CL} Re-run template/preflight setup"
-    echo -e "  ${YW}4)${CL} Exit"
+    echo -e "  4) Exit"
     echo ""
     choice="$(numeric_menu_input "Select action" "1" "1" "4")"
     case "$choice" in
         1) SCRIPT65_RUN_MODE="verify-only"; msg_ok "Verify current n8n preflight state selected" ;;
         2) SCRIPT65_RUN_MODE="render-only"; msg_ok "Re-render/sync template preflight selected" ;;
         3) SCRIPT65_RUN_MODE="apply"; msg_ok "Re-run template/preflight setup selected" ;;
-        4) SCRIPT65_RUN_MODE="exit"; msg_ok "Exit selected" ;;
+        4) SCRIPT65_RUN_MODE="exit" ;;
     esac
 }
 
@@ -1278,16 +1301,9 @@ function print_summary() {
     final_line "Version" "$SCRIPT_VERSION" "$GN"
     final_line "Build" "$SCRIPT_BUILD" "$GN"
 
-    mini_header "Preflight"
-    final_line "Handoff gates" "$SCRIPT65_HANDOFF_GATES" "$GN"
-    final_line "Env prepared" "$SCRIPT65_ENV_STATUS" "$GN"
-    final_line "Appdata dirs" "$SCRIPT65_N8N_APPDATA" "$GN"
-    final_line "Template synced" "$SCRIPT65_N8N_COMPOSE_TEMPLATE" "$GN"
-    final_line "Static safety" "$SCRIPT65_N8N_STATIC_SAFETY" "$GN"
-    final_line "Compose config" "$SCRIPT65_N8N_COMPOSE_CONFIG" "$GN"
-
-    mini_header "Deployment"
-    final_line "Status" "not-run" "$GN"
+    mini_header "Result"
+    final_line "Status" "template preflight complete" "$GN"
+    final_line "Deployment" "not-run" "$GN"
     final_line "Containers started" "no" "$GN"
     final_line "Authentik writes" "no" "$GN"
 
