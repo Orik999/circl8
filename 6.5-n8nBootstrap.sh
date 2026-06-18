@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.1.1"
+SCRIPT_VERSION="v1.1.2"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="deploy-progress-per-service-readiness-fix"
+SCRIPT_BUILD="image-loop-and-start-progress-fix"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -258,8 +258,8 @@ function ui_display_value() {
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        PASS|pass|completed|present|ready|yes|valid|downloaded|rendered|synced|created|preserved|healthy|running|protected|not-needed|template-preflight-completed|render-only-completed|verify-only-completed|not-run|not\ run) printf '%s' "$GN" ;;
-        PENDING|pending|unknown|skipped|needs-review|will-create|not-selected) printf '%s' "$YW" ;;
+        PASS|pass|completed|present|present-current|present-deferred|current|ready|yes|valid|downloaded|rendered|synced|created|preserved|healthy|running|protected|not-needed|template-preflight-completed|render-only-completed|verify-only-completed|not-run|not\ run) printf '%s' "$GN" ;;
+        PENDING|pending|unknown|present-stale|deferred|sync-needed|skipped|needs-review|will-create|not-selected) printf '%s' "$YW" ;;
         FAIL|FAILED|failed|missing|no|invalid|blocked|unsafe) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
     esac
@@ -390,7 +390,7 @@ function fail_with_report() {
     SCRIPT65_READY_FOR_WORKFLOW_LANE="no"
     SCRIPT65_READY_FOR_SCRIPT66="no"
     write_verify_report || true
-    echo -e "${CROSS} ${RD}${message}${CL}"
+    echo -e "${BFR} ${CROSS} ${RD}${message}${CL}"
     echo -e "  ${BL}Verify log:${CL} ${VERIFY_LOG}"
     if [ -s "${DEPLOY_FAILURE_LOG:-}" ]; then
         echo -e "  ${BL}Failure log:${CL} ${DEPLOY_FAILURE_LOG}"
@@ -841,7 +841,7 @@ function inspect_n8n_template_plan() {
             SCRIPT65_RUNTIME_COMPOSE_STATE="present-current"
             SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="no"
         elif [ -s "$N8N_COMPOSE_FILE" ]; then
-            SCRIPT65_RUNTIME_COMPOSE_STATE="present-different"
+            SCRIPT65_RUNTIME_COMPOSE_STATE="present-stale"
             SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="yes"
         else
             SCRIPT65_RUNTIME_COMPOSE_STATE="missing"
@@ -855,8 +855,8 @@ function inspect_n8n_template_plan() {
     SCRIPT65_TEMPLATE_SOURCE="remote"
     N8N_TEMPLATE_INSPECTION_FILE="not-downloaded"
     if [ -s "$N8N_COMPOSE_FILE" ]; then
-        SCRIPT65_RUNTIME_COMPOSE_STATE="present"
-        SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="unknown"
+        SCRIPT65_RUNTIME_COMPOSE_STATE="present-deferred"
+        SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="deferred"
     else
         SCRIPT65_RUNTIME_COMPOSE_STATE="missing"
         SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED="yes"
@@ -879,8 +879,9 @@ function print_read_only_inspection_plan() {
     esac
 
     case "$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED" in
-        yes) runtime_sync_display="sync needed"; runtime_sync_color="$YW" ;;
+        yes) runtime_sync_display="needs sync"; runtime_sync_color="$YW" ;;
         no) runtime_sync_display="current"; runtime_sync_color="$GN" ;;
+        deferred) runtime_sync_display="deferred"; runtime_sync_color="$YW" ;;
         *) runtime_sync_display="$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED"; runtime_sync_color="$(status_color_for_value "$SCRIPT65_RUNTIME_COMPOSE_SYNC_NEEDED")" ;;
     esac
 
@@ -1044,7 +1045,7 @@ function validate_static_safety() {
     validate_webhook_auth_scope "$compose"
     validate_script_self_safety
     SCRIPT65_N8N_STATIC_SAFETY="pass"
-    if [ "$mode" != "inspection" ]; then
+    if [ "$mode" != "inspection" ] && [ "${SCRIPT65_START_N8N_ACTIVE:-no}" != "yes" ]; then
         aligned_status_line "Private network" "pass" "$GN"
         aligned_status_line "Service networks" "pass" "$GN"
         aligned_status_line "Webhook routing" "pass" "$GN"
@@ -1263,24 +1264,40 @@ function write_completion_marker() {
 
 
 function expected_n8n_services() {
-    printf '%s\\n' \\
-        n8n-postgres \\
-        n8n-redis \\
-        n8n \\
-        n8n-runner \\
-        n8n-worker \\
+    printf '%s\n' \
+        n8n-postgres \
+        n8n-redis \
+        n8n \
+        n8n-runner \
+        n8n-worker \
         n8n-worker-runner
 }
 
 function expected_n8n_images() {
     local image=""
 
-    image="$(env_value N8N_POSTGRES_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_POSTGRES_IMAGE"; printf '%s\\n' "$image"
-    image="$(env_value N8N_REDIS_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_REDIS_IMAGE"; printf '%s\\n' "$image"
-    image="$(env_value N8N_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_IMAGE"; printf '%s\\n' "$image"
-    image="$(env_value N8N_RUNNERS_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_RUNNERS_IMAGE"; printf '%s\\n' "$image"
+    image="$(env_value N8N_POSTGRES_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_POSTGRES_IMAGE"; printf '%s\n' "$image"
+    image="$(env_value N8N_REDIS_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_REDIS_IMAGE"; printf '%s\n' "$image"
+    image="$(env_value N8N_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_IMAGE"; printf '%s\n' "$image"
+    image="$(env_value N8N_RUNNERS_IMAGE || true)"; [ -n "$image" ] || image="$DEFAULT_N8N_RUNNERS_IMAGE"; printf '%s\n' "$image"
 }
 
+function normalized_n8n_images() {
+    expected_n8n_images \
+        | tr -d '\r' \
+        | sed 's/\\n/\n/g' \
+        | awk '{gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if ($0 != "" && !seen[$0]++) print}'
+}
+
+function validate_single_image_reference() {
+    local image="$1"
+    [ -n "$image" ] || return 1
+    case "$image" in
+        *[[:space:]]*) return 1 ;;
+        *:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 function image_display_name() {
     local image="$1"
@@ -1298,18 +1315,25 @@ function sanitize_log_file() {
 }
 
 function prepare_n8n_images() {
-    local image="" label="" out_file="" image_summary=""
+    local image="" label="" out_file="" image_summary="" label_lower=""
     while IFS= read -r image; do
         [ -n "$image" ] || continue
         label="$(image_display_name "$image")"
-        msg_info "Preparing $(printf '%s' "$label" | tr '[:upper:]' '[:lower:]') image"
+        label_lower="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
+
+        if ! validate_single_image_reference "$image"; then
+            printf '%s\n' "Invalid Docker image reference for ${label}: ${image}" >> "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
+            fail_with_report "Invalid Docker image reference for ${label}."
+        fi
+
+        msg_info "Preparing ${label_lower} image"
         if docker image inspect "$image" >/dev/null 2>&1; then
             image_summary="${image_summary}${image}=present "
             msg_ok "${label} IMAGE READY"
             continue
         fi
-        msg_ok "${label} IMAGE NOT PRESENT"
-        msg_info "Downloading/extracting $(printf '%s' "$label" | tr '[:upper:]' '[:lower:]') image"
+
+        msg_info "Downloading/extracting ${label_lower} image"
         out_file="$(mktemp /tmp/circl8-n8n-image-pull.XXXXXX.log)"
         TEMP_FILES+=("$out_file")
         if docker pull "$image" >"$out_file" 2>&1; then
@@ -1317,10 +1341,13 @@ function prepare_n8n_images() {
             image_summary="${image_summary}${image}=pulled "
             msg_ok "${label} IMAGE READY"
         else
-            sanitize_log_file "$out_file" >> "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
-            fail_with_report "Failed to prepare Docker image: ${image}"
+            {
+                printf '%s\n' "Failed image label: ${label}"
+                sanitize_log_file "$out_file"
+            } >> "$DEPLOY_FAILURE_LOG" 2>/dev/null || true
+            fail_with_report "Failed to prepare ${label} image."
         fi
-    done < <(expected_n8n_images | sort -u)
+    done < <(normalized_n8n_images)
     SCRIPT65_IMAGE_STATUS_SUMMARY="${image_summary% }"
 }
 
@@ -1754,8 +1781,8 @@ function run_apply_preflight_setup() {
     aligned_status_line "Status" "written" "$GN"
 
     SCRIPT65_GROUPED_SETUP_ACTIVE="no"
-SCRIPT65_START_N8N_ACTIVE="no"
-SCRIPT65_DEPLOY_IN_PROGRESS="no"
+    SCRIPT65_START_N8N_ACTIVE="no"
+    SCRIPT65_DEPLOY_IN_PROGRESS="no"
     msg_ok "N8N PREFLIGHT SETUP COMPLETE"
     print_summary
 }
