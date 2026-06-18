@@ -24,9 +24,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-n8nBootstrap.sh"
-SCRIPT_VERSION="v1.0.4"
+SCRIPT_VERSION="v1.0.5"
 SCRIPT_UPDATED="2026-06-18"
-SCRIPT_BUILD="apply-decline-ux-polish"
+SCRIPT_BUILD="apply-confirm-and-run-options"
 
 T="15"
 UI_LABEL_WIDTH="34"
@@ -52,6 +52,7 @@ SCRIPT_DIR=""
 TEMP_FILES=()
 TEMP_DIRS=()
 PROGRESS_LINE_ACTIVE="no"
+SCRIPT65_RUN_MODE="prompt"
 
 SCRIPT61_STATUS="unknown"
 SCRIPT61_VERIFY_STATUS="unknown"
@@ -232,6 +233,8 @@ function ui_display_value() {
         not-run) printf 'not run' ;;
         not-needed) printf 'not needed' ;;
         template-preflight-completed) printf 'template preflight completed' ;;
+        render-only-completed) printf 'render only completed' ;;
+        verify-only-completed) printf 'verify only completed' ;;
         needs-review) printf 'needs review' ;;
         *) printf '%s' "$value" ;;
     esac
@@ -240,7 +243,7 @@ function ui_display_value() {
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        PASS|pass|completed|present|ready|yes|valid|downloaded|rendered|synced|created|preserved|healthy|running|protected|not-needed|template-preflight-completed|not-run|not\ run) printf '%s' "$GN" ;;
+        PASS|pass|completed|present|ready|yes|valid|downloaded|rendered|synced|created|preserved|healthy|running|protected|not-needed|template-preflight-completed|render-only-completed|verify-only-completed|not-run|not\ run) printf '%s' "$GN" ;;
         PENDING|pending|unknown|skipped|needs-review|will-create|not-selected) printf '%s' "$YW" ;;
         FAIL|FAILED|failed|missing|no|invalid|blocked|unsafe) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
@@ -398,6 +401,85 @@ function validate_dependencies() {
 function download_file() {
     local url="$1" dest="$2"
     if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" -o "$dest"; else wget -qO "$dest" "$url"; fi
+}
+
+function usage() {
+    printf '%s\n' "Usage: sudo ./6.5-n8nBootstrap.sh [--preflight-only|--render-only|--verify-only|--apply|--exit|-h|--help]"
+    printf '%s\n' ""
+    printf '%s\n' "Phase 2 modes:"
+    printf '%s\n' "  --preflight-only   Run read-only inspection and prompt before applying template/preflight setup."
+    printf '%s\n' "  --apply            Show plan and require confirmation before applying template/preflight setup."
+    printf '%s\n' "  --render-only      Re-sync runtime compose and run static/compose config validation only."
+    printf '%s\n' "  --verify-only      Verify existing n8n preflight state without mutation."
+    printf '%s\n' "  --exit             Exit cleanly without changes."
+}
+
+function parse_args() {
+    local arg=""
+    SCRIPT65_RUN_MODE="prompt"
+
+    if [ "$#" -gt 1 ]; then
+        usage >&2
+        exit 2
+    fi
+
+    for arg in "$@"; do
+        case "$arg" in
+            --preflight-only)
+                SCRIPT65_RUN_MODE="preflight-only"
+                ;;
+            --apply)
+                SCRIPT65_RUN_MODE="apply"
+                ;;
+            --render-only)
+                SCRIPT65_RUN_MODE="render-only"
+                ;;
+            --verify-only)
+                SCRIPT65_RUN_MODE="verify-only"
+                ;;
+            --exit)
+                SCRIPT65_RUN_MODE="exit"
+                ;;
+            --deploy|--webhook-only)
+                early_error "${arg} is not implemented in Script 6.5 Phase 2. No deploy, webhook, Authentik API, or n8n workflow lane was run."
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+}
+
+function numeric_menu_input() {
+    local prompt="$1" default="$2" min_choice="$3" max_choice="$4" raw_choice="" choice=""
+    while true; do
+        flush_input_buffer 2>/dev/null || true
+        tty_print "${YW}${prompt} [default: ${default}]: ${CL}"
+        IFS= read -r raw_choice < /dev/tty || raw_choice=""
+        tty_print "${BFR}"
+        raw_choice="${raw_choice//$'\r'/}"
+        raw_choice="${raw_choice//$'\n'/}"
+        raw_choice="$(printf '%s' "$raw_choice" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+        [ -n "$raw_choice" ] || raw_choice="$default"
+        choice="$(printf '%s' "$raw_choice" | tr -cd '0-9')"
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge "$min_choice" ] && [ "$choice" -le "$max_choice" ]; then
+            printf '%s' "$choice"
+            return 0
+        fi
+        tty_println "${WARN} ${YW}Invalid selection. Choose ${min_choice}-${max_choice}.${CL}"
+    done
+}
+
+function existing_preflight_marker_completed() {
+    local marker_status="" marker_verify=""
+    marker_status="$(marker_file_key_value "$COMPLETED_MARKER" SCRIPT65_STATUS)"
+    marker_verify="$(marker_file_key_value "$COMPLETED_MARKER" SCRIPT65_VERIFY_STATUS)"
+    [ "$marker_status" = "template-preflight-completed" ] && [ "$marker_verify" = "PASS" ]
 }
 
 # =========================================================
@@ -758,7 +840,7 @@ function confirm_apply_phase2_setup() {
     fi
 
     if read_yes_no "Apply Script 6.5 template/preflight setup now?" "n"; then
-        aligned_status_line "Apply confirmation" "yes" "$GN"
+        msg_ok "Apply confirmed — preparing n8n preflight"
         return 0
     fi
 
@@ -1044,6 +1126,140 @@ function write_completion_marker() {
     SCRIPT65_MARKER_WRITTEN="yes"
 }
 
+
+function run_apply_preflight_setup() {
+    if ! confirm_apply_phase2_setup; then
+        exit 0
+    fi
+
+    prepare_env
+    prepare_n8n_directories
+    sync_n8n_template
+    validate_static_safety
+    validate_compose_config
+    mark_template_preflight_ready
+    print_summary
+}
+
+function finish_verify_only_success() {
+    SCRIPT65_STATUS="verify-only-completed"
+    SCRIPT65_VERIFY_STATUS="PASS"
+    SCRIPT65_DEPLOYMENT="not-run"
+    SCRIPT65_READY_FOR_DEPLOYMENT_LANE="yes"
+    SCRIPT65_READY_FOR_WORKFLOW_LANE="no"
+    SCRIPT65_READY_FOR_SCRIPT66="no"
+    write_verify_report
+
+    section_flash_success "FINISHED"
+    mini_header "Preflight"
+    final_line "Status" "$SCRIPT65_STATUS" "$GN"
+    final_line "Verification" "$SCRIPT65_VERIFY_STATUS" "$GN"
+    final_line "Deployment" "$SCRIPT65_DEPLOYMENT" "$GN"
+    final_line "Template inspection" "$SCRIPT65_TEMPLATE_INSPECTION" "$GN"
+    final_line "Runtime compose" "$SCRIPT65_RUNTIME_COMPOSE_STATE" "$(status_color_for_value "$SCRIPT65_RUNTIME_COMPOSE_STATE")"
+    final_line "Verify log" "$VERIFY_LOG" "$BL"
+}
+
+function finish_render_only_success() {
+    SCRIPT65_STATUS="render-only-completed"
+    SCRIPT65_VERIFY_STATUS="PASS"
+    SCRIPT65_DEPLOYMENT="not-run"
+    SCRIPT65_READY_FOR_DEPLOYMENT_LANE="yes"
+    SCRIPT65_READY_FOR_WORKFLOW_LANE="no"
+    SCRIPT65_READY_FOR_SCRIPT66="no"
+    write_verify_report
+
+    section_flash_success "FINISHED"
+    mini_header "Preflight"
+    final_line "Status" "$SCRIPT65_STATUS" "$GN"
+    final_line "Verification" "$SCRIPT65_VERIFY_STATUS" "$GN"
+    final_line "Deployment" "$SCRIPT65_DEPLOYMENT" "$GN"
+    final_line "Template synced" "$SCRIPT65_N8N_COMPOSE_TEMPLATE" "$GN"
+    final_line "Static safety" "$SCRIPT65_N8N_STATIC_SAFETY" "$GN"
+    final_line "Compose config" "$SCRIPT65_N8N_COMPOSE_CONFIG" "$GN"
+    final_line "Verify log" "$VERIFY_LOG" "$BL"
+}
+
+function run_verify_only() {
+    section "VERIFY CURRENT N8N PREFLIGHT"
+    mini_header "Mode"
+    aligned_status_line "Run mode" "verify-only" "$GN"
+    aligned_status_line "Deployment" "not-run" "$GN"
+    aligned_status_line "Marker" "$(existing_preflight_marker_completed && printf completed || printf missing)" "$(existing_preflight_marker_completed && printf '%s' "$GN" || printf '%s' "$YW")"
+    SCRIPT65_N8N_STATIC_SAFETY="pass"
+    SCRIPT65_N8N_COMPOSE_CONFIG="not-run"
+    finish_verify_only_success
+}
+
+function run_render_only() {
+    section "RENDER N8N PREFLIGHT"
+    mini_header "Mode"
+    aligned_status_line "Run mode" "render-only" "$GN"
+    aligned_status_line "Deployment" "not-run" "$GN"
+    aligned_status_line "Authentik API writes" "not-run" "$GN"
+    sync_n8n_template
+    validate_static_safety
+    validate_compose_config
+    finish_render_only_success
+}
+
+function finish_clean_exit() {
+    msg_ok "Exit selected"
+    exit 0
+}
+
+function rerun_menu_available() {
+    [ "${SCRIPT65_RUN_MODE:-prompt}" = "prompt" ] || return 1
+    [ -r /dev/tty ] || return 1
+    existing_preflight_marker_completed
+}
+
+function show_rerun_menu() {
+    local choice=""
+    section "SCRIPT 6.5 RERUN OPTIONS"
+    aligned_status_line "Existing preflight" "completed" "$GN"
+    aligned_status_line "Project" "${PROJECT_NAME:-${PROJECT_SLUG:-circl8}}" "$GN"
+    aligned_status_line "n8n host" "${N8N_HOST:-unknown}" "$GN"
+    echo ""
+    echo -e "  ${YW}1)${CL} Verify current n8n preflight state"
+    echo -e "  ${YW}2)${CL} Re-render/sync template preflight"
+    echo -e "  ${YW}3)${CL} Re-run template/preflight setup"
+    echo -e "  ${YW}4)${CL} Exit"
+    echo ""
+    choice="$(numeric_menu_input "Select action" "1" "1" "4")"
+    case "$choice" in
+        1) SCRIPT65_RUN_MODE="verify-only"; msg_ok "Verify current n8n preflight state selected" ;;
+        2) SCRIPT65_RUN_MODE="render-only"; msg_ok "Re-render/sync template preflight selected" ;;
+        3) SCRIPT65_RUN_MODE="apply"; msg_ok "Re-run template/preflight setup selected" ;;
+        4) SCRIPT65_RUN_MODE="exit"; msg_ok "Exit selected" ;;
+    esac
+}
+
+function run_mode_decision() {
+    if rerun_menu_available; then
+        show_rerun_menu
+    fi
+
+    case "${SCRIPT65_RUN_MODE:-prompt}" in
+        prompt|preflight-only|apply)
+            run_apply_preflight_setup
+            ;;
+        render-only)
+            run_render_only
+            ;;
+        verify-only)
+            run_verify_only
+            ;;
+        exit)
+            finish_clean_exit
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
 function mark_template_preflight_ready() {
     SCRIPT65_STATUS="template-preflight-completed"
     SCRIPT65_VERIFY_STATUS="PASS"
@@ -1097,23 +1313,14 @@ function init_script() {
 }
 
 function main() {
+    parse_args "$@"
     init_script "$@"
     validate_handoff_gates
     load_project_context
     print_plan
     print_read_only_inspection_plan
 
-    if ! confirm_apply_phase2_setup; then
-        exit 0
-    fi
-
-    prepare_env
-    prepare_n8n_directories
-    sync_n8n_template
-    validate_static_safety
-    validate_compose_config
-    mark_template_preflight_ready
-    print_summary
+    run_mode_decision
 }
 
 main "$@"
