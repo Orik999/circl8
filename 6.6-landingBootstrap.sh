@@ -6,7 +6,7 @@ shopt -s inherit_errexit nullglob
 #  Project Circl8 - Script 6.6 Landing Bootstrap
 # =========================================================
 # Script 6.6 prepares the public Astro landing-site bootstrap lane.
-# This v1.1.0 phase keeps the preflight preview, then can run a confirmed
+# This v1.1.1 phase keeps the preflight preview, then can run a confirmed
 # setup/source-copy workflow: create landing directories, sync/validate the
 # landing compose template, and pause for private Astro source copy.
 # It does not build Astro, publish dist, start containers, write .env values,
@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.6-landingBootstrap.sh"
-SCRIPT_VERSION="v1.1.0"
+SCRIPT_VERSION="v1.1.1"
 SCRIPT_UPDATED="2026-06-19"
-SCRIPT_BUILD="landing-setup-start-source-copy"
+SCRIPT_BUILD="setup-flow-ux-alignment"
 
 UI_LABEL_WIDTH="34"
 LOG_FILE="/var/log/circl8-landing.log"
@@ -237,7 +237,7 @@ function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
         PASS|pass|completed|present|present-current|current|ready|yes|valid|detected|public|absent|not-needed|not-run|not\ run|deferred|preflight|running) printf '%s' "$GN" ;;
-        WARN|warn|warning|unknown|present-stale|stopped|exited|skipped|needs-review|missing-source|missing-runtime|missing-template|partial|incomplete|planned) printf '%s' "$YW" ;;
+        WARN|warn|warning|unknown|present-stale|stopped|exited|skipped|needs-review|missing-source|missing-runtime|missing-template|partial|setup-partial|source-copy-skipped|setup-cancelled|incomplete|planned) printf '%s' "$YW" ;;
         FAIL|FAILED|failed|missing|no|invalid|blocked|unsafe) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
     esac
@@ -304,7 +304,10 @@ function prompt_source_copy_action() {
     fi
 
     while true; do
-        tty_print "${YW}Press Enter after copy is complete to check source, s = skip setup cleanly, q = quit: ${CL}"
+        tty_println "${YW}Press Enter after copy is complete to check source.${CL}"
+        tty_println "${YW}s = skip source copy${CL}"
+        tty_println "${YW}q = quit${CL}"
+        tty_print "${YW}> ${CL}"
         IFS= read -r answer < /dev/tty || answer="s"
         answer="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
         case "$answer" in
@@ -919,19 +922,13 @@ function print_plan() {
 }
 
 function print_copy_source_plan() {
-    echo -e "${YW}The private Astro landing source stays local/private and is not embedded in this script.${CL}"
-    echo ""
-    aligned_status_line "Source path" "$LANDING_SOURCE_PATH" "$BL"
+    echo -e "${YW}Private source copy is shown only after setup is confirmed.${CL}"
     aligned_status_line "Copy target" "$VM_COPY_TARGET" "$(status_color_for_value "$([ "$VM_COPY_TARGET" = "<vm-user>@<vm-ip>" ] && printf deferred || printf detected)")"
-    echo ""
-    echo -e "${BL}Copy example:${CL}"
-    echo -e "  ${GN}scp -r /path/to/circl8_astro/* ${VM_COPY_TARGET}:${LANDING_SOURCE_PATH}/${CL}"
-    echo ""
-    echo -e "${YW}If you use an SSH alias, you may replace the detected target with that alias.${CL}"
+    aligned_status_line "Setup action" "requires confirmation" "$YW"
 }
 
 function print_safety_summary() {
-    echo -e "${YW}This phase made no deploy, build, copy, directory, container, or .env changes.${CL}"
+    echo -e "${YW}Setup requires confirmation. No build, deploy, container lifecycle, or .env changes run in this phase.${CL}"
     aligned_status_line "Final marker" "not written" "$GN"
     aligned_status_line "Authentik writes" "no" "$GN"
 }
@@ -1045,7 +1042,7 @@ function print_active_source_copy_instructions() {
     aligned_status_line "Source staging path" "$LANDING_SOURCE_PATH" "$BL"
     aligned_status_line "Detected copy target" "$VM_COPY_TARGET" "$(status_color_for_value "$([ "$VM_COPY_TARGET" = "<vm-user>@<vm-ip>" ] && printf deferred || printf detected)")"
     echo ""
-    echo -e "${BL}SCP command:${CL}"
+    echo -e "${BL}Copy private Astro source now:${CL}"
     echo -e "  ${GN}scp -r /path/to/circl8_astro/* ${VM_COPY_TARGET}:${LANDING_SOURCE_PATH}/${CL}"
     echo ""
     echo -e "${YW}If you use an SSH alias, you may replace the detected target with that alias.${CL}"
@@ -1095,19 +1092,28 @@ function wait_for_landing_source_copy() {
     while true; do
         action="$(prompt_source_copy_action)"
         case "$action" in
-            skip|quit)
+            skip)
                 SCRIPT66_ASTRO_SOURCE_STATUS="skipped"
                 SCRIPT66_READY_FOR_BUILD_PHASE="no"
                 SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
-                msg_ok "Landing source copy skipped"
+                msg_ok "Source copy skipped — setup is partial"
                 return 1
+                ;;
+            quit)
+                SCRIPT66_ASTRO_SOURCE_STATUS="skipped"
+                SCRIPT66_STATUS="setup-cancelled"
+                SCRIPT66_VERIFY_STATUS="WARN"
+                SCRIPT66_READY_FOR_BUILD_PHASE="no"
+                SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+                write_verify_report || true
+                msg_ok "Landing setup cancelled — final marker not written"
+                exit 0
                 ;;
         esac
 
-        msg_info "Checking landing source"
+        msg_info "Checking landing source files"
         if missing_items="$(validate_landing_source_ready)"; then
-            msg_ok "Landing source valid"
-            echo -e " ${CM} ${GN}package.json found${CL}"
+            msg_ok "package.json found"
             echo -e " ${CM} ${GN}Astro config found${CL}"
             echo -e " ${CM} ${GN}build script found${CL}"
             echo -e " ${CM} ${GN}Landing source valid${CL}"
@@ -1144,7 +1150,7 @@ function run_landing_setup_start() {
         SCRIPT66_READY_FOR_BUILD_PHASE="yes"
         SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
     else
-        SCRIPT66_STATUS="setup-skipped"
+        SCRIPT66_STATUS="setup-partial"
         SCRIPT66_VERIFY_STATUS="WARN"
         SCRIPT66_READY_FOR_BUILD_PHASE="no"
         SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
@@ -1162,12 +1168,18 @@ function decide_preflight_result() {
         return 0
     fi
 
+    if [ "${SCRIPT66_STATUS:-preflight}" = "setup-partial" ] || [ "${SCRIPT66_STATUS:-preflight}" = "source-copy-skipped" ]; then
+        SCRIPT66_VERIFY_STATUS="WARN"
+        SCRIPT66_DEPLOYMENT="not-run"
+        SCRIPT66_HEALTH_STATUS="not-run"
+        SCRIPT66_AUTHENTIK_WRITES="no"
+        SCRIPT66_READY_FOR_BUILD_PHASE="no"
+        SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+        return 0
+    fi
+
     if [ "${SCRIPT66_STATUS:-preflight}" = "setup-skipped" ]; then
-        if [ "${SCRIPT66_SETUP_STARTED:-no}" = "yes" ]; then
-            SCRIPT66_VERIFY_STATUS="WARN"
-        else
-            SCRIPT66_VERIFY_STATUS="PASS"
-        fi
+        SCRIPT66_VERIFY_STATUS="PASS"
         SCRIPT66_DEPLOYMENT="not-run"
         SCRIPT66_HEALTH_STATUS="not-run"
         SCRIPT66_AUTHENTIK_WRITES="no"
@@ -1294,8 +1306,11 @@ function main() {
     else
         SCRIPT66_SETUP_STARTED="no"
         SCRIPT66_STATUS="setup-skipped"
+        SCRIPT66_VERIFY_STATUS="PASS"
         SCRIPT66_READY_FOR_BUILD_PHASE="no"
         SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+        write_verify_report
+        exit 0
     fi
 
     decide_preflight_result
