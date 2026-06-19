@@ -6,7 +6,7 @@ shopt -s inherit_errexit nullglob
 #  Project Circl8 - Script 6.6 Landing Bootstrap
 # =========================================================
 # Script 6.6 prepares the public Astro landing-site bootstrap lane.
-# This v1.0.0 phase is read-only/preflight only: it inspects context,
+# This v1.0.2 phase is read-only/preflight only: it inspects context,
 # source/appdata/template/runtime state, and writes a verification report.
 # It does not build, copy, deploy, create directories, write .env values,
 # or write the final landing completion marker.
@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.6-landingBootstrap.sh"
-SCRIPT_VERSION="v1.0.1"
+SCRIPT_VERSION="v1.0.2"
 SCRIPT_UPDATED="2026-06-19"
-SCRIPT_BUILD="process-substitution-sudo-handoff-fix"
+SCRIPT_BUILD="preflight-ui-context-polish"
 
 UI_LABEL_WIDTH="34"
 LOG_FILE="/var/log/circl8-landing.log"
@@ -75,6 +75,13 @@ LANDING_REPO_COMPOSE="docker/08-landing-compose.yml"
 LANDING_RUNTIME_COMPOSE=""
 LANDING_TEMPLATE_URL=""
 LANDING_CONTAINER_NAME="circl8-landing"
+LANDING_IMAGE_ENV_STATUS="unknown"
+LANDING_IMAGE_VALUE=""
+LANDING_IMAGE_FALLBACK="nginx:alpine"
+LANDING_EFFECTIVE_IMAGE="nginx:alpine"
+VM_COPY_USER=""
+VM_COPY_HOST=""
+VM_COPY_TARGET="<vm-user>@<vm-ip>"
 
 SCRIPT66_STATUS="preflight"
 SCRIPT66_VERIFY_STATUS="PENDING"
@@ -184,14 +191,14 @@ function elevate_to_root_if_needed() {
 function header_info() {
 cat <<'BANNER'
 
-   ██████╗    ██████╗       ██╗      █████╗ ███╗   ██╗██████╗ ██╗███╗   ██╗ ██████╗
-  ██╔════╝    ██╔══██╗      ██║     ██╔══██╗████╗  ██║██╔══██╗██║████╗  ██║██╔════╝
-  ███████╗    ██████╔╝      ██║     ███████║██╔██╗ ██║██║  ██║██║██╔██╗ ██║██║  ███╗
-  ██╔═══██╗   ██╔══██╗      ██║     ██╔══██║██║╚██╗██║██║  ██║██║██║╚██╗██║██║   ██║
-  ╚██████╔╝██╗██████╔╝      ███████╗██║  ██║██║ ╚████║██████╔╝██║██║ ╚████║╚██████╔╝
-   ╚═════╝ ╚═╝╚═════╝       ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═════╝ ╚═╝╚═╝  ╚═══╝ ╚═════╝
+   ██████╗  ██████╗       ██╗      █████╗ ███╗   ██╗██████╗ ██╗███╗   ██╗ ██████╗
+   ╚════██╗██╔════╝       ██║     ██╔══██╗████╗  ██║██╔══██╗██║████╗  ██║██╔════╝
+    █████╔╝███████╗       ██║     ███████║██╔██╗ ██║██║  ██║██║██╔██╗ ██║██║  ███╗
+   ██╔═══╝ ██╔═══██╗      ██║     ██╔══██║██║╚██╗██║██║  ██║██║██║╚██╗██║██║   ██║
+   ███████╗╚██████╔╝      ███████╗██║  ██║██║ ╚████║██████╔╝██║██║ ╚████║╚██████╔╝
+   ╚══════╝ ╚═════╝       ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═════╝ ╚═╝╚═╝  ╚═══╝ ╚═════╝
 
-                              6.6 landing
+                              6.6 Landing
 BANNER
 }
 
@@ -224,8 +231,8 @@ function ui_display_value() {
 function status_color_for_value() {
     local value="${1:-unknown}"
     case "$value" in
-        PASS|pass|completed|present|present-current|current|ready|yes|valid|detected|public|absent|not-needed|not-run|not\ run|deferred|preflight) printf '%s' "$GN" ;;
-        WARN|warn|warning|unknown|present-stale|skipped|needs-review|missing-source|missing-runtime|missing-template|partial|incomplete|planned) printf '%s' "$YW" ;;
+        PASS|pass|completed|present|present-current|current|ready|yes|valid|detected|public|absent|not-needed|not-run|not\ run|deferred|preflight|running) printf '%s' "$GN" ;;
+        WARN|warn|warning|unknown|present-stale|stopped|exited|skipped|needs-review|missing-source|missing-runtime|missing-template|partial|incomplete|planned) printf '%s' "$YW" ;;
         FAIL|FAILED|failed|missing|no|invalid|blocked|unsafe) printf '%s' "$RD" ;;
         *) printf '%s' "$GN" ;;
     esac
@@ -308,7 +315,7 @@ function detect_docker_access() {
         DOCKER_AVAILABLE="no"
         SCRIPT66_CONTAINERS="not-run"
         msg_warn "DOCKER COMMAND NOT FOUND; CONTAINER INSPECTION DEFERRED"
-        aligned_status_line "Docker mode" "deferred" "$YW"
+        aligned_status_line "Docker" "deferred" "$YW"
         return 0
     fi
 
@@ -316,7 +323,7 @@ function detect_docker_access() {
         DOCKER_AVAILABLE="yes"
         DOCKER_NEEDS_SUDO="no"
         msg_ok "DOCKER ACCESS CONFIRMED"
-        aligned_status_line "Docker mode" "current user" "$GN"
+        aligned_status_line "Docker" "current user" "$GN"
         return 0
     fi
 
@@ -324,14 +331,14 @@ function detect_docker_access() {
         DOCKER_AVAILABLE="yes"
         DOCKER_NEEDS_SUDO="yes"
         msg_ok "DOCKER ACCESS CONFIRMED WITH SUDO"
-        aligned_status_line "Docker mode" "sudo fallback" "$GN"
+        aligned_status_line "Docker" "sudo fallback" "$GN"
         return 0
     fi
 
     DOCKER_AVAILABLE="no"
     SCRIPT66_CONTAINERS="not-run"
     msg_warn "DOCKER DAEMON NOT REACHABLE; CONTAINER INSPECTION DEFERRED"
-    aligned_status_line "Docker mode" "deferred" "$YW"
+    aligned_status_line "Docker" "deferred" "$YW"
 }
 
 function docker_read() {
@@ -374,7 +381,110 @@ function host_from_url() {
 }
 
 function validate_domain() { [[ "${1:-}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]; }
-function https_url_for_host() { printf 'https://%s' "$(host_from_url "$1")"; }
+function first_nonempty_marker_value() {
+    local key="" value=""
+    for key in "$@"; do
+        value="$(marker_file_key_value "$SCRIPT61_MARKER" "$key")"
+        [ -n "$value" ] && { printf '%s' "$value"; return 0; }
+        value="$(marker_file_key_value "$SCRIPT64_MARKER" "$key")"
+        [ -n "$value" ] && { printf '%s' "$value"; return 0; }
+        value="$(marker_file_key_value "$SCRIPT65_MARKER" "$key")"
+        [ -n "$value" ] && { printf '%s' "$value"; return 0; }
+    done
+    return 1
+}
+
+function detect_vm_copy_user() {
+    local user=""
+    user="${DOCKER_USER:-}"
+    [ -n "$user" ] || user="$(first_nonempty_marker_value SCRIPT61_DOCKER_USER SCRIPT64_DOCKER_USER SCRIPT65_DOCKER_USER || true)"
+    [ -n "$user" ] || user="${SUDO_USER:-}"
+    [ -n "$user" ] || user="$(id -un 2>/dev/null || true)"
+    if [ "$user" = "root" ] && [ -n "${SUDO_USER:-}" ]; then
+        user="$SUDO_USER"
+    fi
+    printf '%s' "$user"
+}
+
+function valid_copy_host() {
+    local host="${1:-}"
+    [ -n "$host" ] || return 1
+    [[ "$host" =~ ^[A-Za-z0-9._:-]+$ ]]
+}
+
+function detect_vm_copy_host() {
+    local value="" key=""
+
+    for key in VM_IP VM_HOST SERVER_IP SERVER_HOST HOST_IP SSH_HOST; do
+        value="$(env_value "$key")"
+        value="$(host_from_url "$value")"
+        if valid_copy_host "$value"; then
+            printf '%s' "$value"
+            return 0
+        fi
+    done
+
+    value="$(first_nonempty_marker_value SCRIPT61_VM_IP SCRIPT61_HOST_IP SCRIPT64_VM_IP SCRIPT65_VM_IP SERVER_IP HOST_IP || true)"
+    value="$(host_from_url "$value")"
+    if valid_copy_host "$value"; then
+        printf '%s' "$value"
+        return 0
+    fi
+
+    if command -v ip >/dev/null 2>&1; then
+        value="$(ip -o -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' || true)"
+        if valid_copy_host "$value"; then
+            printf '%s' "$value"
+            return 0
+        fi
+        value="$(ip -o -4 addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}' || true)"
+        if valid_copy_host "$value"; then
+            printf '%s' "$value"
+            return 0
+        fi
+    fi
+
+    if command -v hostname >/dev/null 2>&1; then
+        value="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+        if valid_copy_host "$value"; then
+            printf '%s' "$value"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+function detect_landing_copy_target() {
+    VM_COPY_USER="$(detect_vm_copy_user)"
+    VM_COPY_HOST="$(detect_vm_copy_host || true)"
+
+    if [ -n "$VM_COPY_USER" ] && [ -n "$VM_COPY_HOST" ]; then
+        VM_COPY_TARGET="${VM_COPY_USER}@${VM_COPY_HOST}"
+    else
+        VM_COPY_TARGET="<vm-user>@<vm-ip>"
+    fi
+}
+
+function detect_landing_image_context() {
+    local image_value="" template_path="" template_image_line="" fallback=""
+
+    image_value="$(env_value LANDING_IMAGE)"
+    if [ -n "$image_value" ]; then
+        LANDING_IMAGE_ENV_STATUS="present"
+        LANDING_IMAGE_VALUE="$image_value"
+        LANDING_EFFECTIVE_IMAGE="$image_value"
+        return 0
+    fi
+
+    LANDING_IMAGE_ENV_STATUS="absent"
+    if template_path="$(landing_template_path 2>/dev/null)"; then
+        template_image_line="$(grep -E '^[[:space:]]*image:[[:space:]]*[$][{]LANDING_IMAGE:-' "$template_path" | head -n1 || true)"
+        fallback="$(printf '%s' "$template_image_line" | sed -n 's/.*[$][{]LANDING_IMAGE:-\([^}]*\)}.*/\1/p')"
+        [ -n "$fallback" ] && LANDING_IMAGE_FALLBACK="$fallback"
+    fi
+    LANDING_EFFECTIVE_IMAGE="$LANDING_IMAGE_FALLBACK"
+}
 
 # =========================================================
 #  PREFLIGHT GATES / PROJECT CONTEXT
@@ -434,27 +544,16 @@ function load_project_context() {
     LANDING_BACKUP_DIR="${DOCKER_DIR}/backups/landing"
     LANDING_RUNTIME_COMPOSE="${COMPOSE_DIR}/08-landing-compose.yml"
     LANDING_TEMPLATE_URL="${RAW_BASE_DEFAULT%/}/docker/08-landing-compose.yml"
+
+    detect_landing_image_context
+    detect_landing_copy_target
 }
 
 function print_handoff_summary() {
-    section "SCRIPT 6.6 HANDOFF"
-    mini_header "Previous scripts"
-    aligned_status_line "Script 6.4 status" "${SCRIPT64_STATUS:-missing}" "$(status_color_for_value "${SCRIPT64_STATUS:-missing}")"
-    aligned_status_line "Script 6.4 verify" "${SCRIPT64_VERIFY_STATUS:-missing}" "$(status_color_for_value "${SCRIPT64_VERIFY_STATUS:-missing}")"
-    aligned_status_line "Script 6.5 status" "${SCRIPT65_STATUS:-missing}" "$(status_color_for_value "${SCRIPT65_STATUS:-missing}")"
-    aligned_status_line "Script 6.5 verify" "${SCRIPT65_VERIFY_STATUS:-missing}" "$(status_color_for_value "${SCRIPT65_VERIFY_STATUS:-missing}")"
-    aligned_status_line "Ready for Script 6.6" "${SCRIPT65_READY_FOR_SCRIPT66:-missing}" "$(status_color_for_value "${SCRIPT65_READY_FOR_SCRIPT66:-missing}")"
-
-    mini_header "Project"
-    aligned_status_line "Base domain" "$DOMAIN_VALUE" "$GN"
-    aligned_status_line "Landing host" "$LANDING_HOST" "$GN"
-    aligned_status_line "Landing www host" "$LANDING_WWW_HOST" "$GN"
-    aligned_status_line "Landing URL" "$LANDING_URL" "$GN"
-
-    mini_header "Scope"
-    aligned_status_line "Deployment" "not-run" "$GN"
-    aligned_status_line "Build" "not-run" "$GN"
-    aligned_status_line "Authentik writes" "no" "$GN"
+    section "HANDOFF"
+    aligned_status_line "Script 6.4" "$SCRIPT64_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT64_VERIFY_STATUS")"
+    aligned_status_line "Script 6.5" "$SCRIPT65_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT65_VERIFY_STATUS")"
+    aligned_status_line "Ready" "$SCRIPT65_READY_FOR_SCRIPT66" "$(status_color_for_value "$SCRIPT65_READY_FOR_SCRIPT66")"
     msg_ok "SCRIPT 6.6 HANDOFF PASSED"
 }
 
@@ -600,31 +699,63 @@ function inspect_landing_container() {
     fi
 }
 
+function appdata_display_status() {
+    if [ "$SCRIPT66_APPDATA_STATUS" = "present" ] && [ "$SCRIPT66_APPDATA_INDEX_STATUS" = "present" ]; then
+        printf 'present'
+    elif [ "$SCRIPT66_APPDATA_STATUS" = "present" ]; then
+        printf 'present-no-index'
+    else
+        printf 'missing'
+    fi
+}
+
+function container_display_status() {
+    case "$SCRIPT66_CONTAINER_STATUS:$SCRIPT66_CONTAINER_RUNNING" in
+        missing:*) printf 'missing' ;;
+        deferred:*) printf 'deferred' ;;
+        present:running) printf 'running' ;;
+        present:*) printf 'stopped' ;;
+        *) printf '%s' "$SCRIPT66_CONTAINER_STATUS" ;;
+    esac
+}
+
+function template_display_status() {
+    case "$SCRIPT66_TEMPLATE_SOURCE:$SCRIPT66_TEMPLATE_INSPECTION" in
+        remote-planned:*) printf 'remote planned' ;;
+        local\ repo:*) printf 'local' ;;
+        *:deferred) printf 'remote planned' ;;
+        *) printf '%s' "$SCRIPT66_TEMPLATE_SOURCE" ;;
+    esac
+}
+
+function template_checks_display_status() {
+    case "$SCRIPT66_TEMPLATE_INSPECTION" in
+        pass) printf 'PASS' ;;
+        warn) printf 'WARN' ;;
+        failed) printf 'FAILED' ;;
+        deferred) printf 'deferred' ;;
+        *) printf '%s' "$SCRIPT66_TEMPLATE_INSPECTION" ;;
+    esac
+}
+
 function print_landing_state_inspection() {
-    section "READ-ONLY LANDING INSPECTION"
+    section "CURRENT STATE"
     inspect_landing_source
     inspect_landing_appdata
     inspect_runtime_compose
     inspect_landing_container
+    inspect_landing_template
 
-    mini_header "Source"
-    aligned_status_line "Source path" "$LANDING_SOURCE_PATH" "$BL"
-    aligned_status_line "Astro source" "$SCRIPT66_ASTRO_SOURCE_STATUS" "$(status_color_for_value "$SCRIPT66_ASTRO_SOURCE_STATUS")"
-    aligned_status_line "package.json" "$SCRIPT66_ASTRO_PACKAGE_JSON" "$(status_color_for_value "$SCRIPT66_ASTRO_PACKAGE_JSON")"
-    aligned_status_line "astro config" "$SCRIPT66_ASTRO_CONFIG" "$(status_color_for_value "$SCRIPT66_ASTRO_CONFIG")"
-    aligned_status_line "build script" "$SCRIPT66_ASTRO_BUILD_SCRIPT" "$(status_color_for_value "$SCRIPT66_ASTRO_BUILD_SCRIPT")"
-    aligned_status_line "source dist" "$SCRIPT66_ASTRO_DIST_STATUS" "$(status_color_for_value "$SCRIPT66_ASTRO_DIST_STATUS")"
-
-    mini_header "Runtime"
-    aligned_status_line "Appdata path" "$LANDING_APPDATA_PATH" "$BL"
-    aligned_status_line "Appdata" "$SCRIPT66_APPDATA_STATUS" "$(status_color_for_value "$SCRIPT66_APPDATA_STATUS")"
-    aligned_status_line "index.html" "$SCRIPT66_APPDATA_INDEX_STATUS" "$(status_color_for_value "$SCRIPT66_APPDATA_INDEX_STATUS")"
+    aligned_status_line "Source" "$SCRIPT66_ASTRO_SOURCE_STATUS" "$(status_color_for_value "$SCRIPT66_ASTRO_SOURCE_STATUS")"
+    if [ "$SCRIPT66_ASTRO_SOURCE_STATUS" = "incomplete" ]; then
+        aligned_status_line "Source details" "package/config/build missing" "$YW"
+    fi
+    aligned_status_line "Static web root" "$(appdata_display_status)" "$(status_color_for_value "$(appdata_display_status)")"
     aligned_status_line "Runtime compose" "$SCRIPT66_RUNTIME_COMPOSE_STATE" "$(status_color_for_value "$SCRIPT66_RUNTIME_COMPOSE_STATE")"
-    aligned_status_line "Runtime sync" "$SCRIPT66_RUNTIME_COMPOSE_SYNC_NEEDED" "$(status_color_for_value "$SCRIPT66_RUNTIME_COMPOSE_SYNC_NEEDED")"
-    aligned_status_line "Container" "$SCRIPT66_CONTAINER_STATUS" "$(status_color_for_value "$SCRIPT66_CONTAINER_STATUS")"
-    aligned_status_line "Container state" "$SCRIPT66_CONTAINER_RUNNING" "$(status_color_for_value "$SCRIPT66_CONTAINER_RUNNING")"
-    aligned_status_line "Route labels" "$SCRIPT66_ROUTE_LABELS" "$(status_color_for_value "$SCRIPT66_ROUTE_LABELS")"
-    aligned_status_line "Public HTTP route" "$SCRIPT66_ROUTE_STATUS" "$YW"
+    aligned_status_line "Template" "$(template_display_status)" "$(status_color_for_value "$SCRIPT66_TEMPLATE_INSPECTION")"
+    aligned_status_line "Checks" "$(template_checks_display_status)" "$(status_color_for_value "$SCRIPT66_TEMPLATE_INSPECTION")"
+    aligned_status_line "Container" "$(container_display_status)" "$(status_color_for_value "$(container_display_status)")"
+    aligned_status_line "Route" "$SCRIPT66_ROUTE_STATUS" "$YW"
 }
 
 # =========================================================
@@ -648,7 +779,7 @@ function inspect_landing_template() {
     if ! template_path="$(landing_template_path)"; then
         SCRIPT66_TEMPLATE_SOURCE="remote-planned"
         SCRIPT66_TEMPLATE_INSPECTION="deferred"
-        SCRIPT66_TEMPLATE_CHECK_SUMMARY="template not local; planned URL ${LANDING_TEMPLATE_URL}"
+        SCRIPT66_TEMPLATE_CHECK_SUMMARY="deferred"
         return 0
     fi
 
@@ -688,73 +819,47 @@ function inspect_landing_template() {
         SCRIPT66_TEMPLATE_CHECK_SUMMARY="${warnings[*]}"
     else
         SCRIPT66_TEMPLATE_INSPECTION="pass"
-        SCRIPT66_TEMPLATE_CHECK_SUMMARY="all expected properties present"
+        SCRIPT66_TEMPLATE_CHECK_SUMMARY="PASS"
     fi
 }
 
 function print_template_inspection() {
-    section "COMPOSE TEMPLATE INSPECTION"
-    inspect_landing_template
-    aligned_status_line "Repo template" "$LANDING_REPO_COMPOSE" "$BL"
-    aligned_status_line "Template URL" "$LANDING_TEMPLATE_URL" "$BL"
-    aligned_status_line "Template source" "$SCRIPT66_TEMPLATE_SOURCE" "$(status_color_for_value "$SCRIPT66_TEMPLATE_SOURCE")"
-    aligned_status_line "Template inspection" "$SCRIPT66_TEMPLATE_INSPECTION" "$(status_color_for_value "$SCRIPT66_TEMPLATE_INSPECTION")"
-    aligned_status_line "Static checks" "$SCRIPT66_TEMPLATE_CHECK_SUMMARY" "$(status_color_for_value "$SCRIPT66_TEMPLATE_INSPECTION")"
+    # Template status is intentionally shown in CURRENT STATE to keep Phase 2 UI compact.
+    :
 }
 
 # =========================================================
 #  PLAN / SAFETY / REPORT
 # =========================================================
 function print_plan() {
-    section "LANDING PREFLIGHT PLAN"
-    mini_header "Target paths"
-    aligned_status_line "Script" "$SCRIPT_SOURCE" "$GN"
-    aligned_status_line "Repo compose" "$LANDING_REPO_COMPOSE" "$GN"
-    aligned_status_line "Runtime compose" "$LANDING_RUNTIME_COMPOSE" "$BL"
-    aligned_status_line "Source staging" "$LANDING_SOURCE_PATH" "$BL"
-    aligned_status_line "Static web root" "$LANDING_APPDATA_PATH" "$BL"
-    aligned_status_line "Backup path" "$LANDING_BACKUP_DIR" "$BL"
-
-    mini_header "Public route"
-    aligned_status_line "Landing host" "$LANDING_HOST" "$GN"
-    aligned_status_line "Landing www host" "$LANDING_WWW_HOST" "$GN"
-    aligned_status_line "Primary URL" "$LANDING_URL" "$GN"
+    section "LANDING TARGET"
+    aligned_status_line "Domain" "$DOMAIN_VALUE" "$GN"
+    aligned_status_line "Public URL" "$LANDING_URL" "$GN"
     aligned_status_line "WWW URL" "$LANDING_WWW_URL" "$GN"
-    aligned_status_line "Middleware" "chain-secure public-safe" "$GN"
-    aligned_status_line "Forward auth" "absent" "$GN"
-
-    mini_header "Phase 2 action"
-    aligned_status_line "Build Astro" "not-run" "$GN"
-    aligned_status_line "Copy dist" "not-run" "$GN"
-    aligned_status_line "Deployment" "not-run" "$GN"
-    aligned_status_line "Marker" "not-run" "$GN"
+    aligned_status_line "Middleware" "chain-secure@file" "$GN"
+    aligned_status_line "Auth" "public / no forward-auth" "$GN"
+    aligned_status_line "Image env" "$LANDING_IMAGE_ENV_STATUS" "$(status_color_for_value "$LANDING_IMAGE_ENV_STATUS")"
+    aligned_status_line "Effective image" "$LANDING_EFFECTIVE_IMAGE" "$GN"
 }
 
 function print_copy_source_plan() {
     section "COPY SOURCE PLAN"
-    echo -e "${YW}The private Astro landing source is not committed to GitHub and is not embedded in this script.${CL}"
-    echo -e "${YW}A future phase will pause for manual source copy, then re-check the VM staging path.${CL}"
+    echo -e "${YW}The private Astro landing source stays local/private and is not embedded in this script.${CL}"
     echo ""
-    aligned_status_line "Future source path" "$LANDING_SOURCE_PATH" "$BL"
-    aligned_status_line "Private archive" "manual/local only" "$GN"
-    aligned_status_line "Repo output" "no Astro source" "$GN"
+    aligned_status_line "Source path" "$LANDING_SOURCE_PATH" "$BL"
+    aligned_status_line "Copy target" "$VM_COPY_TARGET" "$(status_color_for_value "$([ "$VM_COPY_TARGET" = "<vm-user>@<vm-ip>" ] && printf deferred || printf detected)")"
     echo ""
-    echo -e "${BL}Future generic copy example:${CL}"
-    echo -e "  ${GN}scp -r /path/to/circl8_astro/* <vm-user>@<vm-ip>:${LANDING_SOURCE_PATH}/${CL}"
+    echo -e "${BL}Copy example:${CL}"
+    echo -e "  ${GN}scp -r /path/to/circl8_astro/* ${VM_COPY_TARGET}:${LANDING_SOURCE_PATH}/${CL}"
+    echo ""
+    echo -e "${YW}If you use an SSH alias, you may replace the detected target with that alias.${CL}"
 }
 
 function print_safety_summary() {
     section "SAFETY"
-    aligned_status_line "Runtime changes" "not-run" "$GN"
-    aligned_status_line "Directory creation" "not-run" "$GN"
-    aligned_status_line ".env writes" "not-run" "$GN"
-    aligned_status_line "Image downloads" "not-run" "$GN"
-    aligned_status_line "Container lifecycle" "not-run" "$GN"
-    aligned_status_line "Final marker" "not-run" "$GN"
-    aligned_status_line "Authentik API writes" "no" "$GN"
-    aligned_status_line "Postiz changes" "no" "$GN"
-    aligned_status_line "n8n changes" "no" "$GN"
-    aligned_status_line "Private Astro output" "no" "$GN"
+    echo -e "${YW}This phase made no deploy, build, copy, directory, container, or .env changes.${CL}"
+    aligned_status_line "Final marker" "not written" "$GN"
+    aligned_status_line "Authentik writes" "no" "$GN"
 }
 
 function decide_preflight_result() {
@@ -797,6 +902,9 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT66_BUILD=${SCRIPT_BUILD}"
         printf '%s\n' "SCRIPT66_VERIFY_STATUS=${SCRIPT66_VERIFY_STATUS}"
         printf '%s\n' "SCRIPT66_DEPLOYMENT=${SCRIPT66_DEPLOYMENT}"
+        printf '%s\n' "SCRIPT66_LANDING_IMAGE_ENV_STATUS=${LANDING_IMAGE_ENV_STATUS}"
+        printf '%s\n' "SCRIPT66_LANDING_EFFECTIVE_IMAGE=${LANDING_EFFECTIVE_IMAGE}"
+        printf '%s\n' "SCRIPT66_COPY_TARGET=${VM_COPY_TARGET}"
         printf '%s\n' "SCRIPT66_CONTAINERS=${SCRIPT66_CONTAINERS}"
         printf '%s\n' "SCRIPT66_HEALTH_STATUS=${SCRIPT66_HEALTH_STATUS}"
         printf '%s\n' "SCRIPT66_LANDING_HOST=${LANDING_HOST}"
@@ -837,25 +945,9 @@ function write_verify_report() {
 
 function print_final_summary() {
     section_flash_success "FINISHED"
-    mini_header "Preflight"
-    final_line "Status" "$SCRIPT66_STATUS" "$(status_color_for_value "$SCRIPT66_STATUS")"
     final_line "Verification" "$SCRIPT66_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT66_VERIFY_STATUS")"
-    final_line "Deployment" "$SCRIPT66_DEPLOYMENT" "$GN"
-    final_line "Template inspection" "$SCRIPT66_TEMPLATE_INSPECTION" "$(status_color_for_value "$SCRIPT66_TEMPLATE_INSPECTION")"
-    final_line "Astro source" "$SCRIPT66_ASTRO_SOURCE_STATUS" "$(status_color_for_value "$SCRIPT66_ASTRO_SOURCE_STATUS")"
-    final_line "Runtime compose" "$SCRIPT66_RUNTIME_COMPOSE_STATE" "$(status_color_for_value "$SCRIPT66_RUNTIME_COMPOSE_STATE")"
-
-    mini_header "Landing"
-    final_line "URL" "$LANDING_URL" "$GN"
-    final_line "WWW URL" "$LANDING_WWW_URL" "$GN"
-    final_line "Source path" "$LANDING_SOURCE_PATH" "$BL"
-    final_line "Appdata path" "$LANDING_APPDATA_PATH" "$BL"
-
-    mini_header "Next phase"
-    final_line "Action" "manual source copy/build/deploy" "$YW"
-    final_line "Ready" "$SCRIPT66_READY_FOR_DEPLOY_PHASE" "$(status_color_for_value "$SCRIPT66_READY_FOR_DEPLOY_PHASE")"
+    final_line "Ready for source-copy phase" "$SCRIPT66_READY_FOR_DEPLOY_PHASE" "$(status_color_for_value "$SCRIPT66_READY_FOR_DEPLOY_PHASE")"
     final_line "Verify log" "$VERIFY_LOG" "$BL"
-    final_line "Final marker" "not written" "$GN"
 }
 
 function init_script() {
@@ -879,7 +971,6 @@ function main() {
     print_handoff_summary
     print_plan
     print_landing_state_inspection
-    print_template_inspection
     print_copy_source_plan
     print_safety_summary
     decide_preflight_result
