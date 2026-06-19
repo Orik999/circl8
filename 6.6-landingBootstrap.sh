@@ -6,7 +6,7 @@ shopt -s inherit_errexit nullglob
 #  Project Circl8 - Script 6.6 Landing Bootstrap
 # =========================================================
 # Script 6.6 prepares the public Astro landing-site bootstrap lane.
-# This v1.0.3 phase is read-only/preflight only: it inspects context,
+# This v1.0.4 phase is read-only/preflight only: it inspects context,
 # source/appdata/template/runtime state, and writes a verification report.
 # It does not build, copy, deploy, create directories, write .env values,
 # or write the final landing completion marker.
@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.6-landingBootstrap.sh"
-SCRIPT_VERSION="v1.0.3"
+SCRIPT_VERSION="v1.0.4"
 SCRIPT_UPDATED="2026-06-19"
-SCRIPT_BUILD="preflight-runtime-blocker-fix"
+SCRIPT_BUILD="preflight-ui-layout-restoration"
 
 UI_LABEL_WIDTH="34"
 LOG_FILE="/var/log/circl8-landing.log"
@@ -191,11 +191,13 @@ function elevate_to_root_if_needed() {
 function header_info() {
 cat <<'BANNER'
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Project Circl8
-  6.6 Landing
-  Read-only preflight
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╔════════════════════════════════════════════════════════════╗
+║                       Project Circl8                      ║
+║                                                            ║
+║                       6.6 Landing                         ║
+║                    Script 6.6 Landing                     ║
+║                    Read-only preflight                    ║
+╚════════════════════════════════════════════════════════════╝
 
 BANNER
 }
@@ -306,14 +308,13 @@ function validate_dependencies() {
 }
 
 function detect_docker_access() {
-    section "DOCKER ACCESS CHECK"
     msg_info "Checking Docker access"
 
     if ! command -v docker >/dev/null 2>&1; then
         DOCKER_AVAILABLE="no"
         SCRIPT66_CONTAINERS="not-run"
         msg_warn "DOCKER COMMAND NOT FOUND; CONTAINER INSPECTION DEFERRED"
-        aligned_status_line "Docker" "deferred" "$YW"
+        aligned_status_line "Docker access" "missing" "$YW"
         return 0
     fi
 
@@ -321,7 +322,7 @@ function detect_docker_access() {
         DOCKER_AVAILABLE="yes"
         DOCKER_NEEDS_SUDO="no"
         msg_ok "DOCKER ACCESS CONFIRMED"
-        aligned_status_line "Docker" "current user" "$GN"
+        aligned_status_line "Docker access" "current user" "$GN"
         return 0
     fi
 
@@ -329,14 +330,14 @@ function detect_docker_access() {
         DOCKER_AVAILABLE="yes"
         DOCKER_NEEDS_SUDO="yes"
         msg_ok "DOCKER ACCESS CONFIRMED WITH SUDO"
-        aligned_status_line "Docker" "sudo fallback" "$GN"
+        aligned_status_line "Docker access" "sudo" "$GN"
         return 0
     fi
 
     DOCKER_AVAILABLE="no"
     SCRIPT66_CONTAINERS="not-run"
     msg_warn "DOCKER DAEMON NOT REACHABLE; CONTAINER INSPECTION DEFERRED"
-    aligned_status_line "Docker" "deferred" "$YW"
+    aligned_status_line "Docker access" "missing" "$YW"
 }
 
 function docker_read() {
@@ -551,7 +552,9 @@ function print_handoff_summary() {
     section "HANDOFF"
     aligned_status_line "Script 6.4" "$SCRIPT64_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT64_VERIFY_STATUS")"
     aligned_status_line "Script 6.5" "$SCRIPT65_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT65_VERIFY_STATUS")"
-    aligned_status_line "Ready" "$SCRIPT65_READY_FOR_SCRIPT66" "$(status_color_for_value "$SCRIPT65_READY_FOR_SCRIPT66")"
+    aligned_status_line "Ready for Script 6.6" "$SCRIPT65_READY_FOR_SCRIPT66" "$(status_color_for_value "$SCRIPT65_READY_FOR_SCRIPT66")"
+    aligned_status_line "Domain" "$DOMAIN_VALUE" "$GN"
+    aligned_status_line "Landing host" "$LANDING_HOST" "$GN"
     msg_ok "SCRIPT 6.6 HANDOFF PASSED"
 }
 
@@ -737,7 +740,6 @@ function template_checks_display_status() {
 }
 
 function print_landing_state_inspection() {
-    section "CURRENT STATE"
     inspect_landing_source
     inspect_landing_appdata
     inspect_runtime_compose
@@ -751,7 +753,6 @@ function print_landing_state_inspection() {
     aligned_status_line "Static web root" "$(appdata_display_status)" "$(status_color_for_value "$(appdata_display_status)")"
     aligned_status_line "Runtime compose" "$SCRIPT66_RUNTIME_COMPOSE_STATE" "$(status_color_for_value "$SCRIPT66_RUNTIME_COMPOSE_STATE")"
     aligned_status_line "Template" "$(template_display_status)" "$(status_color_for_value "$SCRIPT66_TEMPLATE_INSPECTION")"
-    aligned_status_line "Checks" "$(template_checks_display_status)" "$(status_color_for_value "$SCRIPT66_TEMPLATE_INSPECTION")"
     aligned_status_line "Container" "$(container_display_status)" "$(status_color_for_value "$(container_display_status)")"
     aligned_status_line "Route" "$SCRIPT66_ROUTE_STATUS" "$YW"
 }
@@ -830,8 +831,6 @@ function print_template_inspection() {
 #  PLAN / SAFETY / REPORT
 # =========================================================
 function print_plan() {
-    section "LANDING TARGET"
-    aligned_status_line "Domain" "$DOMAIN_VALUE" "$GN"
     aligned_status_line "Public URL" "$LANDING_URL" "$GN"
     aligned_status_line "WWW URL" "$LANDING_WWW_URL" "$GN"
     aligned_status_line "Middleware" "chain-secure@file" "$GN"
@@ -841,7 +840,6 @@ function print_plan() {
 }
 
 function print_copy_source_plan() {
-    section "COPY SOURCE PLAN"
     echo -e "${YW}The private Astro landing source stays local/private and is not embedded in this script.${CL}"
     echo ""
     aligned_status_line "Source path" "$LANDING_SOURCE_PATH" "$BL"
@@ -854,10 +852,28 @@ function print_copy_source_plan() {
 }
 
 function print_safety_summary() {
-    section "SAFETY"
     echo -e "${YW}This phase made no deploy, build, copy, directory, container, or .env changes.${CL}"
     aligned_status_line "Final marker" "not written" "$GN"
     aligned_status_line "Authentik writes" "no" "$GN"
+}
+
+function print_preflight_summary() {
+    section "PREFLIGHT"
+
+    mini_header "Docker"
+    detect_docker_access
+
+    mini_header "Landing target"
+    print_plan
+
+    mini_header "Current state"
+    print_landing_state_inspection
+
+    mini_header "Copy source plan"
+    print_copy_source_plan
+
+    mini_header "Safety"
+    print_safety_summary
 }
 
 function decide_preflight_result() {
@@ -946,6 +962,7 @@ function print_final_summary() {
     final_line "Verification" "$SCRIPT66_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT66_VERIFY_STATUS")"
     final_line "Ready for source-copy phase" "$SCRIPT66_READY_FOR_DEPLOY_PHASE" "$(status_color_for_value "$SCRIPT66_READY_FOR_DEPLOY_PHASE")"
     final_line "Verify log" "$VERIFY_LOG" "$BL"
+    final_line "Final marker" "not written" "$GN"
 }
 
 function init_script() {
@@ -965,12 +982,8 @@ function main() {
     init_script "$@"
     validate_handoff_gates
     load_project_context
-    detect_docker_access
     print_handoff_summary
-    print_plan
-    print_landing_state_inspection
-    print_copy_source_plan
-    print_safety_summary
+    print_preflight_summary
     decide_preflight_result
     write_verify_report
     print_final_summary
