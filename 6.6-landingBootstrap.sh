@@ -6,7 +6,7 @@ shopt -s inherit_errexit nullglob
 #  Project Circl8 - Script 6.6 Landing Bootstrap
 # =========================================================
 # Script 6.6 prepares the public Astro landing-site bootstrap lane.
-# This v1.0.4 phase is read-only/preflight only: it inspects context,
+# This v1.0.5 phase is read-only/preflight only: it inspects context,
 # source/appdata/template/runtime state, and writes a verification report.
 # It does not build, copy, deploy, create directories, write .env values,
 # or write the final landing completion marker.
@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.6-landingBootstrap.sh"
-SCRIPT_VERSION="v1.0.4"
+SCRIPT_VERSION="v1.0.5"
 SCRIPT_UPDATED="2026-06-19"
-SCRIPT_BUILD="preflight-ui-layout-restoration"
+SCRIPT_BUILD="standard-ascii-banner-restoration"
 
 UI_LABEL_WIDTH="34"
 LOG_FILE="/var/log/circl8-landing.log"
@@ -191,14 +191,14 @@ function elevate_to_root_if_needed() {
 function header_info() {
 cat <<'BANNER'
 
-╔════════════════════════════════════════════════════════════╗
-║                       Project Circl8                      ║
-║                                                            ║
-║                       6.6 Landing                         ║
-║                    Script 6.6 Landing                     ║
-║                    Read-only preflight                    ║
-╚════════════════════════════════════════════════════════════╝
+    ██████╗      ██████╗      ██╗      █████╗ ███╗   ██╗██████╗ ██╗███╗   ██╗ ██████╗
+   ██╔════╝     ██╔════╝      ██║     ██╔══██╗████╗  ██║██╔══██╗██║████╗  ██║██╔════╝
+   ███████╗     ███████╗      ██║     ███████║██╔██╗ ██║██║  ██║██║██╔██╗ ██║██║  ███╗
+   ██╔═══██╗    ██╔═══██╗     ██║     ██╔══██║██║╚██╗██║██║  ██║██║██║╚██╗██║██║   ██║
+   ╚██████╔╝██╗ ╚██████╔╝     ███████╗██║  ██║██║ ╚████║██████╔╝██║██║ ╚████║╚██████╔╝
+    ╚═════╝ ╚═╝  ╚═════╝      ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═════╝ ╚═╝╚═╝  ╚═══╝ ╚═════╝
 
+                              6.6 landing
 BANNER
 }
 
