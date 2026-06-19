@@ -26,9 +26,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.6-landingBootstrap.sh"
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 SCRIPT_UPDATED="2026-06-19"
-SCRIPT_BUILD="landing-preflight-skeleton"
+SCRIPT_BUILD="process-substitution-sudo-handoff-fix"
 
 UI_LABEL_WIDTH="34"
 LOG_FILE="/var/log/circl8-landing.log"
@@ -118,13 +118,37 @@ function validate_handoff_script_shape() {
     return 0
 }
 
+function download_handoff_script() {
+    local dest="$1"
+    local url="${RAW_BASE_FALLBACK%/}/${SCRIPT_SOURCE}"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o "$dest"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$dest" "$url"
+    else
+        return 1
+    fi
+}
+
 function prepare_process_substitution_handoff() {
     local source_path="$1" dest="$2"
     : > "$dest" || return 1
+
+    # A /dev/fd or /proc/*/fd process-substitution path can point at a stream
+    # that bash has already partially consumed. Try the direct copy first, then
+    # verify the copied script is complete before trusting it.
     if [ -r "$source_path" ]; then
         cat "$source_path" > "$dest" 2>/dev/null || true
     fi
+
+    if ! validate_handoff_script_shape "$dest"; then
+        : > "$dest" || return 1
+        download_handoff_script "$dest" || return 1
+    fi
+
     validate_handoff_script_shape "$dest" || return 1
+    chmod 700 "$dest" 2>/dev/null || return 1
     return 0
 }
 
