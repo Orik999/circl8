@@ -6,9 +6,10 @@ shopt -s inherit_errexit nullglob
 #  Project Circl8 - Script 6.6 Landing Bootstrap
 # =========================================================
 # Script 6.6 prepares the public Astro landing-site bootstrap lane.
-# This v1.0.5 phase is read-only/preflight only: it inspects context,
-# source/appdata/template/runtime state, and writes a verification report.
-# It does not build, copy, deploy, create directories, write .env values,
+# This v1.1.0 phase keeps the preflight preview, then can run a confirmed
+# setup/source-copy workflow: create landing directories, sync/validate the
+# landing compose template, and pause for private Astro source copy.
+# It does not build Astro, publish dist, start containers, write .env values,
 # or write the final landing completion marker.
 
 YW="$(printf '\033[33m')"
@@ -26,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.6-landingBootstrap.sh"
-SCRIPT_VERSION="v1.0.5"
+SCRIPT_VERSION="v1.1.0"
 SCRIPT_UPDATED="2026-06-19"
-SCRIPT_BUILD="standard-ascii-banner-restoration"
+SCRIPT_BUILD="landing-setup-start-source-copy"
 
 UI_LABEL_WIDTH="34"
 LOG_FILE="/var/log/circl8-landing.log"
@@ -106,6 +107,10 @@ SCRIPT66_ROUTE_LABELS="not-run"
 SCRIPT66_ROUTE_STATUS="deferred"
 SCRIPT66_AUTHENTIK_WRITES="no"
 SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+SCRIPT66_READY_FOR_BUILD_PHASE="no"
+SCRIPT66_SETUP_STARTED="no"
+SCRIPT66_DIRS_READY="no"
+SCRIPT66_COMPOSE_SYNC_STATUS="skipped"
 
 # =========================================================
 #  ROOT / SUDO HANDOFF
@@ -248,6 +253,69 @@ function aligned_status_line() {
 
 function final_line() { aligned_status_line "$1" "${2:-unknown}" "${3:-}" "$UI_LABEL_WIDTH"; }
 
+function tty_available() {
+    { : < /dev/tty; } >/dev/null 2>&1 && { : > /dev/tty; } >/dev/null 2>&1
+}
+
+function tty_print() {
+    if tty_available; then
+        echo -ne "$*" > /dev/tty
+    else
+        echo -ne "$*" >&2
+    fi
+}
+
+function tty_println() {
+    if tty_available; then
+        echo -e "$*" > /dev/tty
+    else
+        echo -e "$*" >&2
+    fi
+}
+
+function prompt_start_landing_setup() {
+    local answer=""
+    echo ""
+    if ! tty_available; then
+        msg_warn "NO INTERACTIVE TTY AVAILABLE; LANDING SETUP NOT STARTED"
+        return 1
+    fi
+
+    tty_print "${YW}Start landing setup now? [y/N]: ${CL}"
+    IFS= read -r answer < /dev/tty || answer=""
+    answer="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$answer" in
+        y|yes)
+            msg_ok "Landing setup confirmed"
+            return 0
+            ;;
+        *)
+            msg_ok "Landing setup skipped — no changes made"
+            return 1
+            ;;
+    esac
+}
+
+function prompt_source_copy_action() {
+    local answer=""
+    if ! tty_available; then
+        printf 's'
+        return 0
+    fi
+
+    while true; do
+        tty_print "${YW}Press Enter after copy is complete to check source, s = skip setup cleanly, q = quit: ${CL}"
+        IFS= read -r answer < /dev/tty || answer="s"
+        answer="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+        case "$answer" in
+            "") printf 'check'; return 0 ;;
+            s|skip) printf 'skip'; return 0 ;;
+            q|quit) printf 'quit'; return 0 ;;
+            *) tty_println "${WARN} ${YW}Invalid selection. Press Enter, s, or q.${CL}" ;;
+        esac
+    done
+}
+
 # =========================================================
 #  LOGGING / CLEANUP
 # =========================================================
@@ -299,8 +367,19 @@ function root_file_not_empty() { test -s "$1"; }
 function root_read_file() { cat "$1"; }
 function write_root_file() { cat > "$1"; }
 
+function download_file() {
+    local url="$1" dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o "$dest"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$dest" "$url"
+    else
+        return 1
+    fi
+}
+
 function validate_dependencies() {
-    local cmds=(awk cat command date grep mktemp rm sed sort stat tee test tr python3)
+    local cmds=(awk cat command cp date grep mkdir mktemp mv rm sed sort stat tee test tr python3)
     local cmd=""
     for cmd in "${cmds[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 || msg_error "Required command not found: ${cmd}"
@@ -876,7 +955,227 @@ function print_preflight_summary() {
     print_safety_summary
 }
 
+
+function validate_landing_compose_file_strict() {
+    local compose="$1" noncomment_file="" failures=() networks=""
+    [ -s "$compose" ] || failures+=("compose file empty")
+
+    noncomment_file="$(mktemp /tmp/circl8-landing-compose-strict.XXXXXX)"
+    TEMP_FILES+=("$noncomment_file")
+    uncommented_file_content "$compose" > "$noncomment_file"
+
+    template_check_fixed "$compose" 'image: ${LANDING_IMAGE:-nginx:alpine}' || failures+=("image interpolation missing")
+    template_check_fixed "$compose" 'Host(`${LANDING_HOST}`) || Host(`${LANDING_WWW_HOST}`)' || failures+=("landing Host rule missing expected variables")
+    template_check_fixed "$compose" 'chain-secure@file' || failures+=("chain-secure@file missing")
+    ! template_check_fixed "$compose" 'chain-authentik@file' || failures+=("chain-authentik@file must not be used")
+    ! template_check_regex "$compose" 'forwardAuth|forwardauth|forward-auth' || failures+=("forward auth reference must not be present")
+    ! template_check_regex "$compose" 'circl8[.]co[.]uk' || failures+=("hardcoded public domain present")
+    ! template_check_regex "$noncomment_file" '^[[:space:]]+ports:[[:space:]]*$' || failures+=("host ports present")
+    ! template_check_regex "$noncomment_file" 'docker[.]sock|/var/run/docker[.]sock' || failures+=("Docker socket reference present")
+    template_check_fixed "$compose" '${DOCKER_DIR}/appdata/landing:/usr/share/nginx/html:ro' || failures+=("landing appdata read-only volume missing")
+    template_check_fixed "$compose" 'traefik.http.services.circl8-landing.loadbalancer.server.port=80' || failures+=("Traefik service port 80 missing")
+
+    networks="$(awk '
+        /^services:[[:space:]]*$/ {in_services=1; svc=""; in_networks=0; next}
+        in_services && /^[^[:space:]][A-Za-z0-9_.-]*:/ {in_services=0; svc=""; in_networks=0}
+        !in_services {next}
+        /^  circl8-landing:[[:space:]]*$/ {svc="circl8-landing"; in_networks=0; next}
+        /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ && $1 != "circl8-landing:" {svc=""; in_networks=0; next}
+        svc == "circl8-landing" && /^    networks:[[:space:]]*$/ {in_networks=1; next}
+        in_networks && /^    [A-Za-z0-9_.-]+:/ {in_networks=0}
+        in_networks && /^[[:space:]]*-[[:space:]]*[A-Za-z0-9_.-]+/ {gsub(/^[[:space:]]*-[[:space:]]*/, ""); print}
+    ' "$compose" | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    [ "$networks" = "t2_proxy" ] || failures+=("service must use only t2_proxy network")
+
+    if [ "${#failures[@]}" -gt 0 ]; then
+        SCRIPT66_COMPOSE_SYNC_STATUS="failed"
+        SCRIPT66_TEMPLATE_INSPECTION="failed"
+        SCRIPT66_TEMPLATE_CHECK_SUMMARY="${failures[*]}"
+        fail_with_report "Landing compose validation failed: ${failures[*]}"
+    fi
+
+    SCRIPT66_TEMPLATE_SOURCE="runtime-sync"
+    SCRIPT66_TEMPLATE_INSPECTION="pass"
+    SCRIPT66_TEMPLATE_CHECK_SUMMARY="PASS"
+    return 0
+}
+
+function prepare_landing_directories() {
+    msg_info "Creating landing directories"
+    mkdir -p "$LANDING_SOURCE_PATH" "$LANDING_APPDATA_PATH" "$LANDING_BACKUP_DIR" "$COMPOSE_DIR"
+    if [ -n "${DOCKER_USER:-}" ] && id "$DOCKER_USER" >/dev/null 2>&1; then
+        chown "$DOCKER_USER:$DOCKER_USER" "$LANDING_SOURCE_PATH" "$LANDING_APPDATA_PATH" "$LANDING_BACKUP_DIR" "$COMPOSE_DIR" 2>/dev/null || true
+    fi
+    SCRIPT66_DIRS_READY="yes"
+    msg_ok "Landing directories ready"
+}
+
+function sync_landing_runtime_compose() {
+    local template_tmp="" install_tmp=""
+    template_tmp="$(mktemp /tmp/circl8-landing-compose-download.XXXXXX.yml)"
+    TEMP_FILES+=("$template_tmp")
+    install_tmp="${LANDING_RUNTIME_COMPOSE}.tmp.$$"
+    TEMP_FILES+=("$install_tmp")
+
+    msg_info "Downloading landing compose"
+    download_file "$LANDING_TEMPLATE_URL" "$template_tmp" || fail_with_report "Failed to download landing compose template."
+    root_file_not_empty "$template_tmp" || fail_with_report "Downloaded landing compose template is empty."
+    msg_ok "Landing compose downloaded"
+
+    msg_info "Validating landing compose"
+    validate_landing_compose_file_strict "$template_tmp"
+    msg_ok "Landing compose valid"
+
+    msg_info "Syncing landing compose"
+    cp -f "$template_tmp" "$install_tmp"
+    mv -f "$install_tmp" "$LANDING_RUNTIME_COMPOSE"
+    if [ -n "${DOCKER_USER:-}" ] && id "$DOCKER_USER" >/dev/null 2>&1; then
+        chown "$DOCKER_USER:$DOCKER_USER" "$LANDING_RUNTIME_COMPOSE" 2>/dev/null || true
+    fi
+    SCRIPT66_COMPOSE_SYNC_STATUS="valid"
+    SCRIPT66_RUNTIME_COMPOSE_STATE="present"
+    SCRIPT66_RUNTIME_COMPOSE_SYNC_NEEDED="no"
+    msg_ok "Landing compose synced"
+}
+
+function print_active_source_copy_instructions() {
+    echo ""
+    echo -e "${YW}Private Astro source stays local/private and is not committed to GitHub.${CL}"
+    echo ""
+    aligned_status_line "Source staging path" "$LANDING_SOURCE_PATH" "$BL"
+    aligned_status_line "Detected copy target" "$VM_COPY_TARGET" "$(status_color_for_value "$([ "$VM_COPY_TARGET" = "<vm-user>@<vm-ip>" ] && printf deferred || printf detected)")"
+    echo ""
+    echo -e "${BL}SCP command:${CL}"
+    echo -e "  ${GN}scp -r /path/to/circl8_astro/* ${VM_COPY_TARGET}:${LANDING_SOURCE_PATH}/${CL}"
+    echo ""
+    echo -e "${YW}If you use an SSH alias, you may replace the detected target with that alias.${CL}"
+    echo ""
+}
+
+function validate_landing_source_ready() {
+    local source="$LANDING_SOURCE_PATH" missing=()
+
+    if ! root_file_not_empty "${source}/package.json"; then
+        missing+=("package.json")
+        SCRIPT66_ASTRO_PACKAGE_JSON="missing"
+    else
+        SCRIPT66_ASTRO_PACKAGE_JSON="present"
+    fi
+
+    if [ -f "${source}/astro.config.mjs" ] || [ -f "${source}/astro.config.js" ] || [ -f "${source}/astro.config.ts" ]; then
+        SCRIPT66_ASTRO_CONFIG="present"
+    else
+        missing+=("astro.config.*")
+        SCRIPT66_ASTRO_CONFIG="missing"
+    fi
+
+    if [ "$SCRIPT66_ASTRO_PACKAGE_JSON" = "present" ] && package_has_build_script "${source}/package.json"; then
+        SCRIPT66_ASTRO_BUILD_SCRIPT="present"
+    else
+        missing+=("package.json build script")
+        SCRIPT66_ASTRO_BUILD_SCRIPT="missing"
+    fi
+
+    SCRIPT66_ASTRO_DIST_STATUS="not-run"
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        SCRIPT66_ASTRO_SOURCE_STATUS="incomplete"
+        printf '%s\n' "${missing[@]}"
+        return 1
+    fi
+
+    SCRIPT66_ASTRO_SOURCE_STATUS="valid"
+    return 0
+}
+
+function wait_for_landing_source_copy() {
+    local action="" missing_items=""
+
+    print_active_source_copy_instructions
+    while true; do
+        action="$(prompt_source_copy_action)"
+        case "$action" in
+            skip|quit)
+                SCRIPT66_ASTRO_SOURCE_STATUS="skipped"
+                SCRIPT66_READY_FOR_BUILD_PHASE="no"
+                SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+                msg_ok "Landing source copy skipped"
+                return 1
+                ;;
+        esac
+
+        msg_info "Checking landing source"
+        if missing_items="$(validate_landing_source_ready)"; then
+            msg_ok "Landing source valid"
+            echo -e " ${CM} ${GN}package.json found${CL}"
+            echo -e " ${CM} ${GN}Astro config found${CL}"
+            echo -e " ${CM} ${GN}build script found${CL}"
+            echo -e " ${CM} ${GN}Landing source valid${CL}"
+            SCRIPT66_READY_FOR_BUILD_PHASE="yes"
+            SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+            return 0
+        fi
+
+        msg_warn "LANDING SOURCE INCOMPLETE"
+        echo -e "${YW}Missing:${CL}"
+        printf '%s\n' "$missing_items" | while IFS= read -r item; do
+            [ -n "$item" ] && echo -e "  ${WARN} ${YW}${item}${CL}"
+        done
+        print_active_source_copy_instructions
+    done
+}
+
+function run_landing_setup_start() {
+    section "START DEPLOYING LANDING"
+    SCRIPT66_SETUP_STARTED="yes"
+    SCRIPT66_STATUS="setup-started"
+    SCRIPT66_DEPLOYMENT="not-run"
+    SCRIPT66_CONTAINERS="not-run"
+    SCRIPT66_HEALTH_STATUS="not-run"
+    SCRIPT66_ROUTE_STATUS="deferred"
+    SCRIPT66_AUTHENTIK_WRITES="no"
+
+    prepare_landing_directories
+    sync_landing_runtime_compose
+
+    if wait_for_landing_source_copy; then
+        SCRIPT66_STATUS="source-ready"
+        SCRIPT66_VERIFY_STATUS="PASS"
+        SCRIPT66_READY_FOR_BUILD_PHASE="yes"
+        SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+    else
+        SCRIPT66_STATUS="setup-skipped"
+        SCRIPT66_VERIFY_STATUS="WARN"
+        SCRIPT66_READY_FOR_BUILD_PHASE="no"
+        SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+    fi
+}
+
 function decide_preflight_result() {
+    if [ "${SCRIPT66_STATUS:-preflight}" = "source-ready" ]; then
+        SCRIPT66_VERIFY_STATUS="PASS"
+        SCRIPT66_DEPLOYMENT="not-run"
+        SCRIPT66_HEALTH_STATUS="not-run"
+        SCRIPT66_AUTHENTIK_WRITES="no"
+        SCRIPT66_READY_FOR_BUILD_PHASE="yes"
+        SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+        return 0
+    fi
+
+    if [ "${SCRIPT66_STATUS:-preflight}" = "setup-skipped" ]; then
+        if [ "${SCRIPT66_SETUP_STARTED:-no}" = "yes" ]; then
+            SCRIPT66_VERIFY_STATUS="WARN"
+        else
+            SCRIPT66_VERIFY_STATUS="PASS"
+        fi
+        SCRIPT66_DEPLOYMENT="not-run"
+        SCRIPT66_HEALTH_STATUS="not-run"
+        SCRIPT66_AUTHENTIK_WRITES="no"
+        SCRIPT66_READY_FOR_BUILD_PHASE="no"
+        SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+        return 0
+    fi
+
     SCRIPT66_STATUS="preflight"
     SCRIPT66_DEPLOYMENT="not-run"
     SCRIPT66_HEALTH_STATUS="not-run"
@@ -893,7 +1192,7 @@ function decide_preflight_result() {
             ;;
         pass|deferred)
             SCRIPT66_VERIFY_STATUS="PASS"
-            SCRIPT66_READY_FOR_DEPLOY_PHASE="yes"
+            SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
             ;;
         *)
             SCRIPT66_VERIFY_STATUS="WARN"
@@ -916,6 +1215,9 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT66_BUILD=${SCRIPT_BUILD}"
         printf '%s\n' "SCRIPT66_VERIFY_STATUS=${SCRIPT66_VERIFY_STATUS}"
         printf '%s\n' "SCRIPT66_DEPLOYMENT=${SCRIPT66_DEPLOYMENT}"
+        printf '%s\n' "SCRIPT66_SETUP_STARTED=${SCRIPT66_SETUP_STARTED}"
+        printf '%s\n' "SCRIPT66_DIRS_READY=${SCRIPT66_DIRS_READY}"
+        printf '%s\n' "SCRIPT66_COMPOSE_SYNC_STATUS=${SCRIPT66_COMPOSE_SYNC_STATUS}"
         printf '%s\n' "SCRIPT66_LANDING_IMAGE_ENV_STATUS=${LANDING_IMAGE_ENV_STATUS}"
         printf '%s\n' "SCRIPT66_LANDING_EFFECTIVE_IMAGE=${LANDING_EFFECTIVE_IMAGE}"
         printf '%s\n' "SCRIPT66_COPY_TARGET=${VM_COPY_TARGET}"
@@ -938,7 +1240,7 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT66_ASTRO_CONFIG=${SCRIPT66_ASTRO_CONFIG}"
         printf '%s\n' "SCRIPT66_ASTRO_BUILD_SCRIPT=${SCRIPT66_ASTRO_BUILD_SCRIPT}"
         printf '%s\n' "SCRIPT66_ASTRO_BUILD_STATUS=not-run"
-        printf '%s\n' "SCRIPT66_DIST_STATUS=${SCRIPT66_ASTRO_DIST_STATUS}"
+        printf '%s\n' "SCRIPT66_DIST_STATUS=not-run"
         printf '%s\n' "SCRIPT66_APPDATA_STATUS=${SCRIPT66_APPDATA_STATUS}"
         printf '%s\n' "SCRIPT66_APPDATA_INDEX_STATUS=${SCRIPT66_APPDATA_INDEX_STATUS}"
         printf '%s\n' "SCRIPT66_RUNTIME_COMPOSE_STATE=${SCRIPT66_RUNTIME_COMPOSE_STATE}"
@@ -953,6 +1255,7 @@ function write_verify_report() {
         printf '%s\n' "SCRIPT65_VERIFY_STATUS=${SCRIPT65_VERIFY_STATUS}"
         printf '%s\n' "SCRIPT65_DEPLOYMENT=${SCRIPT65_DEPLOYMENT}"
         printf '%s\n' "SCRIPT65_READY_FOR_SCRIPT66=${SCRIPT65_READY_FOR_SCRIPT66}"
+        printf '%s\n' "SCRIPT66_READY_FOR_BUILD_PHASE=${SCRIPT66_READY_FOR_BUILD_PHASE}"
         printf '%s\n' "SCRIPT66_READY_FOR_DEPLOY_PHASE=${SCRIPT66_READY_FOR_DEPLOY_PHASE}"
     } | write_root_file "$VERIFY_LOG"
 }
@@ -960,7 +1263,8 @@ function write_verify_report() {
 function print_final_summary() {
     section_flash_success "FINISHED"
     final_line "Verification" "$SCRIPT66_VERIFY_STATUS" "$(status_color_for_value "$SCRIPT66_VERIFY_STATUS")"
-    final_line "Ready for source-copy phase" "$SCRIPT66_READY_FOR_DEPLOY_PHASE" "$(status_color_for_value "$SCRIPT66_READY_FOR_DEPLOY_PHASE")"
+    final_line "Status" "$SCRIPT66_STATUS" "$(status_color_for_value "$SCRIPT66_STATUS")"
+    final_line "Ready for build phase" "$SCRIPT66_READY_FOR_BUILD_PHASE" "$(status_color_for_value "$SCRIPT66_READY_FOR_BUILD_PHASE")"
     final_line "Verify log" "$VERIFY_LOG" "$BL"
     final_line "Final marker" "not written" "$GN"
 }
@@ -984,6 +1288,16 @@ function main() {
     load_project_context
     print_handoff_summary
     print_preflight_summary
+
+    if prompt_start_landing_setup; then
+        run_landing_setup_start
+    else
+        SCRIPT66_SETUP_STARTED="no"
+        SCRIPT66_STATUS="setup-skipped"
+        SCRIPT66_READY_FOR_BUILD_PHASE="no"
+        SCRIPT66_READY_FOR_DEPLOY_PHASE="no"
+    fi
+
     decide_preflight_result
     write_verify_report
     print_final_summary
