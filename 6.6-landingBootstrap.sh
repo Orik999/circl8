@@ -6,7 +6,7 @@ shopt -s inherit_errexit nullglob
 #  Project Circl8 - Script 6.6 Landing Bootstrap
 # =========================================================
 # Script 6.6 prepares the public Astro landing-site bootstrap lane.
-# This v1.1.1 phase keeps the preflight preview, then can run a confirmed
+# This v1.1.2 phase keeps the preflight preview, then can run a confirmed
 # setup/source-copy workflow: create landing directories, sync/validate the
 # landing compose template, and pause for private Astro source copy.
 # It does not build Astro, publish dist, start containers, write .env values,
@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.6-landingBootstrap.sh"
-SCRIPT_VERSION="v1.1.1"
+SCRIPT_VERSION="v1.1.2"
 SCRIPT_UPDATED="2026-06-19"
-SCRIPT_BUILD="setup-flow-ux-alignment"
+SCRIPT_BUILD="preflight-source-copy-plan-placement-fix"
 
 UI_LABEL_WIDTH="34"
 LOG_FILE="/var/log/circl8-landing.log"
@@ -921,12 +921,6 @@ function print_plan() {
     aligned_status_line "Effective image" "$LANDING_EFFECTIVE_IMAGE" "$GN"
 }
 
-function print_copy_source_plan() {
-    echo -e "${YW}Private source copy is shown only after setup is confirmed.${CL}"
-    aligned_status_line "Copy target" "$VM_COPY_TARGET" "$(status_color_for_value "$([ "$VM_COPY_TARGET" = "<vm-user>@<vm-ip>" ] && printf deferred || printf detected)")"
-    aligned_status_line "Setup action" "requires confirmation" "$YW"
-}
-
 function print_safety_summary() {
     echo -e "${YW}Setup requires confirmation. No build, deploy, container lifecycle, or .env changes run in this phase.${CL}"
     aligned_status_line "Final marker" "not written" "$GN"
@@ -944,9 +938,6 @@ function print_preflight_summary() {
 
     mini_header "Current state"
     print_landing_state_inspection
-
-    mini_header "Copy source plan"
-    print_copy_source_plan
 
     mini_header "Safety"
     print_safety_summary
@@ -1039,8 +1030,8 @@ function print_active_source_copy_instructions() {
     echo ""
     echo -e "${YW}Private Astro source stays local/private and is not committed to GitHub.${CL}"
     echo ""
-    aligned_status_line "Source staging path" "$LANDING_SOURCE_PATH" "$BL"
-    aligned_status_line "Detected copy target" "$VM_COPY_TARGET" "$(status_color_for_value "$([ "$VM_COPY_TARGET" = "<vm-user>@<vm-ip>" ] && printf deferred || printf detected)")"
+    aligned_status_line "Source path" "$LANDING_SOURCE_PATH" "$BL"
+    aligned_status_line "Copy target" "$VM_COPY_TARGET" "$(status_color_for_value "$([ "$VM_COPY_TARGET" = "<vm-user>@<vm-ip>" ] && printf deferred || printf detected)")"
     echo ""
     echo -e "${BL}Copy private Astro source now:${CL}"
     echo -e "  ${GN}scp -r /path/to/circl8_astro/* ${VM_COPY_TARGET}:${LANDING_SOURCE_PATH}/${CL}"
